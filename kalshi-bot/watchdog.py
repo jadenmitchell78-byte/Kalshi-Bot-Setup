@@ -175,17 +175,29 @@ def start_bot(script_name, log_name):
 # ── Self-Healing Checks ──────────────────────────────────────────────────────
 
 def perform_process_checks():
+    # 0. FOMC Minutes Sniper (long-running poll loop)
+    if not is_bot_running("fomc_minutes_sniper.py"):
+        print("fomc_minutes_sniper.py is offline. Restarting...")
+        cmd = "nohup python3 -u fomc_minutes_sniper.py --poll > fomc_minutes_sniper.log 2>&1 &"
+        try:
+            subprocess.Popen(cmd, shell=True)
+            send_telegram("⚠️ *Watchdog Recovery Alert*\n🏛️ `fomc_minutes_sniper.py` was detected *OFFLINE*. Successfully restarted process.")
+        except Exception as e:
+            print(f"Error restarting fomc_minutes_sniper: {e}")
+    # Note: kalshi_auto_trader.py is a shared library module — imported by social_trail_bot
+    # and fomc_minutes_sniper. It is NOT a standalone daemon and should not be monitored here.
+
     # 1. Web Dashboard (Critical UI Gateway)
     if not is_bot_running("web_dashboard.py"):
         print("web_dashboard.py is offline. Restarting...")
         if start_bot("web_dashboard.py", "web_dashboard.log"):
             send_telegram("⚠️ *Watchdog Recovery Alert*\n`web_dashboard.py` was detected *OFFLINE*. Successfully restarted process.")
 
-    # 2. Telegram Bot (Critical Notification Gateway)
-    if not is_bot_running("tg_bot.py"):
-        print("tg_bot.py is offline. Restarting...")
-        if start_bot("tg_bot.py", "tg_bot.log"):
-            send_telegram("⚠️ *Watchdog Recovery Alert*\n`tg_bot.py` (Telegram Gateway) was detected *OFFLINE*. Successfully restarted process.")
+    # 2. Telegram Bot (Critical Notification Gateway — optional, no file present)
+    # if not is_bot_running("tg_bot.py"):
+    #     print("tg_bot.py is offline. Restarting...")
+    #     if start_bot("tg_bot.py", "tg_bot.log"):
+    #         send_telegram("⚠️ *Watchdog Recovery Alert*\n`tg_bot.py` (Telegram Gateway) was detected *OFFLINE*. Successfully restarted process.")
 
     # 3. Base Scanner Bot (Only if configured as active)
     base_cfg = _rj(DEX_CONFIG)

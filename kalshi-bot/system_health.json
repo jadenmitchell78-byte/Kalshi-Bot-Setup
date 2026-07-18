@@ -1,0 +1,61 @@
+{
+  "timestamp": 1784403877,
+  "services": {
+    "watchdog": {
+      "name": "Watchdog Monitor",
+      "pid": 454,
+      "running": true,
+      "memory_bytes": 34205696,
+      "uptime_seconds": 78
+    },
+    "web_dashboard": {
+      "name": "Web Dashboard",
+      "pid": 465,
+      "running": true,
+      "memory_bytes": 41324544,
+      "uptime_seconds": 77
+    },
+    "tg_bot": {
+      "name": "Telegram Bot Gateway",
+      "pid": 0,
+      "running": false,
+      "memory_bytes": 0,
+      "uptime_seconds": 0
+    },
+    "dex_scanner_bot": {
+      "name": "Base Scanner Bot",
+      "pid": 0,
+      "running": false,
+      "memory_bytes": 0,
+      "uptime_seconds": 0
+    },
+    "solana_sniper_bot": {
+      "name": "Solana Sniper Bot",
+      "pid": 0,
+      "running": false,
+      "memory_bytes": 0,
+      "uptime_seconds": 0
+    },
+    "oanda_bot": {
+      "name": "OANDA Forex Bot",
+      "pid": 0,
+      "running": false,
+      "memory_bytes": 0,
+      "uptime_seconds": 0
+    },
+    "social_trail_bot": {
+      "name": "Social Trail Bot",
+      "pid": 488,
+      "running": true,
+      "memory_bytes": 39251968,
+      "uptime_seconds": 74
+    },
+    "tg_parlay_bot": {
+      "name": "Telegram Parlay Bot",
+      "pid": 0,
+      "running": false,
+      "memory_bytes": 0,
+      "uptime_seconds": 0
+    }
+  }
+}
