@@ -19,12 +19,8 @@
   "monitored_accounts_instagram": [],
 
   "nitter_instances": [
-    "https://nitter.net",
-    "https://nitter.poast.org",
-    "https://nitter.1d4.us",
-    "https://n.opnxng.com",
-    "https://nitter.tiekoetter.com"
+    "https://nitter.net"
   ],
 
-  "_note": "RSS/Nitter mode — no X API key required. Falls back to next Nitter instance if one is down. Set kalshi_use_demo to true to paper-trade."
+  "_note": "Only nitter.net is currently reachable from Replit. Other public instances are down. Set kalshi_use_demo to true to paper-trade."
 }

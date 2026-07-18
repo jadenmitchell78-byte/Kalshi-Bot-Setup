@@ -380,6 +380,32 @@ class KalshiWSManager:
 _rsa_key_cache = None
 _rsa_key_cache_path = None
 
+def _normalize_pem(raw: str) -> str:
+    """
+    Normalises a PEM private key regardless of how it was stored:
+      • Real newlines  → returned as-is
+      • Literal \\n sequences (JSON-escaped) → converted to newlines
+      • Single line with spaces (Replit secret storage flattens newlines)
+        → header/footer split out, base64 body chunked to 64-char lines
+    """
+    raw = raw.strip()
+    if "\n" in raw:
+        return raw
+    if "\\n" in raw:
+        return raw.replace("\\n", "\n")
+    # Space-separated — reconstruct proper PEM line wrapping
+    for begin_tag in [
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "-----BEGIN PRIVATE KEY-----",
+        "-----BEGIN EC PRIVATE KEY-----",
+    ]:
+        if begin_tag in raw:
+            end_tag = begin_tag.replace("BEGIN", "END")
+            inner = raw.replace(begin_tag, "").replace(end_tag, "").replace(" ", "")
+            chunks = [inner[i:i+64] for i in range(0, len(inner), 64)]
+            return begin_tag + "\n" + "\n".join(chunks) + "\n" + end_tag
+    return raw
+
 def _get_cached_rsa_key(key_path: str, raw_key_content: str = ""):
     """Returns a cached RSA private key object. Loads from disk only once per path."""
     global _rsa_key_cache, _rsa_key_cache_path
@@ -390,7 +416,7 @@ def _get_cached_rsa_key(key_path: str, raw_key_content: str = ""):
         with open(key_path, "rb") as f:
             key_bytes = f.read()
     elif raw_key_content:
-        key_bytes = raw_key_content.replace("\\n", "\n").encode("utf-8")
+        key_bytes = _normalize_pem(raw_key_content).encode("utf-8")
     if key_bytes:
         _rsa_key_cache = RSA.import_key(key_bytes)
         _rsa_key_cache_path = key_path
