@@ -20,8 +20,10 @@
 
   "nitter_instances": [
     "https://nitter.net",
-    "https://nitter.privacydev.net",
-    "https://nitter.poast.org"
+    "https://nitter.poast.org",
+    "https://nitter.1d4.us",
+    "https://n.opnxng.com",
+    "https://nitter.tiekoetter.com"
   ],
 
   "_note": "RSS/Nitter mode — no X API key required. Falls back to next Nitter instance if one is down. Set kalshi_use_demo to true to paper-trade."
