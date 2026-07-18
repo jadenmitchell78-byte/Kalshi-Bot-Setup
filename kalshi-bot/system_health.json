@@ -1,19 +1,19 @@
 {
-  "timestamp": 1784407135,
+  "timestamp": 1784407526,
   "services": {
     "watchdog": {
       "name": "Watchdog Monitor",
       "pid": 1901,
       "running": true,
-      "memory_bytes": 34144256,
-      "uptime_seconds": 20
+      "memory_bytes": 34226176,
+      "uptime_seconds": 361
     },
     "web_dashboard": {
       "name": "Web Dashboard",
       "pid": 139,
       "running": true,
       "memory_bytes": 41500672,
-      "uptime_seconds": 578
+      "uptime_seconds": 970
     },
     "tg_bot": {
       "name": "Telegram Bot Gateway",
@@ -47,8 +47,8 @@
       "name": "Social Trail Bot",
       "pid": 1935,
       "running": true,
-      "memory_bytes": 46374912,
-      "uptime_seconds": 17
+      "memory_bytes": 51564544,
+      "uptime_seconds": 361
     },
     "tg_parlay_bot": {
       "name": "Telegram Parlay Bot",
