@@ -1,0 +1,39 @@
+import requests
+import json
+
+def send_update_to_sam(status_message):
+    # Since your tokens are already verified and set up on your Telegram infrastructure:
+    bot_token = "YOUR_EXISTING_SAM_BOT_TOKEN"
+    chat_id = "5992267511"
+    
+    telegram_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    
+    payload = {
+        "chat_id": chat_id,
+        "text": status_message,
+        "parse_mode": "Markdown"
+    }
+    
+    try:
+        response = requests.post(telegram_url, json=payload)
+        if response.status_code != 200:
+            print(f"Telegram API responded with error: {response.text}")
+    except Exception as e:
+        print(f"Failed to push telemetry to Sam thread: {e}")
+
+# ==========================================
+# RUN TELEMETRY BRIDGE
+# ==========================================
+if __name__ == "__main__":
+    print("Initiating Sam telemetry forwarder...")
+    
+    # Text string formatted cleanly for your Telegram thread layout
+    test_telemetry = (
+        "📶 **SENTINEL SAM SYSTEMS ONLINE**\n"
+        "• Environment: Termux Production\n"
+        "• Target Connection: Kalshi Live API\n"
+        "• Stream Status: Active & Monitoring Feed"
+    )
+    
+    send_update_to_sam(test_telemetry)
+
