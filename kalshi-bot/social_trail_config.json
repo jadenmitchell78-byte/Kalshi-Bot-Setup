@@ -1,9 +1,28 @@
 {
   "scanner_active": true,
-  "kalshi_auto_trade_enabled": false,
-  "kalshi_use_demo": true,
-  "_note": "Set kalshi_auto_trade_enabled to true (and kalshi_use_demo to false) when ready to place real orders. Add twitter/instagram accounts to monitor under 'monitored_accounts'.",
-  "monitored_accounts": [],
-  "monitored_instagram_handles": [],
-  "mode": "scraping_simulation"
+  "kalshi_auto_trade_enabled": true,
+  "kalshi_use_demo": false,
+  "twitter_scraping_mode": "rss_feed",
+
+  "monitored_accounts_x": [
+    "Kalshi",
+    "TickerTracker",
+    "PredMarkets",
+    "LockedLines",
+    "DougsPicks",
+    "DeshawnsDubs",
+    "SharprSports",
+    "realsuburban",
+    "Domahhhh"
+  ],
+
+  "monitored_accounts_instagram": [],
+
+  "nitter_instances": [
+    "https://nitter.net",
+    "https://nitter.privacydev.net",
+    "https://nitter.poast.org"
+  ],
+
+  "_note": "RSS/Nitter mode — no X API key required. Falls back to next Nitter instance if one is down. Set kalshi_use_demo to true to paper-trade."
 }
