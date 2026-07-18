@@ -1,0 +1,4 @@
+{
+  "scanner_active": false,
+  "_note": "Set scanner_active to true when you have a solana_key.json wallet file and PRIVATE_POLYGON_RPC configured."
+}

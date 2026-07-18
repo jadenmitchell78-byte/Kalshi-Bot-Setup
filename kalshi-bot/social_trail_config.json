@@ -1,0 +1,9 @@
+{
+  "scanner_active": true,
+  "kalshi_auto_trade_enabled": false,
+  "kalshi_use_demo": true,
+  "_note": "Set kalshi_auto_trade_enabled to true (and kalshi_use_demo to false) when ready to place real orders. Add twitter/instagram accounts to monitor under 'monitored_accounts'.",
+  "monitored_accounts": [],
+  "monitored_instagram_handles": [],
+  "mode": "scraping_simulation"
+}

@@ -247,10 +247,7 @@ def perform_balance_checks():
     # 1. Base Balance Check (Alert every 12 hours max)
     if now - last_balance_alert_base > 43200:
         try:
-            pk = ""
-            for ln in open(".env"):
-                if "METAMASK_PRIVATE_KEY" in ln and "=" in ln:
-                    pk = ln.split("=", 1)[1].strip()
+            pk = os.environ.get("METAMASK_PRIVATE_KEY", "")
             if pk:
                 from web3 import Web3
                 rpc = _rj(DEX_CONFIG).get("rpc_url", "https://mainnet.base.org")
