@@ -1,4 +1,4 @@
-aider-chat==0.16.0
+# aider-chat==0.16.0  # excluded: depends on litellm which is firewall-blocked
 aiohappyeyeballs==2.7.1
 aiohttp==3.13.5
 aiosignal==1.4.0
@@ -53,7 +53,7 @@ jsonschema==4.23.0
 jsonschema-specifications==2025.9.1
 kalshi-python==2.1.4
 lazy_imports==1.2.0
-litellm==1.83.7
+# litellm==1.83.7  # excluded: blocked by Replit package firewall
 markdown-it-py==4.2.0
 MarkupSafe==3.0.3
 mdurl==0.1.2
