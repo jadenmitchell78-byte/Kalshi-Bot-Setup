@@ -1442,14 +1442,14 @@ def map_event_to_prediction_market(target_asset: str, matchup: str = None, event
         
     market, score = find_matching_market(target_asset, matchup or target_asset, markets)
     
-    # If we have a decent match score (>=10, meaning at least one token matched), flag it
-    if market and score >= 10:
+    # Require score >= 25 for automated execution — prevents low-confidence misfires
+    if market and score >= 25:
         ticker = market.get("ticker")
         title = market.get("title")
         is_open = market.get("status") in ["open", "active"]
         
-        # Flag for automated execution if open and match score is high (>=10)
-        flagged_for_execution = is_open and score >= 10
+        # Flag for automated execution only if open and high-confidence match
+        flagged_for_execution = is_open and score >= 25
         
         print(f"🎯 [Market Mapper] Mapped successfully to ticker '{ticker}' (Score: {score}). Flagged for execution: {flagged_for_execution}")
         return {

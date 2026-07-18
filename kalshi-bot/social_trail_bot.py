@@ -763,6 +763,16 @@ def _process_posts_internal():
                 send_telegram_webhook(msg)
                 
         # 4. Check for sports betting pick calls (Module B, C, D)
+        # Skip pick parsing for market intelligence accounts — they post commentary,
+        # not betting slips. Forward their posts to Telegram as raw market signals instead.
+        _intel_accounts = set(a.lower() for a in config.get("intel_accounts_x", []))
+        if username and username.lower() in _intel_accounts:
+            if text and len(text.strip()) > 40:
+                send_telegram(
+                    f"📡 *Market Intel from @{username}*\n\n{text[:400]}{'...' if len(text) > 400 else ''}"
+                )
+            continue
+
         if not solana_mints and not base_contracts:
             try:
                 from betting_parser import parse_betting_post
@@ -800,10 +810,34 @@ def _process_posts_internal():
                             )
                             try:
                                 import kalshi_auto_trader
-                                kalshi_auto_trader.evaluate_and_trade(
-                                    pick_id, league, matchup, bet_type, target_asset,
-                                    resolved_line, resolved_odds, trends
-                                )
+                                # ── Multi-capper consensus gate ──────────────────
+                                # Only fire a trade when 2+ cappers agree on the
+                                # same matchup+side within the last 60 minutes.
+                                consensus_file = "capper_consensus.json"
+                                consensus = _rj(consensus_file, {})
+                                now_ts = int(time.time())
+                                window = 3600  # 60 min
+                                key = f"{matchup}|{bet_type}|{target_asset}".lower()
+                                entry = consensus.get(key, {"cappers": [], "timestamps": []})
+                                # Prune expired entries
+                                fresh = [(c, t) for c, t in zip(entry["cappers"], entry["timestamps"]) if now_ts - t < window]
+                                fresh_cappers = [c for c, _ in fresh]
+                                fresh_ts = [t for _, t in fresh]
+                                # Add current capper if not already in window
+                                if username not in fresh_cappers:
+                                    fresh_cappers.append(username)
+                                    fresh_ts.append(now_ts)
+                                consensus[key] = {"cappers": fresh_cappers, "timestamps": fresh_ts}
+                                _wj(consensus_file, consensus)
+                                required = config.get("kalshi_consensus_required", 1)
+                                if len(fresh_cappers) < required:
+                                    print(f"⏳ [Consensus] {len(fresh_cappers)}/{required} cappers agree on '{key}'. Waiting for more signal.")
+                                else:
+                                    print(f"✅ [Consensus] {len(fresh_cappers)}/{required} cappers agree: {fresh_cappers}. Firing trade.")
+                                    kalshi_auto_trader.evaluate_and_trade(
+                                        pick_id, league, matchup, bet_type, target_asset,
+                                        resolved_line, resolved_odds, trends
+                                    )
                             except Exception as tr_err:
                                 print(f"⚠️ Kalshi auto-trading error: {tr_err}")
                             

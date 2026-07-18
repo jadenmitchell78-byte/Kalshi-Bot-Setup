@@ -16,11 +16,27 @@
     "Domahhhh"
   ],
 
+  "intel_accounts_x": [
+    "Kalshi",
+    "TickerTracker",
+    "PredMarkets"
+  ],
+
   "monitored_accounts_instagram": [],
 
   "nitter_instances": [
     "https://nitter.net"
   ],
 
-  "_note": "Only nitter.net is currently reachable from Replit. Other public instances are down. Set kalshi_use_demo to true to paper-trade."
+  "kalshi_consensus_required": 2,
+
+  "kalshi_min_ev_edge": 0.03,
+
+  "kalshi_max_allowed_spread_usd": 0.03,
+
+  "kalshi_max_trades_per_day": 10,
+
+  "kalshi_trade_cooldown_seconds": 180,
+
+  "_note": "intel_accounts_x = forwarded to Telegram as market signals, no pick parsing. kalshi_consensus_required = min cappers that must agree before a trade fires. Set to 1 to trade on any single capper's pick."
 }

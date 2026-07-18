@@ -175,7 +175,9 @@ def _parse_with_gemini(text: str, api_key: str) -> list:
         if r.status_code == 200:
             content = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
             data = json.loads(content)
-            return data.get("picks", [])
+            # Filter out low-confidence picks Gemini flagged itself
+            all_picks = data.get("picks", [])
+            return [p for p in all_picks if p.get("confidence", "high") != "low"]
     except Exception as e:
         print(f"⚠️ Gemini parsing failed: {e}")
     return _parse_with_fallback(text)
@@ -184,39 +186,49 @@ def _build_prompt(text: str) -> str:
     from datetime import datetime
     now_str = datetime.now().strftime("%Y-%m-%d")
     return f"""
-You are an expert sports betting parser. The current date is {now_str}.
-Analyze the unstructured capper text below.
-Note that the FIFA World Cup 2026 is currently active (June-July 2026). Sports like NBA, NFL, and NHL are in their off-season. MLB is in-season.
-Extract any distinct betting legs / picks contained in the text.
+You are an expert sports betting pick extractor. Today is {now_str}.
 
-Capper Text: "{text}"
+ACTIVE SEASONS: FIFA World Cup 2026 (June-July 2026), MLB. OFF-SEASON: NBA, NFL, NHL.
 
-Return a strict JSON object with a single key "picks" containing an array of picks.
-Each pick in the array MUST contain exactly these fields:
-- "league": "NBA" | "MLB" | "NFL" | "NHL" | "Soccer" | "World Cup" | "Esports" | "Other" | "Consensus Parlay"
-- "matchup": "Team A vs Team B" (determine the opponent teams if not fully specified. If it's a multi-leg parlay, use "Team A | Team B").
-- "bet_type": "Moneyline" | "Spread" | "Player Prop Over" | "Player Prop Under" | "Total Over" | "Total Under" | "Parlay" | "Other"
-- "target_asset": "Jayson Tatum" | "Argentina" etc. (For parlays, use a comma-separated list like "Argentina, Spain").
-- "line_value": float | null (e.g. 26.5 for over/under, -3.0 for spread, null for moneyline)
-- "odds": float | null (odds in decimal e.g. 1.91 or American e.g. -110 if explicitly mentioned, otherwise null)
+TASK: Extract ONLY explicit betting picks/slips from the capper text below.
+DO NOT extract: general opinions, market commentary, prediction market analysis,
+rule disputes, platform comparisons, or anything that is not a direct wager recommendation.
+A valid pick must name a specific team/player AND a bet type (moneyline, spread, total, prop).
 
-# Important Rules for Extracting Parlays
-If the text contains 'Combo', 'Parlay', or 'Multi-Leg' explicitly, you MUST aggregate the targets into a SINGLE pick with bet_type "Parlay", league "Consensus Parlay", and combine their names in target_asset (e.g. "Argentina, Spain").
+Capper Text:
+\"\"\"
+{text}
+\"\"\"
 
-Strict JSON output format:
+Return ONLY a JSON object. Each pick must have ALL of these fields:
+- "league": "MLB" | "World Cup" | "Soccer" | "NBA" | "NFL" | "NHL" | "Esports" | "Other" | "Parlay"
+- "matchup": "Team A vs Team B" (both teams when possible; use "| " separator for multi-leg)
+- "bet_type": "Moneyline" | "Spread" | "Player Prop Over" | "Player Prop Under" | "Total Over" | "Total Under" | "Parlay"
+- "target_asset": specific player or team being bet on (comma-separated for parlays)
+- "line_value": float or null (e.g. 26.5 for props, -1.5 for run line, null for ML)
+- "odds": American odds as float or null (e.g. -110, +150)
+- "confidence": "high" | "medium" | "low" (your confidence this is a real pick, not commentary)
+
+Rules:
+- If the post is purely market commentary/opinion with no concrete pick, return {{"picks": []}}
+- Only include picks with confidence "medium" or "high"
+- For explicit parlays, create ONE pick with bet_type "Parlay" and all targets in target_asset
+
+Output format (JSON only, no markdown):
 {{
   "picks": [
-     {{
-       "league": "World Cup",
-       "matchup": "Argentina vs Spain",
-       "bet_type": "Parlay",
-       "target_asset": "Argentina, Spain",
-       "line_value": 0,
-       "odds": 350
-     }}
+    {{
+      "league": "MLB",
+      "matchup": "Dodgers vs Padres",
+      "bet_type": "Moneyline",
+      "target_asset": "Dodgers",
+      "line_value": null,
+      "odds": -145,
+      "confidence": "high"
+    }}
   ]
 }}
-If no picks are found, return {{"picks": []}}. Do not include any explanation or markdown formatting outside the JSON block.
+If no valid picks found: {{"picks": []}}
 """
 
 def _parse_with_fallback(text: str) -> list:
