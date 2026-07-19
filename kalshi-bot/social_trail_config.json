@@ -2,7 +2,7 @@
   "scanner_active": true,
   "kalshi_auto_trade_enabled": true,
   "kalshi_use_demo": false,
-  "twitter_scraping_mode": "official_api",
+  "twitter_scraping_mode": "twikit",
 
   "monitored_accounts_x": [
     "Kalshi",
@@ -38,5 +38,5 @@
 
   "polling_interval_seconds": 90,
 
-  "_note": "Mode=official_api — bearer token read from X_BEARER_TOKEN env secret. intel_accounts_x posts are forwarded to Telegram only, not run through pick parser. kalshi_consensus_required=2 means 2+ cappers must agree before a trade fires."
+  "_note": "Mode=twikit — uses authenticated Twitter session via X_USERNAME/X_EMAIL/X_PASSWORD secrets. Cookies saved to twikit_cookies.json after first login. intel_accounts_x forwarded to Telegram only."
 }

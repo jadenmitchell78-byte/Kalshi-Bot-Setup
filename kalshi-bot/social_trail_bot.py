@@ -677,6 +677,9 @@ def _process_posts_internal():
         for username in monitored_x:
             if mode == "rss_feed":
                 all_posts.extend(fetch_x_rss(username, nitter_instances))
+            elif mode == "twikit":
+                import twikit_scraper
+                all_posts.extend(twikit_scraper.fetch_tweets(username))
             elif mode == "official_api":
                 all_posts.extend(fetch_official_x_api(username, bearer_token))
             elif mode == "apify":
@@ -1137,6 +1140,10 @@ async def run_async_scraper_loop():
                 for username in monitored_x:
                     if mode == "rss_feed":
                         posts = await asyncio.to_thread(fetch_x_rss, username, nitter_instances)
+                        all_new_posts.extend(posts)
+                    elif mode == "twikit":
+                        import twikit_scraper
+                        posts = await twikit_scraper._fetch_tweets_async(username)
                         all_new_posts.extend(posts)
                     elif mode == "official_api":
                         posts = await asyncio.to_thread(fetch_official_x_api, username, bearer_token)
