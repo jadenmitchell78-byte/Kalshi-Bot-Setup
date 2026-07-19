@@ -240,32 +240,72 @@ def fetch_instagram_rss(username, rsshub_instances):
             print(f"⚠️ RSSHub Instagram Fetch error on {instance}: {e}")
     return posts
 
+_X_USER_ID_CACHE = {}  # screen_name → user_id, persists across poll cycles
+
 def fetch_official_x_api(username, bearer_token):
-    """Retrieve tweets using official Twitter/X API v2."""
-    if not bearer_token:
+    """Retrieve tweets using official Twitter/X API v2.
+    Bearer token is read from env X_BEARER_TOKEN if not passed directly.
+    Caches user IDs to avoid redundant lookups and respects rate limits.
+    """
+    token = bearer_token or os.environ.get("X_BEARER_TOKEN", "")
+    if not token:
         return []
-    headers = {"Authorization": f"Bearer {bearer_token}"}
+
+    headers = {"Authorization": f"Bearer {token}"}
     posts = []
     try:
-        user_url = f"https://api.twitter.com/2/users/by/username/{username}"
-        r = requests.get(user_url, headers=headers, timeout=10)
-        if r.status_code == 200:
-            user_data = r.json().get("data")
-            if user_data:
-                user_id = user_data["id"]
-                timeline_url = f"https://api.twitter.com/2/users/{user_id}/tweets"
-                params = {"max_results": 10, "tweet.fields": "text"}
-                r_tl = requests.get(timeline_url, headers=headers, params=params, timeout=10)
-                if r_tl.status_code == 200:
-                    data_list = r_tl.json().get("data", [])
-                    for item in data_list:
-                        posts.append({
-                            "platform": "x",
-                            "username": username,
-                            "post_id": f"x_{item['id']}",
-                            "text": item["text"],
-                            "link": f"https://x.com/{username}/status/{item['id']}"
-                        })
+        # --- Step 1: resolve user ID (cached) ---
+        user_id = _X_USER_ID_CACHE.get(username.lower())
+        if not user_id:
+            r_user = requests.get(
+                f"https://api.twitter.com/2/users/by/username/{username}",
+                headers=headers, timeout=10
+            )
+            if r_user.status_code == 401:
+                print(f"⚠️ X API 401 for @{username}: invalid Bearer Token.")
+                return []
+            if r_user.status_code == 429:
+                reset = r_user.headers.get("x-rate-limit-reset", "?")
+                print(f"⚠️ X API rate limited — resets at epoch {reset}. Pausing user lookup.")
+                return []
+            if r_user.status_code != 200:
+                print(f"⚠️ X API user lookup failed for @{username}: {r_user.status_code}")
+                return []
+            user_data = r_user.json().get("data")
+            if not user_data:
+                print(f"⚠️ X API: no data for @{username} (private/suspended?)")
+                return []
+            user_id = user_data["id"]
+            _X_USER_ID_CACHE[username.lower()] = user_id
+
+        # --- Step 2: fetch timeline ---
+        r_tl = requests.get(
+            f"https://api.twitter.com/2/users/{user_id}/tweets",
+            headers=headers,
+            params={
+                "max_results": 10,
+                "tweet.fields": "text,created_at,id",
+                "exclude": "retweets,replies"
+            },
+            timeout=10
+        )
+        if r_tl.status_code == 429:
+            reset = r_tl.headers.get("x-rate-limit-reset", "?")
+            print(f"⚠️ X API timeline rate limited for @{username} — resets {reset}")
+            return []
+        if r_tl.status_code != 200:
+            print(f"⚠️ X API timeline error for @{username}: {r_tl.status_code} {r_tl.text[:120]}")
+            return []
+
+        for item in r_tl.json().get("data", []):
+            posts.append({
+                "platform": "x",
+                "username": username,
+                "post_id": f"x_{item['id']}",
+                "text": item.get("text", ""),
+                "link": f"https://x.com/{username}/status/{item['id']}"
+            })
+
     except Exception as e:
         print(f"⚠️ Official X API exception for @{username}: {e}")
     return posts

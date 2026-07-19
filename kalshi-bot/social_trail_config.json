@@ -2,7 +2,7 @@
   "scanner_active": true,
   "kalshi_auto_trade_enabled": true,
   "kalshi_use_demo": false,
-  "twitter_scraping_mode": "rss_feed",
+  "twitter_scraping_mode": "official_api",
 
   "monitored_accounts_x": [
     "Kalshi",
@@ -24,9 +24,7 @@
 
   "monitored_accounts_instagram": [],
 
-  "nitter_instances": [
-    "https://nitter.net"
-  ],
+  "nitter_instances": [],
 
   "kalshi_consensus_required": 2,
 
@@ -38,5 +36,7 @@
 
   "kalshi_trade_cooldown_seconds": 180,
 
-  "_note": "intel_accounts_x = forwarded to Telegram as market signals, no pick parsing. kalshi_consensus_required = min cappers that must agree before a trade fires. Set to 1 to trade on any single capper's pick."
+  "polling_interval_seconds": 90,
+
+  "_note": "Mode=official_api — bearer token read from X_BEARER_TOKEN env secret. intel_accounts_x posts are forwarded to Telegram only, not run through pick parser. kalshi_consensus_required=2 means 2+ cappers must agree before a trade fires."
 }
