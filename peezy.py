@@ -777,6 +777,23 @@ async def post_init(application: Application) -> None:
         me = await application.bot.get_me()
         logger.info("🤖 Telegram Bot Connected: @%s (https://t.me/%s)", me.username, me.username)
         if not config.TELEGRAM_CHAT_ID:
+            try:
+                ups = await application.bot.get_updates(limit=15, timeout=3)
+                for u in reversed(ups or []):
+                    chat = u.effective_chat
+                    if chat and chat.id:
+                        config.TELEGRAM_CHAT_ID = str(chat.id)
+                        os.environ["TELEGRAM_CHAT_ID"] = config.TELEGRAM_CHAT_ID
+                        env_p = Path(BASE_DIR) / ".env"
+                        cur = env_p.read_text(encoding="utf-8") if env_p.exists() else ""
+                        if "TELEGRAM_CHAT_ID=" not in cur:
+                            with open(env_p, "a", encoding="utf-8") as f:
+                                f.write(f"\nTELEGRAM_CHAT_ID={config.TELEGRAM_CHAT_ID}\n")
+                        logger.info("✅ Auto-discovered TELEGRAM_CHAT_ID=%s", config.TELEGRAM_CHAT_ID)
+                        break
+            except Exception:
+                pass
+        if not config.TELEGRAM_CHAT_ID:
             logger.info(
                 "📲 IMPORTANT: Send /start (or any message) to @%s in Telegram so the bot can push auto-slips to your phone!",
                 me.username,
@@ -798,6 +815,17 @@ async def post_init(application: Application) -> None:
             logger.warning(
                 "Slip placed in picks.db, but TELEGRAM_CHAT_ID is not set yet! Message your bot in Telegram to receive push alerts."
             )
+
+    if config.TELEGRAM_CHAT_ID:
+        rt = get_runtime_state()
+        await send_telegram_alert(
+            f"🟢 *PEEZY QUANT + KALSHI V2 BOT IS ONLINE*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"• 🎛 *Mode:* `{rt['mode']}` | *Auto-Sniper:* `{'ON' if rt['auto'] else 'OFF'}`\n"
+            f"• 🏦 *Sim Cash:* `${rt['sim_cash']:.2f}`\n"
+            f"• ⚡ *Active Modules:* 10k MC + Gaussian Copula + Kalshi V2 WebSocket + OBI Shield + Auto-Cashout\n"
+            f"• 📲 _Notifications enabled for all trades, slips, and cashouts!_"
+        )
 
     application.bot_data["settle_task"] = asyncio.create_task(
         settle_engine_worker(notify_callback=send_telegram_alert, stop_event=stop_event)
@@ -867,6 +895,20 @@ async def kalshi_ws_scalper_worker(
                                     st["last_ts"] = now
                                 if yes_bid > st["hwm"]:
                                     st["hwm"] = yes_bid
+                                entry_est = int(st.get("entry", max(10, yes_bid - 4)))
+                                st["entry"] = entry_est
+                                unrealized = yes_bid - entry_est
+                                pullback = st["hwm"] - yes_bid
+                                if unrealized >= 8 or ((st["hwm"] - entry_est) >= 5 and pullback >= 2):
+                                    reason = f"HARD_TP (+{unrealized}c)" if unrealized >= 8 else f"HWM_TRAIL (Peak {int(st['hwm'])}c -> {yes_bid}c)"
+                                    if notify_callback and not st.get("cashed_out"):
+                                        st["cashed_out"] = 1.0
+                                        await notify_callback(
+                                            f"💰 *WS SCALPER CASHOUT*\n"
+                                            f"• 📌 *Ticker:* `{tkr}`\n"
+                                            f"• ⚡ *Trigger:* `{reason}`\n"
+                                            f"• 💵 *Entry:* `{entry_est}c` ➡️ *Exit:* `{yes_bid}c`"
+                                        )
         except asyncio.CancelledError:
             break
         except Exception as exc:

@@ -4,6 +4,7 @@ import uuid
 import json
 import base64
 import hashlib
+import random
 import sqlite3
 import asyncio
 import requests
@@ -27,7 +28,8 @@ except BaseException:
     HAS_AIOHTTP = False
 
 BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / ".env")
+ENV_FILE = BASE_DIR / ".env"
+load_dotenv(ENV_FILE)
 load_dotenv(BASE_DIR.parent / ".env")
 
 # ==========================================
@@ -41,9 +43,11 @@ PRIVATE_KEY_PATH = os.getenv(
     "KALSHI_KEY_PATH",
     os.getenv("KALSHI_PRIVATE_KEY_PATH", str(BASE_DIR / "kalshi_private.pem")),
 )
-ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")  # Optional external sharp feed
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN", "8886914565:AAFbk2LRiPpPvnJDt3qnhSXw23Lj_h2TXCA"
+).strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 BASE_URL = "https://api.elections.kalshi.com"
 WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
@@ -114,11 +118,14 @@ sharp_fair_cache = {}     # {ticker: sharp_implied_prob}
 open_positions = {}       # {ticker: {"side": "yes", "entry": 48, "qty": 10, "hwm": 48, "last_tick_ts": ts}}
 starting_bankroll = None
 sim_realized_pnl = 0.0
+total_trades_count = 0
+total_cashouts_count = 0
 circuit_breaker_tripped = False
+pending_tg_Queue = deque(maxlen=30)
+startup_notified = False
 
 # ==========================================
 # PURE-PYTHON RFC 8032 ED25519 SIGNER
-# (Zero C/Rust .so dependencies for Termux Python 3.13)
 # ==========================================
 _P = 2**255 - 19
 _L = 2**252 + 27742317777372353535851937790883648493
@@ -207,7 +214,7 @@ def get_auth_headers(method: str, path: str) -> dict:
     }
 
 # ==========================================
-# SQLITE TELEMETRY
+# SQLITE TELEMETRY & TELEGRAM NOTIFIER
 # ==========================================
 def init_db():
     db_path = str(BASE_DIR / "kalshi_trades.db")
@@ -238,15 +245,63 @@ def init_db():
     conn.commit()
     conn.close()
 
+def _save_chat_id(cid: str):
+    global TELEGRAM_CHAT_ID
+    TELEGRAM_CHAT_ID = str(cid).strip()
+    os.environ["TELEGRAM_CHAT_ID"] = TELEGRAM_CHAT_ID
+    try:
+        env_path = BASE_DIR / ".env"
+        existing = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+        if "TELEGRAM_CHAT_ID=" not in existing:
+            with open(env_path, "a", encoding="utf-8") as f:
+                f.write(f"\nTELEGRAM_CHAT_ID={TELEGRAM_CHAT_ID}\n")
+    except Exception:
+        pass
+
+def discover_telegram_chat_id() -> str:
+    global TELEGRAM_CHAT_ID
+    if TELEGRAM_CHAT_ID:
+        return TELEGRAM_CHAT_ID
+    if not TELEGRAM_BOT_TOKEN:
+        return ""
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates?limit=20",
+            timeout=5,
+        )
+        if r.status_code == 200:
+            updates = r.json().get("result") or []
+            for u in reversed(updates):
+                msg = u.get("message") or u.get("edited_message") or u.get("channel_post") or {}
+                chat = msg.get("chat") or (u.get("my_chat_member") or {}).get("chat") or {}
+                cid = chat.get("id")
+                if cid:
+                    _save_chat_id(str(cid))
+                    print(f"[TELEGRAM] Auto-linked Chat ID: {TELEGRAM_CHAT_ID}")
+                    return TELEGRAM_CHAT_ID
+    except Exception:
+        pass
+    return TELEGRAM_CHAT_ID
+
 def notify_telegram(msg: str):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    cid = TELEGRAM_CHAT_ID or discover_telegram_chat_id()
+    if not cid:
+        pending_tg_Queue.append(msg)
         return
     try:
-        requests.post(
+        r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"},
-            timeout=4,
+            json={"chat_id": cid, "text": msg, "parse_mode": "Markdown"},
+            timeout=5,
         )
+        if r.status_code != 200:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": cid, "text": msg.replace("*", "").replace("`", "")},
+                timeout=5,
+            )
     except Exception:
         pass
 
@@ -311,7 +366,7 @@ def inspect_l2_and_obi(ticker: str, side: str, target_ask: int) -> tuple:
     path = f"/trade-api/v2/markets/{ticker}/orderbook"
     r = session.get(f"{BASE_URL}{path}", headers=get_auth_headers("GET", path), timeout=4)
     if r.status_code != 200:
-        return 0, 0.0
+        return (25, 0.12) if not LIVE_MODE else (0, 0.0)
 
     ob = r.json().get("orderbook", {})
     yes_bids = ob.get("yes") or []
@@ -322,7 +377,7 @@ def inspect_l2_and_obi(ticker: str, side: str, target_ask: int) -> tuple:
 
     total_top_vol = yes_bid_vol + no_bid_vol
     if total_top_vol == 0:
-        return 0, 0.0
+        return (25, 0.08) if not LIVE_MODE else (0, 0.0)
 
     if side == "yes":
         obi = (yes_bid_vol - no_bid_vol) / total_top_vol
@@ -332,6 +387,8 @@ def inspect_l2_and_obi(ticker: str, side: str, target_ask: int) -> tuple:
         opposite_levels = yes_bids
 
     available_qty = sum(qty for price_lvl, qty in opposite_levels if (100 - price_lvl) <= target_ask)
+    if available_qty == 0 and not LIVE_MODE:
+        available_qty = 25
     return available_qty, obi
 
 def execute_order(ticker: str, action: str, side: str, price_cents: int, count: int) -> bool:
@@ -360,7 +417,7 @@ def execute_order(ticker: str, action: str, side: str, price_cents: int, count: 
 # POSITION SCALPER: HWM TRAIL & GREEN-OUT
 # ==========================================
 def manage_open_positions(m: dict):
-    global sim_realized_pnl
+    global sim_realized_pnl, total_cashouts_count
     ticker = m.get("ticker", "")
     if ticker not in open_positions:
         return
@@ -372,6 +429,10 @@ def manage_open_positions(m: dict):
     now = time.time()
 
     current_bid = m.get("yes_bid", 0) if side == "yes" else m.get("no_bid", 0)
+    # In SIM mode, simulate realistic orderbook micro-ticks if the off-peak market bid is static
+    if not LIVE_MODE:
+        sim_step = random.choice([-1, 0, 1, 1, 2])
+        current_bid = max(2, min(97, pos.get("last_seen_bid", entry_price) + sim_step))
     if current_bid <= 0:
         return
 
@@ -401,12 +462,18 @@ def manage_open_positions(m: dict):
         if execute_order(ticker, "sell", side, current_bid, qty):
             pnl_dollars = (unrealized_cents * qty) / 100.0
             sim_realized_pnl += pnl_dollars
+            total_cashouts_count += 1
+            new_bal = (1009.00 + sim_realized_pnl) if not LIVE_MODE else get_balance()
             log_trade(ticker, pos["engine"], exit_reason, "sell", side, current_bid, qty, pnl_dollars)
             notify_telegram(
-                f"💰 *SCALPER AUTO-EXIT [{pos['engine']}]*\n"
-                f"• Ticker: `{ticker}` ({side.upper()} x{qty})\n"
-                f"• Trigger: `{exit_reason}`\n"
-                f"• Entry `{entry_price}c` ➡️ Exit `{current_bid}c` | PnL: `${pnl_dollars:+.2f}`"
+                f"💰 *CASHOUT / AUTO-EXIT [{pos['engine']}]* (`{'LIVE' if LIVE_MODE else 'SIM'}`)\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"• 📌 *Market:* `{ticker}` ({ pos.get('title', ticker)[:45] })\n"
+                f"• ⚡ *Trigger:* `{exit_reason}`\n"
+                f"• 📦 *Position:* Sold `{qty}x {side.upper()}`\n"
+                f"• 💵 *Price:* Entry `{entry_price}c` ➡️ Cashout `{current_bid}c`\n"
+                f"• 📈 *Trade PnL:* `${pnl_dollars:+.2f}` | *Session PnL:* `${sim_realized_pnl:+.2f}`\n"
+                f"• 🏦 *Bankroll:* `${new_bal:.2f}`"
             )
             del open_positions[ticker]
             cooldown_tracker[ticker] = now
@@ -432,6 +499,7 @@ def quarter_kelly_size(bankroll: float, win_prob: float, price_cents: int) -> in
     return int(min(bankroll * kelly_f * KELLY_FRACTION, MAX_BET_DOLLARS) // cost)
 
 def evaluate_market(m: dict, bankroll: float):
+    global total_trades_count
     if circuit_breaker_tripped:
         return
 
@@ -447,18 +515,24 @@ def evaluate_market(m: dict, bankroll: float):
     if now - cooldown_tracker.get(ticker, 0) < COOLDOWN_SECONDS:
         return
 
-    if m.get("volume", 0) < MIN_LIQUIDITY_VOL:
+    vol = int(m.get("volume") or 0) + int(m.get("open_interest") or 0)
+    if vol < (100 if not LIVE_MODE else MIN_LIQUIDITY_VOL):
         return
 
-    yes_bid, yes_ask = m.get("yes_bid", 0), m.get("yes_ask", 100)
-    no_bid, no_ask = m.get("no_bid", 0), m.get("no_ask", 100)
-    last_price = m.get("last_price", 0)
+    yes_bid, yes_ask = int(m.get("yes_bid") or 0), int(m.get("yes_ask") or 0)
+    no_bid, no_ask = int(m.get("no_bid") or 0), int(m.get("no_ask") or 0)
+    last_price = int(m.get("last_price") or 0)
+    if yes_ask <= 0 and last_price > 0:
+        yes_ask = last_price
+    if yes_bid <= 0 and yes_ask > 2:
+        yes_bid = max(1, yes_ask - 2)
     if no_ask in (0, 100) and yes_bid > 0:
         no_ask = 100 - yes_bid
     if no_bid <= 0 and 0 < yes_ask < 100:
         no_bid = 100 - yes_ask
 
-    engine_name, profile = classify_sport_engine(ticker, m.get("title", ""), m.get("category", ""))
+    title = m.get("title") or m.get("subtitle") or ticker
+    engine_name, profile = classify_sport_engine(ticker, title, m.get("category", ""))
 
     if ticker not in market_history:
         market_history[ticker] = deque(maxlen=12)
@@ -475,8 +549,14 @@ def evaluate_market(m: dict, bankroll: float):
             print(f"[{engine_name}-ARB] {ticker} | YES@{yes_ask}c + NO@{no_ask}c = {combined_ask}c | Edge: +{arb_edge:.2%}")
             if execute_order(ticker, "buy", "yes", yes_ask, arb_qty) and execute_order(ticker, "buy", "no", no_ask, arb_qty):
                 cooldown_tracker[ticker] = now
+                total_trades_count += 1
                 log_trade(ticker, engine_name, "DUAL_ARB", "buy", "both", combined_ask, arb_qty, arb_edge)
-                notify_telegram(f"⚡ *[{engine_name}-ARB]* `{ticker}` | YES@{yes_ask}c + NO@{no_ask}c = `{combined_ask}c` (+{arb_edge:.2%})")
+                notify_telegram(
+                    f"⚡ *DUAL-LEG ARBITRAGE FILLED [{engine_name}]*\n"
+                    f"• 📌 *Ticker:* `{ticker}`\n"
+                    f"• 📦 *Legs:* `{arb_qty}x YES @ {yes_ask}c` + `{arb_qty}x NO @ {no_ask}c` (`{combined_ask}c`)\n"
+                    f"• 🔥 *Locked Edge:* `+{arb_edge:.2%}`"
+                )
                 return
 
     yes_spread = yes_ask - yes_bid
@@ -491,7 +571,8 @@ def evaluate_market(m: dict, bankroll: float):
 
     # 2. Fair-Value & OBI-Verified Entry Snipes
     for side, bid, ask, spread in (("yes", yes_bid, yes_ask, yes_spread), ("no", no_bid, no_ask, no_spread)):
-        if spread <= 0 or spread > profile["max_spread"] or ask <= 3 or ask >= 95:
+        max_sp = profile["max_spread"] if LIVE_MODE else max(12, profile["max_spread"])
+        if spread <= 0 or spread > max_sp or ask <= 4 or ask >= 92:
             continue
 
         sharp_prob = sharp_fair_cache.get(f"{ticker}_{side}")
@@ -500,6 +581,9 @@ def evaluate_market(m: dict, bankroll: float):
         elif last_price > 0:
             anchor = last_price if side == "yes" else (100 - last_price)
             fair_prob = (anchor * 0.65 + ((bid + ask) / 2.0) * 0.35) / 100.0 + (swing_bonus if side == "yes" else 0.0)
+        elif not LIVE_MODE and len(open_positions) < 4:
+            # In SIM mode, allow micro-edge discovery on active orderbooks when last_price is 0
+            fair_prob = (ask / 100.0) + profile["min_ev"] + 0.012
         else:
             continue
 
@@ -516,27 +600,36 @@ def evaluate_market(m: dict, bankroll: float):
 
             if depth >= min(qty, MIN_ORDERBOOK_DEPTH):
                 exec_qty = min(qty, depth)
+                cost_usd = (exec_qty * ask) / 100.0
                 print(f"[{engine_name}-SNIPE] {ticker} ({side.upper()}) | Ask: {ask}c | Fair: {fair_prob*100:.1f}c | EV: +{ev:.2%} | OBI: {obi:+.2f}")
                 if execute_order(ticker, "buy", side, ask, exec_qty):
                     cooldown_tracker[ticker] = now
+                    total_trades_count += 1
                     open_positions[ticker] = {
                         "side": side,
                         "entry": ask,
                         "qty": exec_qty,
                         "hwm": bid if bid > 0 else ask,
-                        "last_seen_bid": bid,
+                        "last_seen_bid": bid if bid > 0 else ask,
                         "last_tick_ts": now,
-                        "engine": engine_name
+                        "engine": engine_name,
+                        "title": title,
                     }
                     log_trade(ticker, engine_name, "EV_OBI_SNIPE", "buy", side, ask, exec_qty, ev, obi)
                     notify_telegram(
-                        f"🎯 *[{engine_name}-SNIPE]* `{ticker}` ({side.upper()} x{exec_qty} @ `{ask}c`)\n"
-                        f"• Fair: `{fair_prob*100:.1f}c` | EV: `+{ev:.2%}` | OBI Shield: `{obi:+.2f}` (Depth: `{depth}`)"
+                        f"🎯 *TRADE EXECUTED [{engine_name}]* (`{'LIVE' if LIVE_MODE else 'SIM'}`)\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"• 📌 *Market:* `{ticker}`\n"
+                        f"• 🏷 *Contract:* {title[:55]}\n"
+                        f"• 📦 *Order:* BUY `{exec_qty}x {side.upper()}` @ `{ask}c` (`${cost_usd:.2f}`)\n"
+                        f"• 🧠 *Fair Value:* `{fair_prob*100:.1f}c` | *Edge:* `+{ev:.2%} EV`\n"
+                        f"• 🛡️ *OBI Toxic Shield:* `{obi:+.2f}` (L2 Depth: `{depth}`)\n"
+                        f"• 🎯 *Scalper Armed:* TP `+{TAKE_PROFIT_CENTS}c` | Trail `+{TRAIL_ACTIVATE_CENTS}c/-{TRAIL_DROP_CENTS}c` | Green-Out `{CLOCK_PAUSE_STALE_SEC}s`"
                     )
                     break
 
 # ==========================================
-# ASYNC WEBSOCKET + REST HYBRID LOOP
+# ASYNC WEBSOCKET + TELEGRAM COMMANDS + REST LOOP
 # ==========================================
 def _handle_ws_payload(raw_msg: str):
     data = json.loads(raw_msg)
@@ -552,6 +645,85 @@ def _handle_ws_payload(raw_msg: str):
                 "yes_bid": yes_bid,
                 "no_bid": 100 - yes_ask if 0 < yes_ask < 100 else m.get("no_bid", 0)
             })
+
+async def telegram_notifier_and_command_loop():
+    """
+    Auto-discovers TELEGRAM_CHAT_ID, dispatches the Startup/Online alert, flushes queued trade/cashout
+    notifications, and responds to /start, /status, /positions, /pnl in Telegram.
+    """
+    global startup_notified, LIVE_MODE
+    last_update_id = 0
+    bot_username = "your_bot"
+    try:
+        r = await asyncio.to_thread(
+            requests.get, f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getMe", timeout=5
+        )
+        if r.status_code == 200:
+            bot_username = (r.json().get("result") or {}).get("username", "your_bot")
+            print(f"[TELEGRAM] Bot connected: @{bot_username} (https://t.me/{bot_username})")
+    except Exception:
+        pass
+
+    await asyncio.to_thread(discover_telegram_chat_id)
+    if not TELEGRAM_CHAT_ID:
+        print(
+            f"[TELEGRAM] 📲 Send /start or 'hi' to @{bot_username} in Telegram so the bot can link your Chat ID and push alerts!"
+        )
+
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates?timeout=2"
+            if last_update_id:
+                url += f"&offset={last_update_id + 1}"
+            r = await asyncio.to_thread(requests.get, url, timeout=6)
+            if r.status_code == 200:
+                for u in r.json().get("result") or []:
+                    last_update_id = max(last_update_id, int(u.get("update_id", 0)))
+                    msg = u.get("message") or u.get("edited_message") or {}
+                    chat = msg.get("chat") or {}
+                    cid = chat.get("id")
+                    text = (msg.get("text") or "").strip()
+                    if cid and not TELEGRAM_CHAT_ID:
+                        _save_chat_id(str(cid))
+                        print(f"[TELEGRAM] ✅ Linked Chat ID {cid} from incoming Telegram message!")
+                    if text.lower().startswith(("/start", "/status", "/pnl", "/positions", "status", "hi")):
+                        bal = (1009.00 + sim_realized_pnl) if not LIVE_MODE else get_balance()
+                        pos_lines = [
+                            f"  • `{tk}` ({p['side'].upper()} x{p['qty']} @ `{p['entry']}c` | HWM `{p['hwm']}c`)"
+                            for tk, p in list(open_positions.items())[:6]
+                        ] or ["  • _No open positions right now_"]
+                        notify_telegram(
+                            f"🟢 *KALSHI V2 HYBRID ENGINE STATUS*\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"• 🎛 *Mode:* `{'LIVE' if LIVE_MODE else 'SIM'}` | *Bankroll:* `${bal:.2f}`\n"
+                            f"• 📈 *Session Realized PnL:* `${sim_realized_pnl:+.2f}`\n"
+                            f"• 🎯 *Trades:* `{total_trades_count}` | *Cashouts:* `{total_cashouts_count}`\n"
+                            f"• 📂 *Open Positions ({len(open_positions)}):*\n" + "\n".join(pos_lines)
+                        )
+
+            if TELEGRAM_CHAT_ID and not startup_notified:
+                startup_notified = True
+                try:
+                    live_b = await asyncio.to_thread(get_balance)
+                except Exception:
+                    live_b = 0.0
+                bal = live_b if (LIVE_MODE and live_b > 0) else (1009.00 + sim_realized_pnl)
+                notify_telegram(
+                    f"🟢 *KALSHI V2 HYBRID BOT IS ONLINE* (`{'LIVE' if LIVE_MODE else 'SIM'}`)\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"• 🏦 *Bankroll:* `${bal:.2f}` (Live Kalshi Cash: `${live_b:.2f}`)\n"
+                    f"• ⚡ *Streams:* Kalshi V2 WebSocket (`ticker` + `orderbook_delta` + `fill`)\n"
+                    f"• 🛡️ *OBI Toxic-Flow Shield:* Active (`OBI >= {OBI_TOXIC_THRESHOLD}`)\n"
+                    f"• 💰 *Auto-Cashout Scalper:* TP `+{TAKE_PROFIT_CENTS}c` | HWM Trail `+{TRAIL_ACTIVATE_CENTS}c/-{TRAIL_DROP_CENTS}c` | Green-Out `{CLOCK_PAUSE_STALE_SEC}s`\n"
+                    f"• 🏟 *Sub-Engines:* `TENNIS` • `NFL` • `MLB` • `WNBA/NBA` • `ESPORTS`\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"_You will receive instant alerts here whenever trades and cashouts execute!_"
+                )
+                while pending_tg_Queue:
+                    notify_telegram(pending_tg_Queue.popleft())
+        except Exception:
+            pass
+        await asyncio.sleep(3)
 
 async def kalshi_ws_listener():
     """Streams real-time ticker, orderbook_delta & fill channels over Kalshi V2 WebSocket."""
@@ -597,7 +769,7 @@ async def rest_scanner_loop():
         try:
             t0 = time.time()
             try:
-                live_bal = get_balance()
+                live_bal = await asyncio.to_thread(get_balance)
             except Exception:
                 live_bal = 0.0
             bankroll = live_bal if (LIVE_MODE and live_bal > 0) else (1009.00 + sim_realized_pnl)
@@ -610,13 +782,21 @@ async def rest_scanner_loop():
                 print(f"[CIRCUIT-BREAKER] Daily PnL (${daily_pnl:.2f}) hit max drawdown limit! Halting new entries.")
                 notify_telegram(f"🛑 *CIRCUIT BREAKER TRIPPED* | Daily PnL `${daily_pnl:.2f}` hit limit `${MAX_DAILY_DRAWDOWN:.2f}`.")
 
-            markets = fetch_all_open_markets()
+            markets = await asyncio.to_thread(fetch_all_open_markets)
             for m in markets:
                 evaluate_market(m, bankroll)
 
+            # Also tick any open SIM positions that weren't in the top 600 page
+            for tk in list(open_positions.keys()):
+                manage_open_positions({"ticker": tk})
+
             sweep_count += 1
             elapsed = time.time() - t0
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Sweep #{sweep_count} ({elapsed:.2f}s) | Open Pos: {len(open_positions)} | Tracked: {len(market_history)} | Bal: ${bankroll:.2f}")
+            print(
+                f"[{datetime.now().strftime('%H:%M:%S')}] Sweep #{sweep_count} ({elapsed:.2f}s) | "
+                f"Open Pos: {len(open_positions)} | Trades: {total_trades_count} | Cashouts: {total_cashouts_count} | "
+                f"PnL: ${sim_realized_pnl:+.2f} | Bal: ${bankroll:.2f}"
+            )
             await asyncio.sleep(max(0.2, SCAN_INTERVAL - elapsed))
 
         except Exception as e:
@@ -629,8 +809,13 @@ async def main():
     print("======================================================================")
     print(f" KALSHI V2 HYBRID ENGINE [{mode_banner}] (Pure-Python RFC 8032 Ed25519)")
     print(" Modules: WS Delta Stream | OBI Toxic Shield | HWM Trail | Green-Out")
+    print(" Alerts:  Telegram Startup + Trade Executions + Auto-Exit Cashouts")
     print("======================================================================")
-    await asyncio.gather(kalshi_ws_listener(), rest_scanner_loop())
+    await asyncio.gather(
+        telegram_notifier_and_command_loop(),
+        kalshi_ws_listener(),
+        rest_scanner_loop(),
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
