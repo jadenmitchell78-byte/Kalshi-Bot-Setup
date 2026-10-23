@@ -477,13 +477,18 @@ async def auto_scanner_worker(
                 held = get_held_tickers()
                 unheld = [l for l in candidate_legs if l.market_ticker not in held]
 
-                # In SIM mode, if all top props are currently held in open slips, settle a batch so 24/7 sim keeps flowing
-                if len(unheld) < MIN_SLIP_LEGS and rt["mode"] == "SIM" and held:
+                # In SIM mode, if all top props are currently held in open slips or SimCash is low, settle/recycle bankroll
+                if rt["mode"] == "SIM" and (len(unheld) < MIN_SLIP_LEGS or rt["sim_cash"] < 20.0):
                     settled_n = await run_settlement_cycle(
                         notify_callback=notify_callback, simulate_outcomes=True
                     )
                     if settled_n > 0:
                         logger.info("Auto-Settled %d open SIM slip(s) to recycle bankroll.", settled_n)
+                    rt = get_runtime_state()
+                    if rt["sim_cash"] < 20.0:
+                        new_cash = reset_sim_account()
+                        logger.info("♻️ Auto-replenished SIM bankroll to $%.2f for continuous 24/7 scanning.", new_cash)
+                        rt = get_runtime_state()
                     held = get_held_tickers()
                     unheld = [l for l in candidate_legs if l.market_ticker not in held]
 
@@ -977,6 +982,10 @@ def main() -> None:
     app = (
         ApplicationBuilder()
         .token(token)
+        .connect_timeout(20.0)
+        .read_timeout(20.0)
+        .write_timeout(20.0)
+        .pool_timeout(20.0)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()
@@ -998,7 +1007,12 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cmd_start))
 
     logger.info("Starting Peezy Quant Telegram Bot polling loop...")
-    app.run_polling(drop_pending_updates=False, timeout=3, poll_interval=0.5)
+    app.run_polling(
+        drop_pending_updates=False,
+        timeout=15,
+        poll_interval=1.0,
+        bootstrap_retries=-1,
+    )
 
 
 if __name__ == "__main__":

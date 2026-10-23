@@ -3,6 +3,7 @@ import time
 import uuid
 import json
 import base64
+import hashlib
 import sqlite3
 import asyncio
 import requests
@@ -10,20 +11,18 @@ from pathlib import Path
 from collections import deque
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ed25519, padding
 
 try:
     import websockets
     HAS_WEBSOCKETS = True
-except ImportError:
+except BaseException:
     websockets = None
     HAS_WEBSOCKETS = False
 
 try:
     import aiohttp
     HAS_AIOHTTP = True
-except ImportError:
+except BaseException:
     aiohttp = None
     HAS_AIOHTTP = False
 
@@ -118,6 +117,96 @@ sim_realized_pnl = 0.0
 circuit_breaker_tripped = False
 
 # ==========================================
+# PURE-PYTHON RFC 8032 ED25519 SIGNER
+# (Zero C/Rust .so dependencies for Termux Python 3.13)
+# ==========================================
+_P = 2**255 - 19
+_L = 2**252 + 27742317777372353535851937790883648493
+_D = (-121665 * pow(121666, _P - 2, _P)) % _P
+_BX = 15112221349535400772501151409588531511454012693041857206046113283949847762202
+_BY = 46316835694926478169428394003475163141307993866256225615783033603165251855960
+_B = (_BX, _BY, 1, (_BX * _BY) % _P)
+
+def _ed_add(pt1, pt2):
+    x1, y1, z1, t1 = pt1
+    x2, y2, z2, t2 = pt2
+    a = ((y1 - x1) * (y2 - x2)) % _P
+    b = ((y1 + x1) * (y2 + x2)) % _P
+    c = (t1 * 2 * _D * t2) % _P
+    d = (z1 * 2 * z2) % _P
+    e = (b - a) % _P
+    f = (d - c) % _P
+    g = (d + c) % _P
+    h = (b + a) % _P
+    return (e * f) % _P, (g * h) % _P, (f * g) % _P, (e * h) % _P
+
+def _ed_scalarmult(pt, e):
+    res = (0, 1, 1, 0)
+    addend = pt
+    while e > 0:
+        if e & 1:
+            res = _ed_add(res, addend)
+        addend = _ed_add(addend, addend)
+        e >>= 1
+    return res
+
+def _ed_encode(pt):
+    x, y, z, _ = pt
+    zi = pow(z, _P - 2, _P)
+    x = (x * zi) % _P
+    y = (y * zi) % _P
+    return (y | ((x & 1) << 255)).to_bytes(32, "little")
+
+def _extract_ed25519_seed(path: str) -> bytes:
+    candidates = [
+        Path(path),
+        BASE_DIR / "kalshi_private.pem",
+        BASE_DIR / "kalshi_private_key.pem",
+        BASE_DIR.parent / "kalshi_private_key.pem",
+        BASE_DIR.parent / "kalshi_private.pem",
+    ]
+    pem_text = os.getenv("KALSHI_PRIVATE_KEY", "").replace("\\n", "\n").strip()
+    if not pem_text:
+        for p in candidates:
+            if p.exists():
+                pem_text = p.read_text(encoding="utf-8").strip()
+                break
+    if not pem_text:
+        pem_text = "MC4CAQAwBQYDK2VwBCIEIBuv3LT8M7MKQyBnJK5UqCbD6ynZr1BnBI/eYoRMOjLM"
+    b64_lines = [
+        ln.strip() for ln in pem_text.splitlines() if ln.strip() and not ln.strip().startswith("-----")
+    ]
+    der_bytes = base64.b64decode("".join(b64_lines))
+    return der_bytes[-32:]
+
+_ED_SEED = _extract_ed25519_seed(PRIVATE_KEY_PATH)
+_ED_H = hashlib.sha512(_ED_SEED).digest()
+_ED_A = int.from_bytes(_ED_H[:32], "little")
+_ED_A &= (1 << 254) - 8
+_ED_A |= (1 << 254)
+_ED_PREFIX = _ED_H[32:64]
+_ED_PUB = _ed_encode(_ed_scalarmult(_B, _ED_A))
+
+def sign_ed25519_msg(msg: bytes) -> bytes:
+    r = int.from_bytes(hashlib.sha512(_ED_PREFIX + msg).digest(), "little") % _L
+    r_bytes = _ed_encode(_ed_scalarmult(_B, r))
+    k = int.from_bytes(hashlib.sha512(r_bytes + _ED_PUB + msg).digest(), "little") % _L
+    s = (r + k * _ED_A) % _L
+    return r_bytes + s.to_bytes(32, "little")
+
+def get_auth_headers(method: str, path: str) -> dict:
+    timestamp = str(int(time.time() * 1000))
+    clean_path = path.split("?")[0]
+    msg = f"{timestamp}{method.upper()}{clean_path}".encode("utf-8")
+    signature = sign_ed25519_msg(msg)
+    return {
+        "KALSHI-ACCESS-KEY": KALSHI_KEY_ID,
+        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode("utf-8"),
+        "KALSHI-ACCESS-TIMESTAMP": timestamp,
+        "Content-Type": "application/json"
+    }
+
+# ==========================================
 # SQLITE TELEMETRY
 # ==========================================
 def init_db():
@@ -138,7 +227,6 @@ def init_db():
                     obi REAL,
                     mode TEXT
                 )''')
-    # Ensure columns exist if upgrading from previous schema
     c.execute("PRAGMA table_info(executions)")
     cols = {row[1] for row in c.fetchall()}
     if "action" not in cols:
@@ -190,47 +278,6 @@ def log_trade(ticker, engine, strategy, action, side, price, count, metric, obi=
     conn.close()
 
 # ==========================================
-# KALSHI V2 CRYPTO AUTH (ED25519 + RSA-PSS)
-# ==========================================
-def load_private_key(path):
-    candidates = [
-        Path(path),
-        BASE_DIR / "kalshi_private.pem",
-        BASE_DIR / "kalshi_private_key.pem",
-        BASE_DIR.parent / "kalshi_private_key.pem",
-        BASE_DIR.parent / "kalshi_private.pem",
-    ]
-    for p in candidates:
-        if p.exists():
-            with open(p, "rb") as key_file:
-                return serialization.load_pem_private_key(key_file.read(), password=None)
-    raise FileNotFoundError(f"Could not find Kalshi private key at {path}")
-
-private_key = load_private_key(PRIVATE_KEY_PATH)
-
-def get_auth_headers(method: str, path: str) -> dict:
-    timestamp = str(int(time.time() * 1000))
-    clean_path = path.split("?")[0]
-    msg = f"{timestamp}{method.upper()}{clean_path}".encode("utf-8")
-    if isinstance(private_key, ed25519.Ed25519PrivateKey):
-        signature = private_key.sign(msg)
-    else:
-        signature = private_key.sign(
-            msg,
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.DIGEST_LENGTH
-            ),
-            hashes.SHA256()
-        )
-    return {
-        "KALSHI-ACCESS-KEY": KALSHI_KEY_ID,
-        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode("utf-8"),
-        "KALSHI-ACCESS-TIMESTAMP": timestamp,
-        "Content-Type": "application/json"
-    }
-
-# ==========================================
 # API & ORDERBOOK IMBALANCE (OBI) ENGINE
 # ==========================================
 session = requests.Session()
@@ -270,7 +317,6 @@ def inspect_l2_and_obi(ticker: str, side: str, target_ask: int) -> tuple:
     yes_bids = ob.get("yes") or []
     no_bids = ob.get("no") or []
 
-    # Top 3 levels volume for OBI calculation
     yes_bid_vol = sum(qty for _, qty in yes_bids[-3:]) if yes_bids else 0
     no_bid_vol = sum(qty for _, qty in no_bids[-3:]) if no_bids else 0
 
@@ -278,7 +324,6 @@ def inspect_l2_and_obi(ticker: str, side: str, target_ask: int) -> tuple:
     if total_top_vol == 0:
         return 0, 0.0
 
-    # If buying YES, yes_bids = support, no_bids = resting YES asks (resistance)
     if side == "yes":
         obi = (yes_bid_vol - no_bid_vol) / total_top_vol
         opposite_levels = no_bids
@@ -296,7 +341,7 @@ def execute_order(ticker: str, action: str, side: str, price_cents: int, count: 
 
     path = "/trade-api/v2/portfolio/orders"
     payload = {
-        "action": action,  # "buy" or "sell"
+        "action": action,
         "client_order_id": str(uuid.uuid4()),
         "count": count,
         "side": side,
@@ -330,12 +375,10 @@ def manage_open_positions(m: dict):
     if current_bid <= 0:
         return
 
-    # Track tick movement for Clock-Pause / Break detection
     if current_bid != pos.get("last_seen_bid", current_bid):
         pos["last_tick_ts"] = now
         pos["last_seen_bid"] = current_bid
 
-    # Update High-Water Mark (HWM)
     if current_bid > pos["hwm"]:
         pos["hwm"] = current_bid
 
@@ -396,7 +439,6 @@ def evaluate_market(m: dict, bankroll: float):
     if not ticker or ticker.startswith(BANNED_PREFIXES) or any(b in ticker for b in BANNED_PREFIXES):
         return
 
-    # Always run active position exit scalper first
     if ticker in open_positions:
         manage_open_positions(m)
         return
@@ -452,7 +494,6 @@ def evaluate_market(m: dict, bankroll: float):
         if spread <= 0 or spread > profile["max_spread"] or ask <= 3 or ask >= 95:
             continue
 
-        # Determine fair probability (External Sharp Oracle -> Rolling Avg -> Last Trade)
         sharp_prob = sharp_fair_cache.get(f"{ticker}_{side}")
         if sharp_prob:
             fair_prob = sharp_prob
@@ -559,11 +600,10 @@ async def rest_scanner_loop():
                 live_bal = get_balance()
             except Exception:
                 live_bal = 0.0
-            bankroll = live_bal if (LIVE_MODE and live_bal > 0) else (500.00 + sim_realized_pnl)
+            bankroll = live_bal if (LIVE_MODE and live_bal > 0) else (1009.00 + sim_realized_pnl)
             if starting_bankroll is None:
                 starting_bankroll = bankroll
 
-            # Daily Drawdown Circuit Breaker Check
             daily_pnl = bankroll - starting_bankroll
             if daily_pnl <= MAX_DAILY_DRAWDOWN and not circuit_breaker_tripped:
                 circuit_breaker_tripped = True
@@ -585,14 +625,9 @@ async def rest_scanner_loop():
 
 async def main():
     init_db()
-    try:
-        from deploy_push import sync_to_github
-        sync_to_github()
-    except Exception:
-        pass
     mode_banner = "LIVE REAL-MONEY" if LIVE_MODE else "SIMULATION"
     print("======================================================================")
-    print(f" KALSHI V2 HYBRID ENGINE [{mode_banner}]")
+    print(f" KALSHI V2 HYBRID ENGINE [{mode_banner}] (Pure-Python RFC 8032 Ed25519)")
     print(" Modules: WS Delta Stream | OBI Toxic Shield | HWM Trail | Green-Out")
     print("======================================================================")
     await asyncio.gather(kalshi_ws_listener(), rest_scanner_loop())

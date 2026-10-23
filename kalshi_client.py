@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import logging
 import time
@@ -21,74 +22,110 @@ from config import (
 
 logger = logging.getLogger("peezy.api")
 
+# =========================================================
+# PURE-PYTHON RFC 8032 ED25519 SIGNER (No cryptography .so needed)
+# =========================================================
+_P = 2**255 - 19
+_L = 2**252 + 27742317777372353535851937790883648493
+_D = (-121665 * pow(121666, _P - 2, _P)) % _P
+_BX = 15112221349535400772501151409588531511454012693041857206046113283949847762202
+_BY = 46316835694926478169428394003475163141307993866256225615783033603165251855960
+_B = (_BX, _BY, 1, (_BX * _BY) % _P)
 
-def _load_private_key():
-    """
-    Load the private key (supports both Ed25519 and RSA PEM keys) for Kalshi v2 signing.
-    Checks inline KALSHI_PRIVATE_KEY first, then KALSHI_PRIVATE_KEY_PATH, then BASE_DIR/kalshi_private.pem.
-    """
+
+def _ed_add(pt1, pt2):
+    x1, y1, z1, t1 = pt1
+    x2, y2, z2, t2 = pt2
+    a = ((y1 - x1) * (y2 - x2)) % _P
+    b = ((y1 + x1) * (y2 + x2)) % _P
+    c = (t1 * 2 * _D * t2) % _P
+    d = (z1 * 2 * z2) % _P
+    e = (b - a) % _P
+    f = (d - c) % _P
+    g = (d + c) % _P
+    h = (b + a) % _P
+    return (e * f) % _P, (g * h) % _P, (f * g) % _P, (e * h) % _P
+
+
+def _ed_scalarmult(pt, e):
+    res = (0, 1, 1, 0)
+    addend = pt
+    while e > 0:
+        if e & 1:
+            res = _ed_add(res, addend)
+        addend = _ed_add(addend, addend)
+        e >>= 1
+    return res
+
+
+def _ed_encode(pt):
+    x, y, z, _ = pt
+    zi = pow(z, _P - 2, _P)
+    x = (x * zi) % _P
+    y = (y * zi) % _P
+    return (y | ((x & 1) << 255)).to_bytes(32, "little")
+
+
+def _load_ed25519_seed() -> Optional[bytes]:
     pem_text = KALSHI_PRIVATE_KEY.strip()
     if not pem_text:
         candidates = []
         if KALSHI_PRIVATE_KEY_PATH:
             candidates.append(Path(KALSHI_PRIVATE_KEY_PATH).expanduser())
         candidates.append(BASE_DIR / "kalshi_private.pem")
+        candidates.append(BASE_DIR.parent / "kalshi_private_key.pem")
         for p in candidates:
             if p.exists():
                 pem_text = p.read_text(encoding="utf-8").strip()
                 break
-
     if not pem_text:
         return None
-
     if "\\n" in pem_text:
         pem_text = pem_text.replace("\\n", "\n")
-
     try:
-        from cryptography.hazmat.primitives import serialization
-
-        return serialization.load_pem_private_key(
-            pem_text.encode("utf-8"), password=None
-        )
+        b64_lines = [
+            ln.strip()
+            for ln in pem_text.splitlines()
+            if ln.strip() and not ln.strip().startswith("-----")
+        ]
+        der = base64.b64decode("".join(b64_lines))
+        return der[-32:] if len(der) >= 32 else None
     except Exception as exc:
-        logger.warning("Failed to load KALSHI_PRIVATE_KEY: %s", exc)
+        logger.warning("Failed to parse Ed25519 seed: %s", exc)
         return None
 
 
 def kalshi_Configured() -> bool:
-    """Return True if both KALSHI_API_KEY and a valid private key are configured."""
-    return bool(KALSHI_API_KEY and _load_private_key() is not None)
+    """Return True if both KALSHI_API_KEY and a valid Ed25519 private key seed are configured."""
+    return bool(KALSHI_API_KEY and _load_ed25519_seed() is not None)
 
 
 def build_kalshi_auth_headers(method: str, url: str) -> Dict[str, str]:
     """
     Generate signed headers required by Kalshi v2 authenticated endpoints:
     KALSHI-ACCESS-KEY, KALSHI-ACCESS-TIMESTAMP, KALSHI-ACCESS-SIGNATURE.
-    Supports both Ed25519 private keys and RSA-PSS private keys.
+    Uses Pure-Python RFC 8032 Ed25519 signing (zero C/Rust .so dependencies).
     """
-    priv_key = _load_private_key()
-    if not KALSHI_API_KEY or priv_key is None:
+    seed = _load_ed25519_seed()
+    if not KALSHI_API_KEY or seed is None:
         return {}
-
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import ed25519, padding
 
     timestamp_ms = str(int(time.time() * 1000))
     parsed_path = urlparse(url).path
     msg_bytes = f"{timestamp_ms}{method.upper()}{parsed_path}".encode("utf-8")
 
-    if isinstance(priv_key, ed25519.Ed25519PrivateKey):
-        signature = priv_key.sign(msg_bytes)
-    else:
-        signature = priv_key.sign(
-            msg_bytes,
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.DIGEST_LENGTH,
-            ),
-            hashes.SHA256(),
-        )
+    h = hashlib.sha512(seed).digest()
+    a = int.from_bytes(h[:32], "little")
+    a &= (1 << 254) - 8
+    a |= 1 << 254
+    prefix = h[32:64]
+    pub = _ed_encode(_ed_scalarmult(_B, a))
 
+    r = int.from_bytes(hashlib.sha512(prefix + msg_bytes).digest(), "little") % _L
+    r_bytes = _ed_encode(_ed_scalarmult(_B, r))
+    k = int.from_bytes(hashlib.sha512(r_bytes + pub + msg_bytes).digest(), "little") % _L
+    s = (r + k * a) % _L
+    signature = r_bytes + s.to_bytes(32, "little")
     sig_b64 = base64.b64encode(signature).decode("utf-8")
 
     return {
