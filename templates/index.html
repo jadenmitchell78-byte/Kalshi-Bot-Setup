@@ -1,0 +1,872 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Peezy Slip Maker • 10k MC & Copula Quant UI</title>
+  <style>
+    :root {
+      --bg: #080B11;
+      --card: #111723;
+      --card-alt: #161F30;
+      --border: #233047;
+      --text: #F8FAFC;
+      --muted: #94A3B8;
+      --emerald: #10B981;
+      --emerald-bg: rgba(16, 185, 129, 0.14);
+      --amber: #F59E0B;
+      --amber-bg: rgba(245, 158, 11, 0.15);
+      --crimson: #EF4444;
+      --crimson-bg: rgba(239, 68, 68, 0.15);
+      --indigo: #6366F1;
+      --indigo-bg: rgba(99, 102, 241, 0.16);
+      --cyan: #06B6D4;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body {
+      margin: 0;
+      padding: 12px 12px 245px 12px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, sans-serif;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    /* Top Quant Header */
+    .top-bar {
+      background: linear-gradient(145deg, #131B2E 0%, #0D1320 100%);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px 14px;
+      margin-bottom: 12px;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+    }
+    .brand-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .brand-title {
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.8px;
+      color: var(--amber);
+      text-transform: uppercase;
+    }
+    .shield-pill {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: var(--emerald-bg);
+      color: var(--emerald);
+      border: 1px solid rgba(16, 185, 129, 0.35);
+    }
+    .bankroll-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-top: 6px;
+    }
+    .bankroll-val {
+      font-size: 24px;
+      font-weight: 900;
+      color: #FFFFFF;
+      letter-spacing: -0.5px;
+    }
+    .sub-metrics {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 3px;
+    }
+    .ctrl-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .btn {
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      padding: 8px 6px;
+      font-weight: 800;
+      font-size: 11px;
+      color: var(--text);
+      background: var(--card-alt);
+      cursor: pointer;
+      text-align: center;
+      transition: transform 0.08s ease, background 0.15s ease;
+    }
+    .btn:active { transform: scale(0.97); }
+    .btn-emerald { background: var(--emerald); color: #04130D; border-color: var(--emerald); }
+    .btn-amber { background: var(--amber); color: #1A1002; border-color: var(--amber); }
+    .btn-indigo { background: var(--indigo); color: #FFFFFF; border-color: var(--indigo); }
+    .btn-crimson { background: rgba(239, 68, 68, 0.2); color: #FCA5A5; border-color: rgba(239, 68, 68, 0.4); }
+
+    /* Telemetry Strip */
+    .telem-strip {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 6px;
+      margin-bottom: 8px;
+      scrollbar-width: none;
+    }
+    .telem-strip::-webkit-scrollbar { display: none; }
+    .telem-chip {
+      flex: 0 0 auto;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 6px 10px;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .telem-chip b { color: var(--cyan); }
+
+    /* Phase 2: Category Filter Pills */
+    .cat-bar {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      padding-bottom: 8px;
+      margin-bottom: 10px;
+      scrollbar-width: none;
+    }
+    .cat-bar::-webkit-scrollbar { display: none; }
+    .cat-pill {
+      flex: 0 0 auto;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 5px 12px;
+      font-size: 11px;
+      font-weight: 800;
+      background: var(--card);
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .cat-pill.active {
+      background: var(--emerald-bg);
+      color: var(--emerald);
+      border-color: var(--emerald);
+    }
+
+    /* Phase 1 & 3: Decoupled Persistent Video Dock (Never touched by live odds polling) */
+    .video-dock {
+      display: none;
+      background: #05070B;
+      border: 1px solid var(--cyan);
+      border-radius: 14px;
+      overflow: hidden;
+      margin-bottom: 12px;
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.75);
+    }
+    .video-dock-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 12px;
+      background: #0E1525;
+      border-bottom: 1px solid var(--border);
+      font-size: 11px;
+      font-weight: 800;
+      color: var(--cyan);
+    }
+    .video-frame-wrap {
+      position: relative;
+      width: 100%;
+      padding-top: 56.25%;
+      background: #000;
+    }
+    .video-frame-wrap iframe {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      border: 0;
+    }
+
+    /* Slip & Prop Cards */
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 13px;
+      margin-bottom: 10px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    }
+    .banner-high {
+      background: linear-gradient(90deg, rgba(239,68,68,0.22), rgba(245,158,11,0.22));
+      border: 1px solid rgba(245, 158, 11, 0.5);
+      color: #FDE68A;
+      font-weight: 900;
+      font-size: 12px;
+      padding: 6px 10px;
+      border-radius: 8px;
+      text-align: center;
+      margin-bottom: 8px;
+    }
+    .banner-mod {
+      background: var(--indigo-bg);
+      border: 1px solid rgba(99, 102, 241, 0.45);
+      color: #C7D2FE;
+      font-weight: 900;
+      font-size: 12px;
+      padding: 6px 10px;
+      border-radius: 8px;
+      text-align: center;
+      margin-bottom: 8px;
+    }
+    .guard-line {
+      font-size: 11px;
+      color: var(--emerald);
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+    .leg-item {
+      padding: 8px 10px;
+      background: var(--card-alt);
+      border-left: 3px solid var(--emerald);
+      border-radius: 8px;
+      margin-bottom: 7px;
+    }
+    .leg-title {
+      font-weight: 800;
+      font-size: 13px;
+      color: #FFFFFF;
+    }
+    .leg-sub {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 3px;
+    }
+    .leg-link {
+      font-size: 11px;
+      color: var(--cyan);
+      text-decoration: none;
+      font-weight: 700;
+      display: inline-block;
+      margin-top: 2px;
+    }
+    .copula-box {
+      background: rgba(99, 102, 241, 0.1);
+      border: 1px dashed rgba(99, 102, 241, 0.45);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 11px;
+      margin: 9px 0;
+    }
+    .receipt-footer {
+      border-top: 1px solid var(--border);
+      padding-top: 9px;
+      margin-top: 8px;
+      font-size: 12px;
+    }
+    .receipt-row {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 4px;
+    }
+    .action-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    /* Prop Card Selection (Player Props Tab) */
+    .prop-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      margin-bottom: 8px;
+      cursor: pointer;
+      transition: border-color 0.15s ease, background 0.15s ease;
+    }
+    .prop-card.selected {
+      border: 2px solid var(--emerald);
+      background: rgba(16, 185, 129, 0.08);
+    }
+    .pct-bar {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+      background: var(--card-alt);
+      border-radius: 8px;
+      padding: 6px 8px;
+      margin-top: 8px;
+      font-size: 11px;
+      text-align: center;
+    }
+
+    /* Floating "Pick-6" Slip Builder Card */
+    .pick6-drawer {
+      position: fixed;
+      bottom: 62px;
+      left: 8px;
+      right: 8px;
+      background: linear-gradient(180deg, #162033 0%, #0E1525 100%);
+      border: 2px solid var(--amber);
+      border-radius: 16px;
+      padding: 11px 13px;
+      box-shadow: 0 -6px 26px rgba(0, 0, 0, 0.75);
+      z-index: 90;
+    }
+    .pick6-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-weight: 900;
+      font-size: 12px;
+      color: var(--amber);
+    }
+    .pick6-pills {
+      display: flex;
+      gap: 5px;
+      overflow-x: auto;
+      padding: 6px 0;
+      scrollbar-width: none;
+    }
+    .pick6-pill {
+      flex: 0 0 auto;
+      background: var(--card-alt);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 3px 9px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #E2E8F0;
+    }
+    .pick6-metrics {
+      font-size: 11px;
+      color: #CBD5E1;
+      display: flex;
+      justify-content: space-between;
+      margin-top: 2px;
+    }
+
+    /* Bottom Navigation Tabs */
+    .bottom-nav {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 56px;
+      background: #0B101B;
+      border-top: 1px solid var(--border);
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+      padding: 6px 10px;
+      z-index: 100;
+    }
+    .nav-btn {
+      border: none;
+      border-radius: 10px;
+      background: transparent;
+      color: var(--muted);
+      font-weight: 800;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .nav-btn.active {
+      background: var(--amber-bg);
+      color: var(--amber);
+      border: 1px solid rgba(245, 158, 11, 0.35);
+    }
+    .toast {
+      position: fixed;
+      top: 14px;
+      left: 16px;
+      right: 16px;
+      background: #065F46;
+      color: #ECFDF5;
+      border: 1px solid var(--emerald);
+      padding: 10px 14px;
+      border-radius: 10px;
+      font-weight: 800;
+      font-size: 12px;
+      text-align: center;
+      z-index: 200;
+      display: none;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+    }
+  </style>
+</head>
+<body>
+
+  <div id="toast" class="toast"></div>
+
+  <!-- Top Quant Header -->
+  <div class="top-bar">
+    <div class="brand-row">
+      <span class="brand-title">⚡ PEEZY SLIP MAKER • 10K MC & COPULA</span>
+      <span id="shield-badge" class="shield-pill">💧 Liq Guard & 🛡️ Anti-Snipe: CLEAR</span>
+    </div>
+    <div class="bankroll-row">
+      <div id="bal-val" class="bankroll-val">$1009.00</div>
+      <div id="pnl-badge" style="font-size:13px;font-weight:800;color:var(--emerald)">Net PnL: +$0.00</div>
+    </div>
+    <div id="sub-stats" class="sub-metrics">Mode: SIM | Scans: 0 | Open Slips: 0 | Record: 0W-0L</div>
+    <div class="ctrl-grid">
+      <button id="btn-auto" class="btn" onclick="triggerAction('auto')">⏸ Auto: OFF</button>
+      <button id="btn-mode" class="btn" onclick="triggerAction('mode')">🎛 Mode: SIM</button>
+      <button class="btn btn-indigo" onclick="triggerAction('simsettle')">⚡ Sim Settle</button>
+      <button class="btn btn-crimson" onclick="triggerAction('reset')">♻️ Reset Sim</button>
+    </div>
+  </div>
+
+  <!-- Live ESPN Telemetry Strip -->
+  <div id="telem-strip" class="telem-strip"></div>
+
+  <!-- Phase 2: Sport Category Filter Bar -->
+  <div id="cat-bar" class="cat-bar">
+    <button class="cat-pill active" onclick="setCategory('ALL')">🔥 ALL SPORTS</button>
+    <button class="cat-pill" onclick="setCategory('NBA')">🏀 NBA</button>
+    <button class="cat-pill" onclick="setCategory('NFL')">🏈 NFL</button>
+    <button class="cat-pill" onclick="setCategory('MLB')">⚾ MLB</button>
+    <button class="cat-pill" onclick="setCategory('WNBA')">🗽 WNBA</button>
+    <button class="cat-pill" onclick="setCategory('TENNIS')">🎾 TENNIS</button>
+    <button class="cat-pill" onclick="setCategory('ESPORTS')">🎮 ESPORTS</button>
+  </div>
+
+  <!-- Phase 1 & 3: Decoupled Persistent Streamed.pk Video Player Dock -->
+  <div id="persistent-video-dock" class="video-dock">
+    <div class="video-dock-header">
+      <span id="video-dock-title">📺 LIVE STREAM (Decoupled from Live-Wire Polling)</span>
+      <div>
+        <button class="btn" style="padding:3px 8px;font-size:10px" onclick="closeStreamDock()">✕ Close Player</button>
+      </div>
+    </div>
+    <div class="video-frame-wrap">
+      <iframe id="video-dock-iframe" src="about:blank" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen></iframe>
+    </div>
+  </div>
+
+  <!-- TAB 1: HOME (Live +EV Scanner & Correlated Copula Combos) -->
+  <div id="tab-home">
+    <div id="home-slips"></div>
+  </div>
+
+  <!-- TAB 2: PLAYER PROPS (10k Monte Carlo Prop Analyzer & Percentiles) -->
+  <div id="tab-props" style="display:none">
+    <div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:700">
+      Tap 2 to 6 props below to build a custom Joint Gaussian Copula Pick-6 combo:
+    </div>
+    <div id="props-list"></div>
+  </div>
+
+  <!-- TAB 3: OPEN SLIPS / PnL -->
+  <div id="tab-open" style="display:none">
+    <div id="open-slips-list"></div>
+  </div>
+
+  <!-- FLOATING "PICK-6" SLIP BUILDER CARD -->
+  <div id="pick6-drawer" class="pick6-drawer">
+    <div class="pick6-header">
+      <span id="pick6-title">🎟 PICK-6 COPULA SLIP BUILDER (0/6 Legs)</span>
+      <span id="pick6-corr" style="color:var(--emerald)">🧬 Copula Ready</span>
+    </div>
+    <div id="pick6-pills" class="pick6-pills">
+      <span style="font-size:11px;color:var(--muted)">Tap props in "Player Props" or "Home" to add 2–6 correlated legs...</span>
+    </div>
+    <div id="pick6-metrics" class="pick6-metrics">
+      <span>💰 Implied: <b>--%</b> | True Hit: <b>--%</b></span>
+      <span>📈 Edge: <b>--% EV</b> | Stake: <b>--u</b></span>
+    </div>
+    <div class="action-row" style="margin-top:8px">
+      <button class="btn btn-emerald" onclick="submitPick6(false)">⚡ Execute Combo</button>
+      <button class="btn btn-amber" onclick="submitPick6(true)">📲 Send to Telegram</button>
+    </div>
+  </div>
+
+  <!-- BOTTOM NAVIGATION TABS -->
+  <div class="bottom-nav">
+    <button id="nav-home" class="nav-btn active" onclick="switchTab('home')">🏠 Home (+EV)</button>
+    <button id="nav-props" class="nav-btn" onclick="switchTab('props')">🎯 Player Props (10k)</button>
+    <button id="nav-open" class="nav-btn" onclick="switchTab('open')">💼 Open Slips / PnL</button>
+  </div>
+
+  <script>
+    let activeTab = 'home';
+    let activeCategory = 'ALL';
+    let latestState = { props: [], slips: [], open_slips: [], settled_slips: [], stats: {} };
+    let selectedTickers = [];
+    let currentEval = null;
+    let lastSlipsSig = '';
+    let lastPropsSig = '';
+    let lastOpenSig = '';
+
+    function setCategory(cat) {
+      activeCategory = cat;
+      const pills = document.querySelectorAll('#cat-bar .cat-pill');
+      pills.forEach(btn => {
+        const txt = btn.innerText.toUpperCase();
+        const isMatch = (cat === 'ALL' && txt.includes('ALL')) || txt.includes(cat);
+        btn.className = 'cat-pill' + (isMatch ? ' active' : '');
+      });
+      lastSlipsSig = '';
+      lastPropsSig = '';
+      renderHomeSlips();
+      renderProps();
+    }
+
+    async function watchMatchStream(sport, label) {
+      const dock = document.getElementById('persistent-video-dock');
+      const titleEl = document.getElementById('video-dock-title');
+      const iframeEl = document.getElementById('video-dock-iframe');
+      dock.style.display = 'block';
+      titleEl.innerText = `📺 Resolving streamed.pk HD Feed: [${sport}] ${label}...`;
+      try {
+        const resp = await fetch(`/api/stream?sport=${encodeURIComponent(sport)}&q=${encodeURIComponent(label)}`);
+        const data = await resp.json();
+        if (data && data.embed_url) {
+          titleEl.innerText = `📺 LIVE: ${data.title} (${data.source.toUpperCase()})`;
+          if (iframeEl.src !== data.embed_url) {
+            iframeEl.src = data.embed_url;
+          }
+          return;
+        }
+      } catch (e) {
+        console.warn('Backend stream proxy unreachable, trying streamed.pk direct:', e);
+      }
+      const catMap = { NBA: 'basketball', WNBA: 'basketball', NFL: 'american-football', MLB: 'baseball', TENNIS: 'tennis', ESPORTS: 'other' };
+      const cat = catMap[sport] || 'basketball';
+      const fallbackUrl = `https://streamed.pk/watch/${cat}`;
+      titleEl.innerText = `📺 LIVE: [${sport}] ${label}`;
+      if (iframeEl.src !== fallbackUrl) {
+        iframeEl.src = fallbackUrl;
+      }
+    }
+
+    function closeStreamDock() {
+      const dock = document.getElementById('persistent-video-dock');
+      const iframeEl = document.getElementById('video-dock-iframe');
+      iframeEl.src = 'about:blank';
+      dock.style.display = 'none';
+    }
+
+    function showToast(msg) {
+      const el = document.getElementById('toast');
+      el.innerText = msg;
+      el.style.display = 'block';
+      setTimeout(() => { el.style.display = 'none'; }, 3200);
+    }
+
+    function switchTab(t) {
+      activeTab = t;
+      ['home', 'props', 'open'].forEach(k => {
+        document.getElementById('tab-' + k).style.display = (k === t ? 'block' : 'none');
+        document.getElementById('nav-' + k).className = 'nav-btn' + (k === t ? ' active' : '');
+      });
+    }
+
+    function toggleLeg(ticker) {
+      const idx = selectedTickers.indexOf(ticker);
+      if (idx >= 0) {
+        selectedTickers.splice(idx, 1);
+      } else {
+        if (selectedTickers.length >= 6) {
+          showToast('Max 6 legs in Pick-6 Copula Builder!');
+          return;
+        }
+        selectedTickers.push(ticker);
+      }
+      renderProps();
+      evaluatePick6();
+    }
+
+    async function evaluatePick6() {
+      const titleEl = document.getElementById('pick6-title');
+      const pillsEl = document.getElementById('pick6-pills');
+      const corrEl = document.getElementById('pick6-corr');
+      const metricsEl = document.getElementById('pick6-metrics');
+
+      titleEl.innerText = `🎟 PICK-6 COPULA SLIP BUILDER (${selectedTickers.length}/6 Legs)`;
+      if (selectedTickers.length === 0) {
+        currentEval = null;
+        pillsEl.innerHTML = `<span style="font-size:11px;color:var(--muted)">Tap props in "Player Props" to add 2–6 correlated legs...</span>`;
+        corrEl.innerText = '🧬 Copula Ready';
+        corrEl.style.color = 'var(--emerald)';
+        metricsEl.innerHTML = `<span>💰 Implied: <b>--%</b> | True Hit: <b>--%</b></span><span>📈 Edge: <b>--% EV</b> | Stake: <b>--u</b></span>`;
+        return;
+      }
+
+      pillsEl.innerHTML = selectedTickers.map(t => {
+        const p = latestState.props.find(x => x.market_ticker === t);
+        const label = p ? `${p.sport}: ${p.player_name} (${p.side} ${p.line})` : t;
+        return `<span class="pick6-pill" onclick="toggleLeg('${t}')">${label} ✕</span>`;
+      }).join('');
+
+      if (selectedTickers.length < 2) {
+        corrEl.innerText = 'Select 1 more leg...';
+        corrEl.style.color = 'var(--amber)';
+        return;
+      }
+
+      try {
+        const resp = await fetch('/api/evaluate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tickers: selectedTickers })
+        });
+        const data = await resp.json();
+        if (data.ok && data.slip) {
+          currentEval = data.slip;
+          const s = data.slip;
+          const sign = s.copula_boost_pct >= 0 ? '+' : '';
+          if (s.cannibalized) {
+            corrEl.innerText = `⚠️ Neg Corr (${sign}${s.copula_boost_pct}%)`;
+            corrEl.style.color = 'var(--crimson)';
+          } else {
+            corrEl.innerText = `🧬 Copula Boost: ${sign}${s.copula_boost_pct}%`;
+            corrEl.style.color = 'var(--emerald)';
+          }
+          metricsEl.innerHTML =
+            `<span>💰 Imp: <b>${s.book_prob_pct}%</b> | True: <b>${s.copula_prob_pct}%</b></span>` +
+            `<span>📈 <b>+${s.ev_pct}% EV</b> | 🏦 <b>${s.kelly_units}u ($${s.kelly_stake})</b> ➡️ <b>$${s.potential_payout}</b></span>`;
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    async function submitPick6(sendTelegram, customTickers) {
+      const tickers = customTickers || selectedTickers;
+      if (!tickers || tickers.length < 2) {
+        showToast('Select at least 2 legs first!');
+        return;
+      }
+      try {
+        const resp = await fetch('/api/execute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tickers: tickers, send_telegram: sendTelegram })
+        });
+        const data = await resp.json();
+        if (data.msg) showToast(data.msg);
+        if (!customTickers) {
+          selectedTickers = [];
+          evaluatePick6();
+        }
+        pullState();
+      } catch (e) {
+        showToast('Execution error: ' + e);
+      }
+    }
+
+    async function triggerAction(act) {
+      const resp = await fetch('/api/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ act })
+      });
+      const data = await resp.json();
+      if (data.msg) showToast(data.msg);
+      pullState();
+    }
+
+    function renderHomeSlips() {
+      const container = document.getElementById('home-slips');
+      const allSlips = latestState.slips || [];
+      const filteredSlips = activeCategory === 'ALL'
+        ? allSlips
+        : allSlips.filter(s => (s.legs || []).some(l => l.sport === activeCategory));
+
+      if (filteredSlips.length === 0) {
+        container.innerHTML = `<div class="card">No active +EV slips in category <b>${activeCategory}</b> right now. Try <b>ALL SPORTS</b> or tap Player Props!</div>`;
+        return;
+      }
+      container.innerHTML = filteredSlips.map(s => {
+        const isHigh = s.ev_pct >= 6.0;
+        const bannerClass = isHigh ? 'banner-high' : 'banner-mod';
+        const bannerText = isHigh
+          ? '🚨 ACTION: TAKE (HIGH CONVICTION) 🚨'
+          : '⚡ ACTION: TAKE (MODERATE EDGE) ⚡';
+        const boostSign = s.copula_boost_pct >= 0 ? '+' : '';
+        const corrStatus = s.cannibalized ? 'Negative Correlation Warning' : 'Positive Correlation Verified';
+        const tickersJson = JSON.stringify(s.legs.map(l => l.market_ticker)).replace(/"/g, '&quot;');
+        const primaryLeg = (s.legs && s.legs[0]) ? s.legs[0] : { sport: 'NBA', player_name: 'Live Game' };
+        const safeLabel = (primaryLeg.player_name || 'Live').replace(/'/g, '');
+
+        const legsHtml = s.legs.map((l, idx) => `
+          <div class="leg-item">
+            <div class="leg-title">• Leg ${idx + 1}: [${l.sport}] ${l.formatted_label}</div>
+            <div class="leg-sub">📊 Book Odds / Implied: ${(l.book_prob * 100).toFixed(1)}% (${l.american_odds}) | 🎯 10k MC True: ${(l.mc_true_prob * 100).toFixed(1)}%</div>
+            <a class="leg-link" href="${l.market_url}" target="_blank" rel="noopener">🔗 Direct Market Link (${l.market_ticker})</a>
+          </div>
+        `).join('');
+
+        return `
+          <div class="card">
+            <div class="${bannerClass}">${bannerText}</div>
+            <div class="guard-line">💧 Liquidity Guard: PASSED ($${s.total_liquid_vol.toLocaleString()} Vol) | 🛡️ Anti-Snipe: CLEAR</div>
+            ${legsHtml}
+            <div class="copula-box">
+              <div>🧬 <b>Joint Gaussian Copula Boost:</b> ${boostSign}${s.copula_boost_pct.toFixed(1)}% (${corrStatus})</div>
+              <div style="margin-top:3px;color:var(--muted)">📡 <b>Live ESPN Telemetry:</b> ${s.telemetry_summary}</div>
+            </div>
+            <div class="receipt-footer">
+              <div class="receipt-row">
+                <span>💰 Combined Implied Chance: <b>${s.book_prob_pct}%</b></span>
+                <span>True Hit Prob: <b style="color:var(--emerald)">${s.copula_prob_pct}%</b></span>
+              </div>
+              <div class="receipt-row">
+                <span>📈 Net Edge: <b style="color:var(--emerald)">+${s.ev_pct}% EV</b></span>
+                <span>🏦 Kelly Stake: <b>${s.kelly_units}u ($${s.kelly_stake.toFixed(2)})</b></span>
+              </div>
+              <div class="receipt-row">
+                <span>💵 Est. Payout: <b style="color:var(--amber)">$${s.potential_payout.toFixed(2)} (+$${s.est_profit.toFixed(2)} Profit)</b></span>
+              </div>
+            </div>
+            <div class="action-row" style="grid-template-columns: 1fr 1fr 1fr">
+              <button class="btn btn-emerald" onclick="submitPick6(false, ${tickersJson})">⚡ Execute</button>
+              <button class="btn btn-amber" onclick="submitPick6(true, ${tickersJson})">📲 Telegram</button>
+              <button class="btn btn-indigo" onclick="watchMatchStream('${primaryLeg.sport}', '${safeLabel}')">📺 Watch Live</button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderProps() {
+      const container = document.getElementById('props-list');
+      const allProps = latestState.props || [];
+      const filteredProps = activeCategory === 'ALL'
+        ? allProps
+        : allProps.filter(p => p.sport === activeCategory);
+
+      if (filteredProps.length === 0) {
+        container.innerHTML = `<div class="card">No active props in category <b>${activeCategory}</b>.</div>`;
+        return;
+      }
+      container.innerHTML = filteredProps.map(p => {
+        const isSel = selectedTickers.includes(p.market_ticker);
+        const bkPct = (p.book_prob * 100).toFixed(1);
+        const mcPct = (p.mc_true_prob * 100).toFixed(1);
+        const safeName = (p.player_name || p.sport).replace(/'/g, '');
+        return `
+          <div class="prop-card ${isSel ? 'selected' : ''}" onclick="toggleLeg('${p.market_ticker}')">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span style="font-weight:900;font-size:13px">[${p.sport}] ${p.formatted_label}</span>
+              <span class="shield-pill">+${p.edge_pct}% Edge</span>
+            </div>
+            <div style="font-size:11px;color:var(--muted);margin-top:4px">
+              📊 Book Implied: <b>${bkPct}%</b> (${p.american_odds}) | 🎯 10k MC True: <b style="color:var(--emerald)">${mcPct}%</b> • 💧 $${p.volume_usd.toLocaleString()} Vol
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:3px">
+              <span style="font-size:11px;color:var(--cyan)">📡 ${p.telemetry_tag}</span>
+              <button class="btn" style="padding:2px 8px;font-size:10px;border-color:var(--cyan);color:var(--cyan)" onclick="event.stopPropagation();watchMatchStream('${p.sport}', '${safeName}')">📺 Stream</button>
+            </div>
+            <div class="pct-bar">
+              <div>🔻 10th Floor<br><b>${p.p10}</b></div>
+              <div>🎯 50th Median<br><b style="color:var(--amber)">${p.p50}</b></div>
+              <div>🚀 90th Ceiling<br><b style="color:var(--emerald)">${p.p90}</b></div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderOpenSlips() {
+      const container = document.getElementById('open-slips-list');
+      const openList = latestState.open_slips || [];
+      const settledList = latestState.settled_slips || [];
+
+      let html = '';
+      if (openList.length === 0) {
+        html += `<div class="card">📭 No open slips in <code>picks.db</code>. Execute a combo from Home or Pick-6 Builder!</div>`;
+      } else {
+        html += openList.map(s => `
+          <div class="card">
+            <div style="display:flex;justify-content:space-between;font-weight:900">
+              <span>⏳ Slip ${s.slip_id} (${s.leg_count}-Leg ${s.american_odds})</span>
+              <span style="color:var(--amber)">PENDING</span>
+            </div>
+            <div style="font-size:11px;color:var(--muted);margin:6px 0">
+              💰 Implied: ${(s.book_prob * 100).toFixed(1)}% | True Hit: ${(s.copula_joint_prob * 100).toFixed(1)}% | Stake: <b>$${s.kelly_stake.toFixed(2)}</b> ➡️ <b>$${s.potential_payout.toFixed(2)}</b>
+            </div>
+            ${(s.legs || []).map((l, i) => `
+              <div style="font-size:11px;padding:3px 0;border-top:1px solid var(--border)">
+                • Leg ${i+1}: [${l.sport}] ${l.player_prop} (${l.side} ${l.line || ''}) — <b>${l.status}</b>
+              </div>
+            `).join('')}
+          </div>
+        `).join('');
+      }
+
+      if (settledList.length > 0) {
+        html += `<div style="font-weight:900;margin:12px 0 6px 0;color:var(--muted)">RECENT SETTLED RECEIPTS</div>`;
+        html += settledList.map(s => {
+          const col = s.status === 'WON' ? 'var(--emerald)' : (s.status === 'LOST' ? 'var(--crimson)' : 'var(--amber)');
+          const sign = s.pnl >= 0 ? '+' : '';
+          return `
+            <div class="card" style="padding:10px 12px">
+              <div style="display:flex;justify-content:space-between;font-weight:800">
+                <span>${s.slip_id} (${s.leg_count}-Leg ${s.american_odds})</span>
+                <span style="color:${col}">${s.status} (${sign}$${s.pnl.toFixed(2)})</span>
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+      container.innerHTML = html;
+    }
+
+    async function pullState() {
+      try {
+        const resp = await fetch('/api/state');
+        const d = await resp.json();
+        latestState = d;
+
+        const st = d.stats || {};
+        document.getElementById('bal-val').innerText = '$' + (st.sim_cash || 1009).toFixed(2);
+        const pnl = st.net_pnl || 0;
+        const pSign = pnl >= 0 ? '+' : '';
+        const pnlEl = document.getElementById('pnl-badge');
+        pnlEl.innerText = `Net PnL: ${pSign}$${pnl.toFixed(2)} (${pSign}${st.roi_pct || 0}% ROI)`;
+        pnlEl.style.color = pnl >= 0 ? 'var(--emerald)' : 'var(--crimson)';
+
+        document.getElementById('sub-stats').innerText =
+          `Mode: ${st.mode || 'SIM'} | Scans: ${st.scans || 0} | Open Slips: ${st.pending_slips || 0} | Record: ${st.won_slips || 0}W-${st.lost_slips || 0}L`;
+
+        const btnAuto = document.getElementById('btn-auto');
+        btnAuto.innerText = st.auto ? '🤖 Auto: ON' : '⏸ Auto: OFF';
+        btnAuto.className = 'btn ' + (st.auto ? 'btn-amber' : '');
+
+        const btnMode = document.getElementById('btn-mode');
+        btnMode.innerText = `🎛 Mode: ${st.mode || 'SIM'}`;
+
+        const telemStrip = document.getElementById('telem-strip');
+        telemStrip.innerHTML = (d.telemetry || []).map(t =>
+          `<div class="telem-chip"><b>${t.sport}</b> ${t.badge}</div>`
+        ).join('');
+
+        // Phase 1 Diff Guard: Only re-render lists whose payload actually changed, never touching #persistent-video-dock
+        const slipsSig = JSON.stringify(d.slips || []) + '|' + activeCategory;
+        if (slipsSig !== lastSlipsSig) {
+          lastSlipsSig = slipsSig;
+          renderHomeSlips();
+        }
+        const propsSig = JSON.stringify(d.props || []) + '|' + activeCategory + '|' + selectedTickers.join(',');
+        if (propsSig !== lastPropsSig) {
+          lastPropsSig = propsSig;
+          renderProps();
+        }
+        const openSig = JSON.stringify(d.open_slips || []) + '|' + JSON.stringify(d.settled_slips || []);
+        if (openSig !== lastOpenSig) {
+          lastOpenSig = openSig;
+          renderOpenSlips();
+        }
+      } catch (e) {
+        console.error('State poll error:', e);
+      }
+    }
+
+    setInterval(pullState, 5000);
+    pullState();
+  </script>
+</body>
+</html>
