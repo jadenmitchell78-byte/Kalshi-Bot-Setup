@@ -8,6 +8,7 @@ from aiohttp import web
 
 from config import BASE_DIR, MAX_PICK6_LEGS, MC_ITERATIONS, WEB_PORT
 from db import (
+    clear_idempotency_locks,
     fetch_pending_parlays,
     fetch_settled_slips,
     get_bot_stats,
@@ -19,7 +20,7 @@ from db import (
 )
 from parlay import ParlaySlip, build_optimal_parlays, evaluate_parlay, format_slip_card
 from settle_engine import run_settlement_cycle
-from slip import SlipLeg
+from slip import SlipLeg, clear_cooldown_locks
 from telemetry import fetch_all_telemetry
 
 logger = logging.getLogger("peezy.web")
@@ -239,10 +240,32 @@ def create_web_app(
     async def handle_action(request: web.Request) -> web.Response:
         body = await request.json()
         act = body.get("act")
-        if act == "auto":
+        if act in ("auto", "sniper"):
             new_auto = set_auto_mode(None)
             return web.json_response(
-                {"ok": True, "msg": f"Auto-Sniper set to {'ON' if new_auto else 'OFF'}"}
+                {"ok": True, "msg": f"🎯 Sniper set to {'🟢 ARMED' if new_auto else '🔴 DISARMED'}"}
+            )
+        elif act == "force_scan":
+            legs = await scan_fn()
+            stats = get_bot_stats()
+            _WEB_CACHE["props"] = legs
+            _WEB_CACHE["slips"] = build_optimal_parlays(
+                legs, min_legs=2, max_legs=3, bankroll=stats["sim_cash"]
+            )[:4]
+            return web.json_response(
+                {
+                    "ok": True,
+                    "msg": f"⚡ Force Scan complete ({len(legs)} props) | {stats.get('last_scan_diag', '')}",
+                }
+            )
+        elif act == "clear_locks":
+            c_cnt = clear_cooldown_locks()
+            db_info = clear_idempotency_locks()
+            return web.json_response(
+                {
+                    "ok": True,
+                    "msg": f"🔓 Flushed {c_cnt + db_info.get('cleared_db_locks', 0)} cooldown & idempotency locks!",
+                }
             )
         elif act == "mode":
             rt = get_runtime_state()

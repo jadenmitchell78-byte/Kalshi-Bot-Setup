@@ -20,40 +20,66 @@ BANNED_PREFIXES = ("KXMVE", "COMBO", "PARLAY", "MULTIGAME", "CROSS")
 COOLDOWN_SECONDS = 45
 
 SPORT_PROFILES: Dict[str, Dict[str, Any]] = {
+    "NBA": {
+        "keywords": ("NBA", "KXNBA", "BASKETBALL", "LAKERS", "CELTICS", "WARRIORS", "BUCKS", "NUGGETS", "SUNS", "KNICKS", "PTS", "REB", "AST", "3PT"),
+        "max_spread": 6,
+        "min_ev": 0.035,
+        "swing_trigger": 6,
+        "loop_label": "5m loop",
+        "active_october": True,
+    },
+    "NFL": {
+        "keywords": ("NFL", "NCAAF", "CFB", "FOOTBALL", "TD", "PASS", "RUSH", "REC"),
+        "max_spread": 5,
+        "min_ev": 0.038,
+        "swing_trigger": 5,
+        "loop_label": "10m loop",
+        "active_october": True,
+    },
     "TENNIS": {
         "keywords": ("TENNIS", "ATP", "WTA", "CHALLENGER", "ITF"),
         "max_spread": 8,
         "min_ev": 0.035,
         "swing_trigger": 6,
-    },
-    "NFL": {
-        "keywords": ("NFL", "NCAAF", "FOOTBALL", "TD", "PASS", "RUSH", "REC"),
-        "max_spread": 5,
-        "min_ev": 0.04,
-        "swing_trigger": 5,
+        "loop_label": "Armed",
+        "active_october": True,
     },
     "MLB": {
         "keywords": ("MLB", "BASEBALL", "STRIKEOUT", "HITS", "HR", "RUNS"),
         "max_spread": 5,
         "min_ev": 0.04,
         "swing_trigger": 5,
+        "loop_label": "Standby",
+        "active_october": False,
     },
     "WNBA": {
-        "keywords": ("WNBA", "NBA", "BASKETBALL", "PTS", "REB", "AST"),
+        "keywords": ("WNBA", "KXWNBA", "ACES", "LIBERTY", "FEVER", "LYNX"),
         "max_spread": 6,
         "min_ev": 0.04,
         "swing_trigger": 6,
+        "loop_label": "Standby",
+        "active_october": False,
     },
     "ESPORTS": {
         "keywords": ("ESPORTS", "CS2", "VALORANT", "LOL", "DOTA", "COD", "NAVI", "FAZE", "VITALITY", "SPIRIT", "T1", "GENG", "KILLS", "MAP"),
         "max_spread": 7,
         "min_ev": 0.035,
         "swing_trigger": 6,
+        "loop_label": "5m loop",
+        "active_october": True,
     },
 }
 
 _MARKET_HISTORY: Dict[str, Deque[Dict[str, float]]] = {}
 _COOLDOWN_TRACKER: Dict[str, float] = {}
+
+
+def clear_cooldown_locks() -> int:
+    """Flush all in-memory ticker cooldowns and stale RFQ locks (/clear_locks)."""
+    count = len(_COOLDOWN_TRACKER) + len(_OPEN_RFQ_CACHE)
+    _COOLDOWN_TRACKER.clear()
+    _OPEN_RFQ_CACHE.clear()
+    return count
 
 
 def classify_sport_engine(ticker: str, title: str = "", category: str = "") -> Tuple[str, Dict[str, Any]]:
@@ -491,7 +517,7 @@ def build_leg_from_kalshi_market(
             orderbook_edge = max(0.0, yes_ev)
 
     sport = detect_sport(ticker, title)
-    if sport == "OTHER" and engine_name in ("TENNIS", "NFL", "MLB", "WNBA", "ESPORTS"):
+    if sport == "OTHER" and engine_name in ("NBA", "TENNIS", "NFL", "MLB", "WNBA", "ESPORTS"):
         sport = engine_name
     parsed = parse_prop_and_line(ticker, title)
     if chosen_side == "UNDER":

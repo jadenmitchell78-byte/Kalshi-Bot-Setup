@@ -402,19 +402,20 @@
   <!-- Top Quant Header -->
   <div class="top-bar">
     <div class="brand-row">
-      <span class="brand-title">⚡ PEEZY SLIP MAKER • 10K MC & COPULA</span>
-      <span id="shield-badge" class="shield-pill">💧 Liq Guard & 🛡️ Anti-Snipe: CLEAR</span>
+      <span class="brand-title">📡 AURASCAN // TELEMETRY V2</span>
+      <span id="shield-badge" class="shield-pill">⚡ Sniper: 🟢 ARMED</span>
     </div>
     <div class="bankroll-row">
       <div id="bal-val" class="bankroll-val">$1009.00</div>
       <div id="pnl-badge" style="font-size:13px;font-weight:800;color:var(--emerald)">Net PnL: +$0.00</div>
     </div>
-    <div id="sub-stats" class="sub-metrics">Mode: SIM | Scans: 0 | Open Slips: 0 | Record: 0W-0L</div>
+    <div id="sub-stats" class="sub-metrics">💰 Exposure: $0.00 / $5.00 Slate Cap | 🔄 Scans: 0 | Record: 0W-0L</div>
+    <div id="diag-line" class="sub-metrics" style="color:var(--cyan);font-weight:700;margin-top:2px">🩺 Diagnostics: Armed & scanning active slates</div>
     <div class="ctrl-grid">
-      <button id="btn-auto" class="btn" onclick="triggerAction('auto')">⏸ Auto: OFF</button>
+      <button id="btn-auto" class="btn btn-emerald" onclick="triggerAction('sniper')">🎯 Sniper: ON</button>
+      <button class="btn btn-amber" onclick="triggerAction('force_scan')">⚡ Force Scan</button>
+      <button class="btn btn-indigo" onclick="triggerAction('clear_locks')">🔓 Flush Locks</button>
       <button id="btn-mode" class="btn" onclick="triggerAction('mode')">🎛 Mode: SIM</button>
-      <button class="btn btn-indigo" onclick="triggerAction('simsettle')">⚡ Sim Settle</button>
-      <button class="btn btn-crimson" onclick="triggerAction('reset')">♻️ Reset Sim</button>
     </div>
   </div>
 
@@ -829,12 +830,25 @@
         pnlEl.innerText = `Net PnL: ${pSign}$${pnl.toFixed(2)} (${pSign}${st.roi_pct || 0}% ROI)`;
         pnlEl.style.color = pnl >= 0 ? 'var(--emerald)' : 'var(--crimson)';
 
+        const exp = (st.exposure || 0).toFixed(2);
+        const cap = (st.slate_cap || 5.0).toFixed(2);
         document.getElementById('sub-stats').innerText =
-          `Mode: ${st.mode || 'SIM'} | Scans: ${st.scans || 0} | Open Slips: ${st.pending_slips || 0} | Record: ${st.won_slips || 0}W-${st.lost_slips || 0}L`;
+          `💰 Exposure: $${exp} / $${cap} Slate Cap | 🔄 Scans: ${st.scans || 0} (${st.last_markets_checked || 0} mkts) | Record: ${st.won_slips || 0}W-${st.lost_slips || 0}L`;
+
+        const diagEl = document.getElementById('diag-line');
+        if (diagEl) {
+          diagEl.innerText = `🩺 Diagnostics: ${st.last_scan_diag || 'Armed & scanning active slates'}`;
+        }
+
+        const isArmed = Boolean(st.sniper !== undefined ? st.sniper : st.auto);
+        const shieldEl = document.getElementById('shield-badge');
+        if (shieldEl) {
+          shieldEl.innerText = isArmed ? `⚡ Sniper: 🟢 ARMED (${st.mode || 'SIM'})` : `⚡ Sniper: 🔴 DISARMED (${st.mode || 'SIM'})`;
+        }
 
         const btnAuto = document.getElementById('btn-auto');
-        btnAuto.innerText = st.auto ? '🤖 Auto: ON' : '⏸ Auto: OFF';
-        btnAuto.className = 'btn ' + (st.auto ? 'btn-amber' : '');
+        btnAuto.innerText = isArmed ? '🎯 Sniper: ON' : '🎯 Sniper: OFF';
+        btnAuto.className = 'btn ' + (isArmed ? 'btn-emerald' : 'btn-crimson');
 
         const btnMode = document.getElementById('btn-mode');
         btnMode.innerText = `🎛 Mode: ${st.mode || 'SIM'}`;

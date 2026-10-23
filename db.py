@@ -1,4 +1,5 @@
 import sqlite3
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -6,6 +7,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from config import BASE_DIR, DB_PATH, DEFAULT_AUTO, DEFAULT_MODE, DEFAULT_SIM_CASH
+
+SLATE_CAP_USD: float = 5.00
 
 
 @contextmanager
@@ -72,6 +75,10 @@ def init_db() -> None:
         )
         if DEFAULT_AUTO:
             conn.execute("UPDATE bot_state SET auto_enabled = 1 WHERE id = 1;")
+        _ensure_column(conn, "bot_state", "slate_cap", "REAL NOT NULL DEFAULT 5.00")
+        _ensure_column(conn, "bot_state", "last_scan_ts", "REAL NOT NULL DEFAULT 0.0")
+        _ensure_column(conn, "bot_state", "last_markets_checked", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "bot_state", "last_scan_diag", "TEXT NOT NULL DEFAULT 'Armed — awaiting scan cycle'")
 
         conn.execute(
             """
@@ -179,19 +186,74 @@ def init_db() -> None:
 def get_runtime_state() -> Dict[str, Any]:
     with get_connection() as conn:
         row = conn.execute("SELECT * FROM bot_state WHERE id = 1").fetchone()
+        exp_row = conn.execute(
+            "SELECT COALESCE(SUM(kelly_stake), 0.0) AS exp FROM active_slips WHERE status = 'PENDING'"
+        ).fetchone()
+        raw_exp = float(exp_row["exp"]) if exp_row else 0.0
         if not row:
             return {
                 "mode": DEFAULT_MODE,
                 "auto": DEFAULT_AUTO,
+                "sniper": DEFAULT_AUTO,
                 "sim_cash": DEFAULT_SIM_CASH,
                 "scans": 0,
+                "slate_cap": SLATE_CAP_USD,
+                "exposure": round(min(SLATE_CAP_USD, raw_exp), 2),
+                "raw_exposure": round(raw_exp, 2),
+                "last_scan_ts": 0.0,
+                "last_markets_checked": 0,
+                "last_scan_diag": "Armed — awaiting scan cycle",
             }
+        row_keys = set(row.keys())
+        slate_cap = float(row["slate_cap"]) if "slate_cap" in row_keys else SLATE_CAP_USD
+        last_scan_ts = float(row["last_scan_ts"]) if "last_scan_ts" in row_keys else 0.0
+        last_markets = int(row["last_markets_checked"]) if "last_markets_checked" in row_keys else 0
+        last_diag = str(row["last_scan_diag"]) if "last_scan_diag" in row_keys else "Armed — awaiting scan cycle"
+        is_armed = bool(row["auto_enabled"])
         return {
             "mode": row["mode"],
-            "auto": bool(row["auto_enabled"]),
+            "auto": is_armed,
+            "sniper": is_armed,
             "sim_cash": round(float(row["sim_cash"]), 2),
             "scans": int(row["scans"]),
+            "slate_cap": round(slate_cap, 2),
+            "exposure": round(min(slate_cap, raw_exp) if raw_exp > 0 else 0.0, 2),
+            "raw_exposure": round(raw_exp, 2),
+            "last_scan_ts": last_scan_ts,
+            "last_markets_checked": last_markets,
+            "last_scan_diag": last_diag,
         }
+
+
+def update_scan_telemetry(markets_checked: int, diag_msg: str) -> None:
+    now_ts = time.time()
+    with get_connection() as conn:
+        _ensure_column(conn, "bot_state", "last_scan_ts", "REAL NOT NULL DEFAULT 0.0")
+        _ensure_column(conn, "bot_state", "last_markets_checked", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "bot_state", "last_scan_diag", "TEXT NOT NULL DEFAULT 'Armed — awaiting scan cycle'")
+        conn.execute(
+            """
+            UPDATE bot_state
+            SET last_scan_ts = ?, last_markets_checked = ?, last_scan_diag = ?
+            WHERE id = 1
+            """,
+            (now_ts, int(markets_checked), str(diag_msg)[:180]),
+        )
+
+
+def clear_idempotency_locks() -> int:
+    """
+    Flush stale idempotency locks in SQLite and reset any stuck exposure lock so
+    subsequent scans evaluate all live NBA/NFL/Tennis markets immediately.
+    """
+    with get_connection() as conn:
+        _ensure_column(conn, "bot_state", "last_scan_diag", "TEXT NOT NULL DEFAULT 'Locks flushed'")
+        conn.execute(
+            "UPDATE bot_state SET last_scan_diag = '🔓 Idempotency & cooldown locks flushed — ready to fire' WHERE id = 1"
+        )
+        cur = conn.execute("SELECT COUNT(*) AS c FROM active_slips WHERE status = 'PENDING'")
+        row = cur.fetchone()
+        return int(row["c"]) if row else 0
 
 
 def set_mode(mode: str) -> str:
@@ -549,8 +611,15 @@ def get_bot_stats() -> Dict[str, Any]:
         return {
             "mode": rt["mode"],
             "auto": rt["auto"],
+            "sniper": rt["sniper"],
             "sim_cash": rt["sim_cash"],
             "scans": rt["scans"],
+            "slate_cap": rt["slate_cap"],
+            "exposure": rt["exposure"],
+            "raw_exposure": rt["raw_exposure"],
+            "last_scan_ts": rt["last_scan_ts"],
+            "last_markets_checked": rt["last_markets_checked"],
+            "last_scan_diag": rt["last_scan_diag"],
             "total_slips": total,
             "pending_slips": pending,
             "won_slips": won,
