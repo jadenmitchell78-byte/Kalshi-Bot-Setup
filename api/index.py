@@ -67,7 +67,7 @@ class handler(BaseHTTPRequestHandler):
         path = parsed.path
         qs = parse_qs(parsed.query)
 
-        if path == "/api/state":
+        if path in ("/api/state", "/api/live-wire", "/api/live", "/api/scores"):
             stats = get_bot_stats()
             if not _WEB_CACHE["props"]:
                 legs = _run_coro(scan_markets_with_telemetry())
@@ -83,8 +83,12 @@ class handler(BaseHTTPRequestHandler):
                 ]
             return self._send_json(
                 {
+                    "ok": True,
+                    "status": "LIVE",
+                    "live_wire": "ONLINE",
                     "stats": stats,
                     "telemetry": _WEB_CACHE["telemetry"],
+                    "games": _WEB_CACHE["telemetry"],
                     "props": [l.to_dict() for l in _WEB_CACHE["props"][:16]],
                     "slips": [serialize_slip(s) for s in _WEB_CACHE["slips"][:4]],
                     "open_slips": fetch_pending_parlays(),

@@ -62,8 +62,9 @@ WEB_PORT: int = int(os.getenv("PEEZY_WEB_PORT", "8787"))
 AUTO_SCAN_INTERVAL_SEC: int = int(os.getenv("AUTO_SCAN_INTERVAL_SEC", "35"))
 SETTLE_POLL_INTERVAL_SEC: int = int(os.getenv("SETTLE_POLL_INTERVAL_SEC", "60"))
 
-# SQLite Database Path
-DB_PATH: Path = Path(os.getenv("PEEZY_DB_PATH", str(BASE_DIR / "picks.db")))
+# SQLite Database Path (use writable /tmp/picks.db when running on Vercel Serverless)
+_DEFAULT_DB_DIR = Path("/tmp") if os.getenv("VERCEL") or not os.access(BASE_DIR, os.W_OK) else BASE_DIR
+DB_PATH: Path = Path(os.getenv("PEEZY_DB_PATH", str(_DEFAULT_DB_DIR / "picks.db")))
 
 # Sport Emoji Map
 SPORT_EMOJIS = {
