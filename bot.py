@@ -68,7 +68,7 @@ COOLDOWN_SECONDS = 45            # Per-ticker entry lock (written ONLY on actual
 KELLY_FRACTION = 0.25            # Quarter-Kelly sizing
 MAX_BET_DOLLARS = 1.50           # Per-position cap within $5.00 Slate Cap
 MAX_DAILY_DRAWDOWN = -75.00      # Circuit breaker hard stop ($)
-MIN_LIQUIDITY_VOL = 350          # Minimum market volume
+MIN_LIQUIDITY_VOL = 50           # Minimum market volume for LIVE execution
 MIN_ORDERBOOK_DEPTH = 15         # Minimum contracts on best ask
 OBI_TOXIC_THRESHOLD = -0.45      # Block snipes if ask wall dominates bid support
 
@@ -252,6 +252,7 @@ def _ed_encode(pt):
 def _extract_ed25519_seed(path: str) -> bytes:
     candidates = [
         Path(path),
+        Path("/data/data/com.termux/files/home/peezy_bot/kalshi_private.pem"),
         BASE_DIR / "kalshi_private.pem",
         BASE_DIR / "kalshi_private_key.pem",
         BASE_DIR.parent / "kalshi_private_key.pem",
@@ -340,7 +341,7 @@ def init_db():
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 mode TEXT NOT NULL DEFAULT 'SIM',
                 auto_enabled INTEGER NOT NULL DEFAULT 1,
-                sim_cash REAL NOT NULL DEFAULT 1009.00,
+                sim_cash REAL NOT NULL DEFAULT 0.00,
                 scans INTEGER NOT NULL DEFAULT 0,
                 slate_cap REAL NOT NULL DEFAULT 5.00,
                 last_scan_ts REAL NOT NULL DEFAULT 0.0,
@@ -349,7 +350,7 @@ def init_db():
             )"""
         )
         pconn.execute(
-            "INSERT OR IGNORE INTO bot_state (id, mode, auto_enabled, sim_cash, scans) VALUES (1, ?, ?, 1009.00, 0)",
+            "INSERT OR IGNORE INTO bot_state (id, mode, auto_enabled, sim_cash, scans) VALUES (1, ?, ?, 0.00, 0)",
             ("LIVE" if LIVE_MODE else "SIM", 1 if SNIPER_ARMED else 0),
         )
         row = pconn.execute("SELECT mode, auto_enabled FROM bot_state WHERE id = 1").fetchone()
@@ -360,6 +361,42 @@ def init_db():
         pconn.close()
     except Exception:
         pass
+
+
+def set_engine_mode(is_live: bool) -> str:
+    """Permanently update engine mode in memory, .env, and picks.db."""
+    global LIVE_MODE, last_scan_diag
+    LIVE_MODE = bool(is_live)
+    mode_str = "LIVE" if LIVE_MODE else "SIM"
+    os.environ["DEFAULT_MODE"] = mode_str
+
+    try:
+        env_path = BASE_DIR / ".env"
+        lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+        new_lines = []
+        found = False
+        for ln in lines:
+            if ln.strip().startswith("DEFAULT_MODE="):
+                new_lines.append(f"DEFAULT_MODE={mode_str}")
+                found = True
+            else:
+                new_lines.append(ln)
+        if not found:
+            new_lines.append(f"DEFAULT_MODE={mode_str}")
+        env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+    try:
+        pconn = sqlite3.connect(str(BASE_DIR / "picks.db"))
+        pconn.execute("UPDATE bot_state SET mode = ? WHERE id = 1", (mode_str,))
+        pconn.commit()
+        pconn.close()
+    except Exception:
+        pass
+
+    sync_state_to_sqlite()
+    return mode_str
 
 
 def sync_state_to_sqlite():
@@ -522,7 +559,7 @@ def build_menu_hud_payload() -> tuple:
     mins_ago = max(0, int((time.time() - last_scan_ts) // 60))
     scan_age = f"{mins_ago}m ago" if mins_ago > 0 else "just now"
 
-    # Kalshi API and Bankroll telemetry
+    # Kalshi API and Bankroll telemetry (Strictly Actual Real Funds)
     if last_kalshi_api_result.get("ok"):
         api_line = f"🔑 *Kalshi API:* 🟢 Connected | 💵 *Live Bal:* `${live_kalshi_balance:.2f}`"
     else:
@@ -530,9 +567,10 @@ def build_menu_hud_payload() -> tuple:
         api_line = f"🔑 *Kalshi API:* 🔴 `{api_stat[:45]}`"
 
     if LIVE_MODE:
-        bankroll_line = f"💵 *Live Bankroll:* `${live_kalshi_balance:.2f}` (Session PnL: `${sim_realized_pnl:+.2f}`)"
+        bankroll_line = f"💵 *Actual Kalshi Cash:* `${live_kalshi_balance:.2f}` (Session PnL: `${sim_realized_pnl:+.2f}`)"
     else:
-        bankroll_line = f"🎮 *SIM Bankroll:* `${1009.00 + sim_realized_pnl:.2f}` | 💵 *Kalshi Live:* `${live_kalshi_balance:.2f}`"
+        sim_bal = max(0.0, live_kalshi_balance + sim_realized_pnl)
+        bankroll_line = f"💵 *Actual Kalshi Cash:* `${live_kalshi_balance:.2f}` | 🎮 *SIM Track:* `${sim_bal:.2f}`"
 
     nba_live = max(6, sport_live_counts.get("NBA", 6))
     nfl_live = max(2, sport_live_counts.get("NFL", 2))
@@ -676,9 +714,23 @@ def edit_or_send_telegram(chat_id: str, message_id: int, text: str, reply_markup
             )
             if r.status_code == 200:
                 return
+            # If Markdown entity parsing failed (e.g. HTTP 400), retry editMessageText with plain text
+            plain_text = text.replace("*", "").replace("`", "").replace("_", "")
+            r2 = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText",
+                json={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": plain_text,
+                    "reply_markup": reply_markup,
+                },
+                timeout=5,
+            )
+            if r2.status_code == 200:
+                return
         except Exception:
             pass
-    notify_telegram(text, reply_markup=reply_markup)
+    notify_telegram(text, reply_markup=reply_markup, chat_id=chat_id)
 
 
 def log_trade(ticker, engine, strategy, action, side, price, count, metric, obi=0.0):
@@ -738,6 +790,13 @@ def test_kalshi_api_connection() -> dict:
                 bal_dollars = round(bal_cents / 100.0, 2)
                 BASE_URL = base
                 live_kalshi_balance = bal_dollars
+                try:
+                    pconn = sqlite3.connect(str(BASE_DIR / "picks.db"))
+                    pconn.execute("UPDATE bot_state SET sim_cash = ? WHERE id = 1", (bal_dollars,))
+                    pconn.commit()
+                    pconn.close()
+                except Exception:
+                    pass
                 res = {
                     "ok": True,
                     "balance": bal_dollars,
@@ -914,7 +973,7 @@ def manage_open_positions(m: dict):
             pnl_dollars = (unrealized_cents * qty) / 100.0
             sim_realized_pnl += pnl_dollars
             total_cashouts_count += 1
-            new_bal = (1009.00 + sim_realized_pnl) if not LIVE_MODE else get_balance()
+            new_bal = get_balance() if LIVE_MODE else max(0.0, live_kalshi_balance + sim_realized_pnl)
             log_trade(ticker, pos["engine"], exit_reason, "sell", side, current_bid, qty, pnl_dollars)
             del open_positions[ticker]
             cooldown_tracker[ticker] = now
@@ -1041,6 +1100,9 @@ def evaluate_market(m: dict, bankroll: float, force: bool = False) -> str:
         elif last_price > 0:
             anchor = last_price if side == "yes" else (100 - last_price)
             fair_prob = (anchor * 0.65 + ((bid + ask) / 2.0) * 0.35) / 100.0 + (swing_bonus if side == "yes" else 0.0)
+        elif (bid + ask) > 0:
+            mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else (ask if ask > 0 else bid)
+            fair_prob = (mid / 100.0) + (swing_bonus if side == "yes" else 0.0) + profile["min_ev"] * 0.5
         elif not LIVE_MODE:
             fair_prob = (ask / 100.0) + profile["min_ev"] + 0.015
         else:
@@ -1124,7 +1186,7 @@ def run_force_scan_now() -> str:
         live_bal = get_balance() if LIVE_MODE else 0.0
     except Exception:
         live_bal = 0.0
-    bankroll = live_bal if (LIVE_MODE and live_bal > 0) else (1009.00 + sim_realized_pnl)
+    bankroll = live_bal if live_bal > 0 else max(0.0, live_kalshi_balance + sim_realized_pnl)
     markets = fetch_all_open_markets()
     last_scan_ts = time.time()
     last_markets_checked = max(14, len(markets))
@@ -1230,8 +1292,8 @@ def build_status_exposure_text() -> str:
         f"• ⚡ *Sniper:* `{sniper_tag}` | *Model:* `V2 Hybrid`\n"
         f"• 🎛 *Engine Mode:* `{'🟢 LIVE' if LIVE_MODE else '🎮 SIM'}` ({mode_tag})\n"
         f"• 🔑 *Kalshi API:* `{api_stat}`\n"
-        f"• 💵 *Kalshi Live Cash:* `${live_kalshi_balance:.2f}`\n"
-        f"• 🎮 *SIM Virtual Cash:* `${1009.00 + sim_realized_pnl:.2f}`\n"
+        f"• 💵 *Actual Kalshi Cash:* `${live_kalshi_balance:.2f}`\n"
+        f"• 🎮 *SIM Tracked Cash:* `${max(0.0, live_kalshi_balance + sim_realized_pnl):.2f}`\n"
         f"• 💰 *Slate Exposure:* `${exp:.2f} / ${SLATE_CAP_DOLLARS:.2f}` Slate Cap\n"
         f"• 📈 *Session Realized PnL:* `${sim_realized_pnl:+.2f}`\n"
         f"• 🎯 *Trades Executed:* `{total_trades_count}` | *Cashouts:* `{total_cashouts_count}`\n"
@@ -1325,20 +1387,21 @@ async def telegram_notifier_and_command_loop():
                             await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
 
                         elif any(k in cb_data for k in ("toggle_mode", "mode", "swap_mode")):
-                            LIVE_MODE = not LIVE_MODE
-                            sync_state_to_sqlite()
+                            new_live = not LIVE_MODE
+                            set_engine_mode(new_live)
                             mode_name = "LIVE REAL-MONEY" if LIVE_MODE else "SIMULATION"
                             last_scan_diag = f"🎛 Switched mode to {mode_name}"
                             if LIVE_MODE:
                                 chk = await asyncio.to_thread(test_kalshi_api_connection)
                                 if chk["ok"]:
-                                    toast_text = f"🟢 LIVE Mode! Kalshi Bal: ${chk['balance']:.2f}"
+                                    toast_text = f"🟢 LIVE Mode active! Bal: ${chk['balance']:.2f}"
                                     last_scan_diag = f"🟢 LIVE Mode active — Kalshi Bal: ${chk['balance']:.2f}"
                                 else:
                                     toast_text = f"⚠️ LIVE (API: {chk['status'][:25]})"
                                     last_scan_diag = f"⚠️ LIVE Mode active but API warning: {chk['status']}"
                             else:
                                 toast_text = "🎮 Switched to SIM Mode"
+                            sync_state_to_sqlite()
                             hud_text, hud_kb = build_menu_hud_payload()
                             await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
 
@@ -1465,12 +1528,12 @@ async def telegram_notifier_and_command_loop():
 
                     elif low.startswith("/mode"):
                         parts = low.split()
-                        if len(parts) > 1 and parts[1] in ("live", "real"):
-                            LIVE_MODE = True
-                        elif len(parts) > 1 and parts[1] in ("sim", "paper"):
-                            LIVE_MODE = False
+                        if len(parts) > 1 and parts[1] in ("live", "real", "on"):
+                            set_engine_mode(True)
+                        elif len(parts) > 1 and parts[1] in ("sim", "paper", "off"):
+                            set_engine_mode(False)
                         else:
-                            LIVE_MODE = not LIVE_MODE
+                            set_engine_mode(not LIVE_MODE)
                         mode_name = "LIVE REAL-MONEY" if LIVE_MODE else "SIMULATION"
                         last_scan_diag = f"🎛 Switched engine mode to {mode_name}"
                         if LIVE_MODE:
@@ -1511,8 +1574,8 @@ async def telegram_notifier_and_command_loop():
                         bal_msg = (
                             f"💰 *AURASCAN ACCOUNT BALANCES*\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"• 💵 *Kalshi Live Cash:* `${chk['balance']:.2f}` ({'🟢 Verified' if chk['ok'] else '🔴 Check API'})\n"
-                            f"• 🎮 *SIM Virtual Cash:* `${1009.00 + sim_realized_pnl:.2f}`\n"
+                            f"• 💵 *Actual Kalshi Cash:* `${chk['balance']:.2f}` ({'🟢 Verified' if chk['ok'] else '🔴 Check API'})\n"
+                            f"• 🎮 *SIM Tracked Cash:* `${max(0.0, chk['balance'] + sim_realized_pnl):.2f}`\n"
                             f"• 📈 *Session Realized PnL:* `${sim_realized_pnl:+.2f}`\n"
                             f"• 🎛 *Current Mode:* `{'🟢 LIVE REAL-MONEY' if LIVE_MODE else '🎮 SIMULATION'}`\n"
                             f"• 🛡️ *Slate Exposure:* `${get_current_exposure():.2f} / ${SLATE_CAP_DOLLARS:.2f}`"
@@ -1607,7 +1670,7 @@ async def rest_scanner_loop():
                 live_bal = await asyncio.to_thread(get_balance)
             except Exception:
                 live_bal = 0.0
-            bankroll = live_bal if (LIVE_MODE and live_bal > 0) else (1009.00 + sim_realized_pnl)
+            bankroll = live_bal if live_bal > 0 else max(0.0, live_kalshi_balance + sim_realized_pnl)
             if starting_bankroll is None:
                 starting_bankroll = bankroll
 

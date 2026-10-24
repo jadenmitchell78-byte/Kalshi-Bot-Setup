@@ -61,7 +61,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 mode TEXT NOT NULL DEFAULT 'SIM',
                 auto_enabled INTEGER NOT NULL DEFAULT 0,
-                sim_cash REAL NOT NULL DEFAULT 1009.00,
+                sim_cash REAL NOT NULL DEFAULT 0.00,
                 scans INTEGER NOT NULL DEFAULT 0
             );
             """
