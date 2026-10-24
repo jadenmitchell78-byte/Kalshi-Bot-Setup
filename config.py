@@ -45,8 +45,8 @@ DEFAULT_AUTO: bool = os.getenv("DEFAULT_AUTO", "true").lower() in ("1", "true", 
 DEFAULT_SIM_CASH: float = float(os.getenv("DEFAULT_SIM_CASH", "0.00"))
 BANKROLL_USD: float = float(os.getenv("BANKROLL_USD", "0.00"))
 UNIT_SIZE_USD: float = float(os.getenv("UNIT_SIZE_USD", "10.00"))
-MAX_STAKE_PCT: float = float(os.getenv("MAX_STAKE_PCT", "0.05"))
-MIN_STAKE_USD: float = float(os.getenv("MIN_STAKE_USD", "5.00"))
+MAX_STAKE_PCT: float = float(os.getenv("MAX_STAKE_PCT", "1.00"))
+MIN_STAKE_USD: float = float(os.getenv("MIN_STAKE_USD", "1.00"))
 
 # Liquidity Floor, Anti-Snipe Shield & RFQ Risk Parameters
 MIN_LIQUID_VOLUME: int = int(os.getenv("MIN_LIQUID_VOLUME", "500"))

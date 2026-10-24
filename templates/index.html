@@ -417,6 +417,22 @@
       <button class="btn btn-indigo" onclick="triggerAction('clear_locks')">🔓 Flush Locks</button>
       <button id="btn-mode" class="btn" onclick="triggerAction('mode')">🎛 Mode: SIM</button>
     </div>
+
+    <!-- Dynamic Bankroll Slider (Up to 100% Full Balance) -->
+    <div style="margin-top:12px;padding:10px 12px;background:rgba(22, 31, 48, 0.85);border:1px solid var(--border);border-radius:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="font-size:11px;font-weight:800;color:var(--amber)">🎚️ AUTO-SNIPER BANKROLL ALLOCATION</span>
+        <span id="slider-cap-label" style="font-size:12px;font-weight:900;color:var(--emerald)">100% — $32.22 Max Exposure</span>
+      </div>
+      <input type="range" id="bankroll-slider" min="5" max="100" step="5" value="100" style="width:100%;accent-color:var(--emerald);cursor:pointer;height:6px" oninput="onSliderInput(this.value)" onchange="syncBankrollCap(this.value)" />
+      <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-top:4px">
+        <span>5% Min</span>
+        <span>25%</span>
+        <span>50%</span>
+        <span>75%</span>
+        <span style="color:var(--emerald);font-weight:800">100% FULL BAL</span>
+      </div>
+    </div>
   </div>
 
   <!-- Live ESPN Telemetry Strip -->
@@ -499,6 +515,36 @@
     let lastSlipsSig = '';
     let lastPropsSig = '';
     let lastOpenSig = '';
+    let currentLiveCash = 32.22;
+    let bankrollPct = 1.00;
+    let isSliderDragging = false;
+
+    function onSliderInput(val) {
+      isSliderDragging = true;
+      bankrollPct = parseInt(val) / 100.0;
+      const capDollars = (currentLiveCash * bankrollPct).toFixed(2);
+      const labelEl = document.getElementById('slider-cap-label');
+      if (labelEl) {
+        labelEl.innerText = `${val}% — $${capDollars} Max Exposure`;
+      }
+    }
+
+    async function syncBankrollCap(val) {
+      isSliderDragging = false;
+      const p = parseInt(val);
+      try {
+        const resp = await fetch('/api/settings/bankroll_cap', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pct: p })
+        });
+        const data = await resp.json();
+        if (data.msg) showToast(data.msg);
+        pullState();
+      } catch (e) {
+        showToast('Cap sync error: ' + e);
+      }
+    }
 
     function setCategory(cat) {
       activeCategory = cat;
@@ -823,15 +869,29 @@
         latestState = d;
 
         const st = d.stats || {};
-        document.getElementById('bal-val').innerText = '$' + (st.sim_cash || 1009).toFixed(2);
+        currentLiveCash = st.sim_cash && st.sim_cash > 0 ? st.sim_cash : 32.22;
+        document.getElementById('bal-val').innerText = '$' + currentLiveCash.toFixed(2);
         const pnl = st.net_pnl || 0;
         const pSign = pnl >= 0 ? '+' : '';
         const pnlEl = document.getElementById('pnl-badge');
         pnlEl.innerText = `Net PnL: ${pSign}$${pnl.toFixed(2)} (${pSign}${st.roi_pct || 0}% ROI)`;
         pnlEl.style.color = pnl >= 0 ? 'var(--emerald)' : 'var(--crimson)';
 
+        if (!isSliderDragging) {
+          const allocPct = st.bankroll_allocation_pct !== undefined ? st.bankroll_allocation_pct : 1.0;
+          const sliderEl = document.getElementById('bankroll-slider');
+          if (sliderEl) {
+            sliderEl.value = Math.round(allocPct * 100);
+          }
+          const capDollars = (currentLiveCash * allocPct).toFixed(2);
+          const labelEl = document.getElementById('slider-cap-label');
+          if (labelEl) {
+            labelEl.innerText = `${Math.round(allocPct * 100)}% — $${capDollars} Max Exposure`;
+          }
+        }
+
         const exp = (st.exposure || 0).toFixed(2);
-        const cap = (st.slate_cap || 5.0).toFixed(2);
+        const cap = (st.slate_cap || (currentLiveCash * bankrollPct)).toFixed(2);
         document.getElementById('sub-stats').innerText =
           `💰 Exposure: $${exp} / $${cap} Slate Cap | 🔄 Scans: ${st.scans || 0} (${st.last_markets_checked || 0} mkts) | Record: ${st.won_slips || 0}W-${st.lost_slips || 0}L`;
 

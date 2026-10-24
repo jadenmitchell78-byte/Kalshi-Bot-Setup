@@ -48,14 +48,14 @@ def evaluate_parlay(
     bankroll: float = BANKROLL_USD,
     kelly_fraction: float = KELLY_FRACTION,
     iterations: int = MC_ITERATIONS,
-    remaining_slate_cap: float = 5.00,
+    remaining_slate_cap: float = 32.22,
 ) -> ParlaySlip:
     """
     Evaluate a 2-to-6 leg parlay using the 10,000-iteration **Joint Gaussian Copula**:
     - Compares combined Book Implied Probability against the Copula Joint True Probability.
     - Computes Copula Correlation Boost (%), true Net +EV%, Quarter-Kelly Stake in units & USD,
       total liquid volume, and estimated profit.
-    - Capped strictly by remaining_slate_cap ($5.00 max) and live Kalshi cash.
+    - Capped strictly by remaining_slate_cap (up to 100% of live Kalshi balance) and live Kalshi cash.
     """
     if not legs:
         raise ValueError("Cannot evaluate an empty parlay slip.")
@@ -81,15 +81,16 @@ def evaluate_parlay(
     raw_kelly = max(0.0, (b * p - q) / b)
     capped_kelly = min(MAX_STAKE_PCT, raw_kelly * kelly_fraction)
 
-    max_allowed = min(bankroll if bankroll > 0 else 5.00, max(0.50, remaining_slate_cap), 5.00)
+    effective_bankroll = bankroll if bankroll > 0 else 32.22
+    max_allowed = min(effective_bankroll, max(0.50, remaining_slate_cap))
     if capped_kelly > 0:
-        raw_dollars = bankroll * capped_kelly
+        raw_dollars = effective_bankroll * capped_kelly
         kelly_stake = max(1.00, min(max_allowed, round(raw_dollars, 2)))
     else:
-        kelly_stake = max(1.00, min(max_allowed, 2.50))
+        kelly_stake = max(1.00, min(max_allowed, round(max_allowed * 0.40, 2)))
     kelly_stake = round(kelly_stake, 2)
 
-    unit_base = max(1.0, bankroll * 0.01) if bankroll > 0 else UNIT_SIZE_USD
+    unit_base = max(1.0, effective_bankroll * 0.01) if effective_bankroll > 0 else UNIT_SIZE_USD
     kelly_units = round(kelly_stake / unit_base, 2)
     potential_payout = round(kelly_stake * decimal_odds, 2)
     est_profit = round(potential_payout - kelly_stake, 2)
@@ -123,7 +124,7 @@ def build_optimal_parlays(
     min_legs: int = MIN_SLIP_LEGS,
     max_legs: int = MAX_SLIP_LEGS,
     bankroll: float = BANKROLL_USD,
-    remaining_slate_cap: float = 5.00,
+    remaining_slate_cap: float = 32.22,
 ) -> List[ParlaySlip]:
     """
     Search liquid, anti-snipe verified candidate legs for positively correlated

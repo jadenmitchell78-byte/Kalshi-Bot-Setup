@@ -76,6 +76,7 @@ def init_db() -> None:
         if DEFAULT_AUTO:
             conn.execute("UPDATE bot_state SET auto_enabled = 1 WHERE id = 1;")
         _ensure_column(conn, "bot_state", "slate_cap", "REAL NOT NULL DEFAULT 5.00")
+        _ensure_column(conn, "bot_state", "bankroll_allocation_pct", "REAL NOT NULL DEFAULT 1.00")
         _ensure_column(conn, "bot_state", "last_scan_ts", "REAL NOT NULL DEFAULT 0.0")
         _ensure_column(conn, "bot_state", "last_markets_checked", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "bot_state", "last_scan_diag", "TEXT NOT NULL DEFAULT 'Armed — awaiting scan cycle'")
@@ -205,6 +206,7 @@ def get_runtime_state() -> Dict[str, Any]:
                 "last_scan_diag": "Armed — awaiting scan cycle",
             }
         row_keys = set(row.keys())
+        bankroll_pct = float(row["bankroll_allocation_pct"]) if "bankroll_allocation_pct" in row_keys and row["bankroll_allocation_pct"] is not None else 1.00
         slate_cap = float(row["slate_cap"]) if "slate_cap" in row_keys else SLATE_CAP_USD
         last_scan_ts = float(row["last_scan_ts"]) if "last_scan_ts" in row_keys else 0.0
         last_markets = int(row["last_markets_checked"]) if "last_markets_checked" in row_keys else 0
@@ -217,12 +219,21 @@ def get_runtime_state() -> Dict[str, Any]:
             "sim_cash": round(float(row["sim_cash"]), 2),
             "scans": int(row["scans"]),
             "slate_cap": round(slate_cap, 2),
+            "bankroll_allocation_pct": round(bankroll_pct, 2),
             "exposure": round(min(slate_cap, raw_exp) if raw_exp > 0 else 0.0, 2),
             "raw_exposure": round(raw_exp, 2),
             "last_scan_ts": last_scan_ts,
             "last_markets_checked": last_markets,
             "last_scan_diag": last_diag,
         }
+
+
+def set_bankroll_allocation_pct(pct: float) -> float:
+    clamped = max(0.05, min(1.00, float(pct)))
+    with get_connection() as conn:
+        _ensure_column(conn, "bot_state", "bankroll_allocation_pct", "REAL NOT NULL DEFAULT 1.00")
+        conn.execute("UPDATE bot_state SET bankroll_allocation_pct = ? WHERE id = 1", (clamped,))
+    return clamped
 
 
 def update_scan_telemetry(markets_checked: int, diag_msg: str) -> None:

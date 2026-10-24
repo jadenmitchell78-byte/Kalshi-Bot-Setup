@@ -50,6 +50,7 @@ from slip import (
     sim_to_prop_mapper,
     detect_sport,
     parse_prop_and_line,
+    parse_manual_leg_token,
     prob_to_american,
     build_rfq_sniper_quote,
     clear_cooldown_locks,
@@ -57,6 +58,7 @@ from slip import (
 from sim_engine import (
     simulate_prop_leg,
     simulate_joint_gaussian_copula,
+    run_calibration_and_symmetry_audit,
     PropSimResult,
 )
 from parlay import (
@@ -64,11 +66,15 @@ from parlay import (
     evaluate_parlay,
     build_optimal_parlays,
     format_slip_card,
+    format_db_slip_summary,
 )
 from db import (
     log_new_slip,
     log_sim_audit,
     clear_idempotency_locks,
+    fetch_pending_parlays,
+    fetch_settled_slips,
+    reset_sim_account,
 )
 
 # ==========================================
@@ -96,9 +102,35 @@ WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
 # ==========================================
 LIVE_MODE = os.getenv("DEFAULT_MODE", "SIM").upper() == "LIVE"
 SNIPER_ARMED = os.getenv("DEFAULT_AUTO", "true").lower() in ("1", "true", "yes", "on")
-SLATE_CAP_DOLLARS = 5.00         # $5.00 Slate Cap displayed on AURASCAN V2 HUD
-SCAN_INTERVAL = 1.5              # Background REST sync & exit sweep interval
+SLATE_CAP_DOLLARS = 32.22        # Dynamic Slate Cap (scaled by bankroll_allocation_pct)
+SCAN_INTERVAL = 2.0              # Background position scalper & exit sweep interval
 COOLDOWN_SECONDS = 45            # Per-ticker entry lock (written ONLY on actual fill)
+bankroll_allocation_pct = 1.00    # Dynamic Bankroll Allocation (1.00 = 100% full balance)
+slider_panel_active = False       # Whether Telegram inline slider panel is open
+scan_panel_active = False         # Whether Telegram inline manual scan sport panel is open
+user_building_combo = {           # Manual Combo Builder Override state
+    "active": False,
+    "ts": 0.0,
+    "selected_tickers": [],
+    "cached_props": [],
+}
+USER_BUILD_TIMEOUT = 300.0        # 5 minutes auto-timeout
+
+
+def is_user_building_combo() -> bool:
+    global user_building_combo
+    if user_building_combo.get("active"):
+        if time.time() - float(user_building_combo.get("ts", 0)) < USER_BUILD_TIMEOUT:
+            return True
+        user_building_combo["active"] = False
+    return False
+
+
+def get_dynamic_slate_cap(live_cash: Optional[float] = None) -> float:
+    """Compute dynamic slate cap based on bankroll_allocation_pct (up to 100% of live Kalshi balance)."""
+    global bankroll_allocation_pct, live_kalshi_balance
+    bal = live_cash if (live_cash is not None and live_cash > 0) else (live_kalshi_balance if live_kalshi_balance > 0 else 32.22)
+    return round(max(1.0, bal * bankroll_allocation_pct), 2)
 
 # Risk & Sizing
 KELLY_FRACTION = 0.25            # Quarter-Kelly sizing
@@ -527,20 +559,26 @@ def init_db():
                 auto_enabled INTEGER NOT NULL DEFAULT 1,
                 sim_cash REAL NOT NULL DEFAULT 0.00,
                 scans INTEGER NOT NULL DEFAULT 0,
-                slate_cap REAL NOT NULL DEFAULT 5.00,
+                slate_cap REAL NOT NULL DEFAULT 32.22,
+                bankroll_allocation_pct REAL NOT NULL DEFAULT 1.00,
                 last_scan_ts REAL NOT NULL DEFAULT 0.0,
                 last_markets_checked INTEGER NOT NULL DEFAULT 14,
                 last_scan_diag TEXT NOT NULL DEFAULT 'Armed — awaiting scan'
             )"""
         )
         pconn.execute(
-            "INSERT OR IGNORE INTO bot_state (id, mode, auto_enabled, sim_cash, scans) VALUES (1, ?, ?, 0.00, 0)",
+            "INSERT OR IGNORE INTO bot_state (id, mode, auto_enabled, sim_cash, scans, slate_cap, bankroll_allocation_pct) VALUES (1, ?, ?, 32.22, 0, 32.22, 1.00)",
             ("LIVE" if LIVE_MODE else "SIM", 1 if SNIPER_ARMED else 0),
         )
-        row = pconn.execute("SELECT mode, auto_enabled FROM bot_state WHERE id = 1").fetchone()
+        existing_cols = {r[1] for r in pconn.execute("PRAGMA table_info(bot_state)").fetchall()}
+        if "bankroll_allocation_pct" not in existing_cols:
+            pconn.execute("ALTER TABLE bot_state ADD COLUMN bankroll_allocation_pct REAL NOT NULL DEFAULT 1.00")
+        row = pconn.execute("SELECT mode, auto_enabled, bankroll_allocation_pct FROM bot_state WHERE id = 1").fetchone()
         if row:
             LIVE_MODE = str(row[0]).upper() == "LIVE"
             SNIPER_ARMED = bool(row[1])
+            if len(row) > 2 and row[2] is not None:
+                bankroll_allocation_pct = max(0.05, min(1.00, float(row[2])))
         pconn.commit()
         pconn.close()
     except Exception:
@@ -584,26 +622,30 @@ def set_engine_mode(is_live: bool) -> str:
 
 
 def sync_state_to_sqlite():
-    """Persist unified sniper, mode, and scan telemetry into picks.db."""
+    """Persist unified sniper, mode, dynamic slate cap, and scan telemetry into picks.db."""
     picks_db = BASE_DIR / "picks.db"
     try:
         pconn = sqlite3.connect(str(picks_db))
         existing_cols = {r[1] for r in pconn.execute("PRAGMA table_info(bot_state)").fetchall()}
         for col, cdef in (
-            ("slate_cap", "REAL NOT NULL DEFAULT 5.00"),
+            ("slate_cap", "REAL NOT NULL DEFAULT 32.22"),
+            ("bankroll_allocation_pct", "REAL NOT NULL DEFAULT 1.00"),
             ("last_scan_ts", "REAL NOT NULL DEFAULT 0.0"),
             ("last_markets_checked", "INTEGER NOT NULL DEFAULT 14"),
             ("last_scan_diag", "TEXT NOT NULL DEFAULT 'Armed'"),
         ):
             if col not in existing_cols:
                 pconn.execute(f"ALTER TABLE bot_state ADD COLUMN {col} {cdef}")
+        curr_slate_cap = get_dynamic_slate_cap()
         pconn.execute(
             """UPDATE bot_state
-               SET mode = ?, auto_enabled = ?, last_scan_ts = ?, last_markets_checked = ?, last_scan_diag = ?
+               SET mode = ?, auto_enabled = ?, slate_cap = ?, bankroll_allocation_pct = ?, last_scan_ts = ?, last_markets_checked = ?, last_scan_diag = ?
                WHERE id = 1""",
             (
                 "LIVE" if LIVE_MODE else "SIM",
                 1 if SNIPER_ARMED else 0,
+                curr_slate_cap,
+                bankroll_allocation_pct,
                 last_scan_ts,
                 last_markets_checked,
                 last_scan_diag[:180],
@@ -723,11 +765,21 @@ def resolve_streamed_pk_for_position(ticker: str, title: str, engine: str, side:
 # ==========================================
 # TELEGRAM V2 HUD BUILDER & DISPATCHER
 # ==========================================
-def build_menu_hud_payload() -> tuple:
+def build_menu_hud_payload(show_slider: Optional[bool] = None, show_scan_panel: Optional[bool] = None) -> tuple:
     """
-    Build the exact `📡 AURASCAN // TELEMETRY V2` HUD text and 5-Row Inline Keyboard JSON
-    reading live runtime state from the trading engine, Kalshi balance, and API status.
+    Build the exact `📡 AURASCAN // TELEMETRY V2` HUD text and Inline Keyboard JSON
+    reading live runtime state, dynamic bankroll slider cap, API status, and sport options.
     """
+    global slider_panel_active, scan_panel_active
+    if show_slider is not None:
+        slider_panel_active = show_slider
+        if slider_panel_active:
+            scan_panel_active = False
+    if show_scan_panel is not None:
+        scan_panel_active = show_scan_panel
+        if scan_panel_active:
+            slider_panel_active = False
+
     mode_str = "LIVE REAL-MONEY" if LIVE_MODE else "SIMULATION"
     mode_icon = "🟢" if LIVE_MODE else "🎮"
     mode_btn = "🎛 Mode: LIVE (Tap ➡️ SIM)" if LIVE_MODE else "🎛 Mode: SIM (Tap ➡️ LIVE)"
@@ -740,6 +792,8 @@ def build_menu_hud_payload() -> tuple:
         sniper_btn = "🎯 Sniper: OFF"
 
     exposure = get_current_exposure()
+    slate_cap = get_dynamic_slate_cap()
+    cap_pct_str = f"{int(bankroll_allocation_pct * 100)}%"
     mins_ago = max(0, int((time.time() - last_scan_ts) // 60))
     scan_age = f"{mins_ago}m ago" if mins_ago > 0 else "just now"
 
@@ -760,14 +814,16 @@ def build_menu_hud_payload() -> tuple:
     nfl_live = max(2, sport_live_counts.get("NFL", 2))
     stream_cnt = max(1, len(open_positions))
 
+    pause_tag = " | ⏸️ *Builder Override Active*" if is_user_building_combo() else ""
+
     hud_text = (
         "📡 *AURASCAN // TELEMETRY V2*\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ *Sniper:* {sniper_status}\n"
+        f"⚡ *Sniper:* {sniper_status}{pause_tag}\n"
         f"🎛 *Engine Mode:* {mode_icon} `{mode_str}`\n"
         f"{api_line}\n"
         f"💰 *Bankroll:* {bankroll_line}\n"
-        f"🛡️ *Exposure:* `${exposure:.2f} / ${SLATE_CAP_DOLLARS:.2f}` Slate Cap\n"
+        f"🛡️ *Exposure:* `${exposure:.2f} / ${slate_cap:.2f}` Slate Cap ({cap_pct_str})\n"
         f"🔄 *Last Scan:* {scan_age} ({last_markets_checked} markets checked)\n"
         f"🩺 *Diagnostics:* `{last_scan_diag}`\n\n"
         "📊 *ACTIVE SUB-ENGINES*\n"
@@ -779,30 +835,137 @@ def build_menu_hud_payload() -> tuple:
         f"📺 *Active Bet Streams:* {stream_cnt} Live Link{'s' if stream_cnt != 1 else ''} Ready"
     )
 
-    reply_markup = {
-        "inline_keyboard": [
-            [
-                {"text": sniper_btn, "callback_data": "menu_toggle_sniper"},
-                {"text": mode_btn, "callback_data": "menu_toggle_mode"},
-            ],
-            [
-                {"text": "⚡ Force Scan", "callback_data": "menu_force_scan"},
-                {"text": "🔑 Test Kalshi API", "callback_data": "menu_test_api"},
-            ],
-            [
-                {"text": "📊 Status & Exposure", "callback_data": "menu_status"},
-                {"text": "📋 Open Positions", "callback_data": "menu_open_positions"},
-            ],
-            [
-                {"text": "🔓 Flush Locks", "callback_data": "menu_flush_locks"},
-                {"text": "📺 Watch Active Bets", "callback_data": "menu_watch_bets"},
-            ],
-            [
-                {"text": "🔄 Refresh HUD", "callback_data": "menu_refresh_hud"},
-            ],
-        ]
-    }
-    return hud_text, reply_markup
+    kb_rows = [
+        [
+            {"text": sniper_btn, "callback_data": "menu_toggle_sniper"},
+            {"text": mode_btn, "callback_data": "menu_toggle_mode"},
+        ],
+        [
+            {"text": f"🎚️ Bankroll Cap: {cap_pct_str} (${slate_cap:.2f})", "callback_data": "menu_slider_panel"},
+        ],
+    ]
+
+    if slider_panel_active:
+        kb_rows.append([
+            {"text": "➖10%", "callback_data": "slider_step_down"},
+            {"text": "10%", "callback_data": "slider_pct_10"},
+            {"text": "25%", "callback_data": "slider_pct_25"},
+            {"text": "50%", "callback_data": "slider_pct_50"},
+            {"text": "75%", "callback_data": "slider_pct_75"},
+            {"text": "100%", "callback_data": "slider_pct_100"},
+            {"text": "➕10%", "callback_data": "slider_step_up"},
+        ])
+        kb_rows.append([
+            {"text": "✅ Done Setting Cap", "callback_data": "slider_done"},
+        ])
+
+    if scan_panel_active:
+        kb_rows.append([
+            {"text": "🏀 NBA Props", "callback_data": "scan_sport_nba"},
+            {"text": "🏈 NFL / CFB", "callback_data": "scan_sport_nfl"},
+        ])
+        kb_rows.append([
+            {"text": "🎾 Tennis", "callback_data": "scan_sport_tennis"},
+            {"text": "⚾ MLB Props", "callback_data": "scan_sport_mlb"},
+        ])
+        kb_rows.append([
+            {"text": "🏀 WNBA", "callback_data": "scan_sport_wnba"},
+            {"text": "🎮 Esports", "callback_data": "scan_sport_esports"},
+        ])
+        kb_rows.append([
+            {"text": "⚡ All-Slate Scan", "callback_data": "scan_sport_all"},
+            {"text": "🔙 Close Scan Panel", "callback_data": "scan_panel_close"},
+        ])
+
+    kb_rows.extend([
+        [
+            {"text": "⚡ Force Scan", "callback_data": "menu_force_scan"},
+            {"text": "🔍 Scan by Sport", "callback_data": "menu_scan_options"},
+        ],
+        [
+            {"text": "🛠️ Build Custom Combo", "callback_data": "menu_build_combo"},
+            {"text": "📊 Status & Exposure", "callback_data": "menu_status"},
+        ],
+        [
+            {"text": "📋 Open Positions", "callback_data": "menu_open_positions"},
+            {"text": "📈 Settled PnL", "callback_data": "menu_pnl"},
+        ],
+        [
+            {"text": "🔑 Test Kalshi API", "callback_data": "menu_test_api"},
+            {"text": "🔓 Flush Locks", "callback_data": "menu_flush_locks"},
+        ],
+        [
+            {"text": "📺 Watch Active Bets", "callback_data": "menu_watch_bets"},
+            {"text": "🔄 Refresh HUD", "callback_data": "menu_refresh_hud"},
+        ],
+    ])
+
+    return hud_text, {"inline_keyboard": kb_rows}
+
+
+def build_custom_combo_menu(selected_tickers: Optional[List[str]] = None) -> tuple:
+    """
+    Component 4: MANUAL COMBO BUILDER OVERRIDE (PAUSE / RESUME)
+    Interactive slip builder allowing the user to select 2 to 3 legs, evaluate Gaussian Copula,
+    and execute on Kalshi with auto-pilot paused.
+    """
+    global user_building_combo
+    user_building_combo["active"] = True
+    user_building_combo["ts"] = time.time()
+    if selected_tickers is not None:
+        user_building_combo["selected_tickers"] = selected_tickers
+    sel = user_building_combo.get("selected_tickers", [])
+
+    markets = fetch_all_open_markets()
+    mapped = []
+    for m in markets:
+        props = sim_to_prop_mapper(m)
+        for p in props:
+            mapped.append(p)
+            if len(mapped) >= 12:
+                break
+        if len(mapped) >= 12:
+            break
+
+    user_building_combo["cached_props"] = mapped
+
+    slate_cap = get_dynamic_slate_cap()
+    curr_exp = get_current_exposure()
+    avail = max(0.0, slate_cap - curr_exp)
+
+    lines = [
+        "🛠️ *MANUAL COMBO BUILDER // OVERRIDE ACTIVE*",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "⏸️ *Auto-Pilot is PAUSED* (5-minute manual building window)",
+        f"• 💰 *Deployable Cash:* `${avail:.2f}` (under `${slate_cap:.2f}` Cap)",
+        f"• 🎯 *Selected Legs ({len(sel)}/3):*",
+    ]
+
+    if sel:
+        for idx, tk in enumerate(sel, 1):
+            p = next((x for x in mapped if x["ticker"] == tk), None)
+            desc = p["player_prop"] if p else tk
+            lines.append(f"  {idx}. `{tk}`: {desc}")
+    else:
+        lines.append("  _Tap legs below to add 2 or 3 correlated props to your custom slip:_")
+
+    kb_rows = []
+    # Display toggle buttons for mapped props
+    for idx, p in enumerate(mapped[:6]):
+        tk = p["ticker"]
+        is_in = tk in sel
+        ico = "✅" if is_in else "➕"
+        lbl = f"{ico} [{p['sport']}] {p['player_or_team'][:14]} ({p['stat_type']})"
+        kb_rows.append([{"text": lbl, "callback_data": f"combo_toggle_{idx}"}])
+
+    act_row = []
+    if len(sel) >= 2:
+        act_row.append({"text": f"⚡ Fire Slip ({len(sel)} Legs)", "callback_data": "combo_fire"})
+    act_row.append({"text": "▶️ Resume Auto", "callback_data": "combo_resume"})
+    act_row.append({"text": "❌ Clear / Back", "callback_data": "combo_cancel"})
+    kb_rows.append(act_row)
+
+    return "\n".join(lines), {"inline_keyboard": kb_rows}
 
 
 def _save_chat_id(cid: str):
@@ -1206,7 +1369,7 @@ def manage_open_positions(m: dict):
                 f"• 📦 *Position:* Sold `{qty}x {side.upper()}`\n"
                 f"• 💵 *Price:* Entry `{entry_price}c` ➡️ Cashout `{current_bid}c`\n"
                 f"• 📈 *Trade PnL:* `${pnl_dollars:+.2f}` | *Session PnL:* `${sim_realized_pnl:+.2f}`\n"
-                f"• 💰 *Exposure:* `${get_current_exposure():.2f} / ${SLATE_CAP_DOLLARS:.2f}` Slate Cap\n"
+                f"• 💰 *Exposure:* `${get_current_exposure():.2f} / ${get_dynamic_slate_cap():.2f}` Slate Cap ({int(bankroll_allocation_pct*100)}% Cap)\n"
                 f"• 🏦 *Bankroll:* `${new_bal:.2f}`",
                 reply_markup=hud_kb,
             )
@@ -1227,7 +1390,8 @@ def quarter_kelly_size(bankroll: float, win_prob: float, price_cents: int) -> in
     cost = max(1, price_cents) / 100.0
     if cost <= 0.02 or cost >= 0.98:
         return 0
-    remaining_cap = max(0.0, SLATE_CAP_DOLLARS - get_current_exposure())
+    slate_cap = get_dynamic_slate_cap(bankroll)
+    remaining_cap = max(0.0, slate_cap - get_current_exposure())
     if remaining_cap < cost:
         return 0
     b = (1.0 - cost) / cost
@@ -1235,13 +1399,10 @@ def quarter_kelly_size(bankroll: float, win_prob: float, price_cents: int) -> in
     if kelly_f <= 0 and win_prob <= cost:
         return 0
 
-    # Ensure valid position sizing under $5.00 Slate Cap (1-3 contracts, min 1 contract)
-    if remaining_cap >= cost:
-        effective_bankroll = bankroll if (LIVE_MODE and bankroll > 0) else 50.0
-        alloc = min(max(cost, effective_bankroll * max(0.06, kelly_f) * KELLY_FRACTION), MAX_BET_DOLLARS, remaining_cap)
-        qty = int(alloc // cost)
-        return max(1, min(qty, 3))
-    return 0
+    effective_bankroll = bankroll if (LIVE_MODE and bankroll > 0) else 32.22
+    alloc = min(max(cost, effective_bankroll * max(0.06, kelly_f) * KELLY_FRACTION), remaining_cap)
+    qty = int(alloc // cost)
+    return max(1, min(qty, 10))
 
 
 def run_monte_carlo_and_combo_pipeline(
@@ -1255,7 +1416,7 @@ def run_monte_carlo_and_combo_pipeline(
     1. Sim-to-Prop Translator (sim_to_prop_mapper)
     2. 10,000-Iteration Monte Carlo Simulation (simulate_prop_leg from sim_engine)
     3. Correlated Combo Builder using Joint Gaussian Copula (evaluate_parlay / build_optimal_parlays)
-    4. Live Kalshi Limit Order Execution & RFQ Sniper (capped by $5.00 Slate Cap)
+    4. Live Kalshi Limit Order Execution & RFQ Sniper (scaled by Dynamic Bankroll Slider Cap)
     """
     global last_scan_ts, last_markets_checked, last_scan_diag, total_trades_count, live_kalshi_balance
 
@@ -1271,6 +1432,7 @@ def run_monte_carlo_and_combo_pipeline(
     bankroll = live_bal if live_bal > 0 else max(0.0, live_kalshi_balance + sim_realized_pnl)
     if bankroll <= 0:
         bankroll = 32.22  # Safe live default for sizing
+    slate_cap = get_dynamic_slate_cap(bankroll)
 
     # 1. THE SIM-TO-PROP TRANSLATOR (sim_to_prop_mapper)
     mapped_props = []
@@ -1279,9 +1441,13 @@ def run_monte_carlo_and_combo_pipeline(
         for p in props:
             if sport_filter:
                 sp_norm = sport_filter.upper()
-                if sp_norm in ("CFB", "FOOTBALL") and p["sport"] == "NFL":
+                if sp_norm in ("CFB", "FOOTBALL", "NFL") and p["sport"] in ("NFL", "CFB"):
                     pass
-                elif p["sport"].upper() != sp_norm:
+                elif sp_norm in ("TENNIS", "ATP", "WTA") and p["sport"] in ("TENNIS", "ATP", "WTA"):
+                    pass
+                elif sp_norm in ("BASKETBALL", "NBA") and p["sport"] in ("NBA", "WNBA"):
+                    pass
+                elif p["sport"].upper() != sp_norm and p["sport"].upper() != "GENERAL":
                     continue
             mapped_props.append(p)
 
@@ -1358,7 +1524,7 @@ def run_monte_carlo_and_combo_pipeline(
 
     # 3. CORRELATED COMBO BUILDER (JOINT GAUSSIAN COPULA)
     curr_exposure = get_current_exposure()
-    remaining_slate_cap = max(0.0, SLATE_CAP_DOLLARS - curr_exposure)
+    remaining_slate_cap = max(0.0, slate_cap - curr_exposure)
 
     candidate_combos = []
     if len(simulated_legs) >= 2:
@@ -1374,7 +1540,7 @@ def run_monte_carlo_and_combo_pipeline(
     orders_executed = []
     can_execute = (
         (SNIPER_ARMED and LIVE_MODE) or (force and SNIPER_ARMED)
-    ) and (curr_exposure < SLATE_CAP_DOLLARS - 0.25) and not circuit_breaker_tripped
+    ) and (curr_exposure < slate_cap - 0.25) and not circuit_breaker_tripped
 
     if can_execute:
         best_combo = candidate_combos[0] if candidate_combos else None
@@ -1387,13 +1553,13 @@ def run_monte_carlo_and_combo_pipeline(
                 price_c = leg.ask_cents
                 cost_per_c = max(1, price_c) / 100.0
                 raw_contracts = int(per_leg_stake // cost_per_c)
-                contracts = max(1, min(raw_contracts, 3))
+                contracts = max(1, min(raw_contracts, 10))
                 leg_cost = round(contracts * cost_per_c, 2)
 
-                if get_current_exposure() + leg_cost > SLATE_CAP_DOLLARS:
+                if get_current_exposure() + leg_cost > slate_cap:
                     contracts = 1
                     leg_cost = round(cost_per_c, 2)
-                if get_current_exposure() + leg_cost > SLATE_CAP_DOLLARS:
+                if get_current_exposure() + leg_cost > slate_cap:
                     continue
 
                 order_res = execute_order(
@@ -1471,7 +1637,7 @@ def run_monte_carlo_and_combo_pipeline(
             qty = quarter_kelly_size(bankroll, top_leg.mc_true_prob, price_c)
             leg_cost = round(qty * cost_per_c, 2)
 
-            if qty > 0 and (get_current_exposure() + leg_cost <= SLATE_CAP_DOLLARS):
+            if qty > 0 and (get_current_exposure() + leg_cost <= slate_cap):
                 order_res = execute_order(
                     ticker=top_leg.market_ticker,
                     action="buy",
@@ -1524,11 +1690,11 @@ def run_monte_carlo_and_combo_pipeline(
     # Update diagnostics and DB state
     new_exp = get_current_exposure()
     if orders_executed:
-        last_scan_diag = f"🎯 Fired {len(orders_executed)} order(s) via 10k MC (Exp: ${new_exp:.2f}/${SLATE_CAP_DOLLARS:.2f})"
+        last_scan_diag = f"🎯 Fired {len(orders_executed)} order(s) via 10k MC (Exp: ${new_exp:.2f}/${slate_cap:.2f})"
     elif not SNIPER_ARMED:
         last_scan_diag = f"🔴 Sniper DISARMED — 10k MC simulated {len(simulated_legs)} props"
-    elif new_exp >= SLATE_CAP_DOLLARS - 0.25:
-        last_scan_diag = f"🛡️ Slate Cap full (${new_exp:.2f}/${SLATE_CAP_DOLLARS:.2f}) across {len(open_positions)} pos"
+    elif new_exp >= slate_cap - 0.25:
+        last_scan_diag = f"🛡️ Slate Cap full (${new_exp:.2f}/${slate_cap:.2f}) across {len(open_positions)} pos"
     else:
         top_ev = simulated_legs[0].ev_edge if simulated_legs else 0.0
         last_scan_diag = f"⚡ 10k MC: {len(simulated_legs)} props simulated (Top: {top_ev:+.1%} EV)"
@@ -1543,7 +1709,7 @@ def run_monte_carlo_and_combo_pipeline(
         f"━━━━━━━━━━━━━━━━━━━━━━━━",
         f"• 🎛 *Engine Mode:* `{'🟢 LIVE' if LIVE_MODE else '🎮 SIM'}` ({mode_tag})",
         f"• 🎯 *Sniper:* `{'🟢 ARMED' if SNIPER_ARMED else '🔴 DISARMED'}` | 💵 *Live Cash:* `${bankroll:.2f}`",
-        f"• 🛡️ *Slate Exposure:* `${new_exp:.2f} / ${SLATE_CAP_DOLLARS:.2f}` Slate Cap",
+        f"• 🛡️ *Slate Exposure:* `${new_exp:.2f} / ${slate_cap:.2f}` Slate Cap ({int(bankroll_allocation_pct*100)}%)",
         f"• 🔬 *Simulations Run:* `10,000 iter/prop` across `{len(simulated_legs)}` mapped market props\n",
     ]
 
@@ -1704,6 +1870,7 @@ def build_watch_active_bets_payload() -> tuple:
 
 def build_status_exposure_text() -> str:
     exp = get_current_exposure()
+    slate_cap = get_dynamic_slate_cap()
     mode_tag = "LIVE REAL-MONEY" if LIVE_MODE else "SIMULATION"
     sniper_tag = (
         f"🟢 ARMED ({'LIVE' if LIVE_MODE else 'SIM'})"
@@ -1729,13 +1896,430 @@ def build_status_exposure_text() -> str:
         f"• 🔑 *Kalshi API:* `{api_stat}`\n"
         f"• 💵 *Actual Kalshi Cash:* `${live_kalshi_balance:.2f}`\n"
         f"• 🎮 *SIM Tracked Cash:* `${max(0.0, live_kalshi_balance + sim_realized_pnl):.2f}`\n"
-        f"• 💰 *Slate Exposure:* `${exp:.2f} / ${SLATE_CAP_DOLLARS:.2f}` Slate Cap\n"
+        f"• 💰 *Slate Exposure:* `${exp:.2f} / ${slate_cap:.2f}` Slate Cap ({int(bankroll_allocation_pct*100)}% Cap)\n"
         f"• 📈 *Session Realized PnL:* `${sim_realized_pnl:+.2f}`\n"
         f"• 🎯 *Trades Executed:* `{total_trades_count}` | *Cashouts:* `{total_cashouts_count}`\n"
         f"• 🔒 *Active Cooldown Locks:* `{len(cooldown_tracker)}`\n"
         f"• 🩺 *Last Diagnostic:* `{last_scan_diag}`\n"
         f"• 📂 *Open Positions ({len(open_positions)}):*\n" + "\n".join(pos_lines)
     )
+
+
+def build_sim_text(query: str = "") -> str:
+    """10,000-iteration Monte Carlo prop sim for /sim command."""
+    if not query.strip():
+        query = "NBA:LeBron James O25.5 PTS@51"
+
+    clean_q = query.strip()
+    try:
+        leg = parse_manual_leg_token(clean_q, iterations=10000)
+    except Exception:
+        parsed = parse_prop_and_line(clean_q, clean_q)
+        sp = detect_sport(clean_q, parsed["player_prop"])
+        s_res = simulate_prop_leg(
+            ticker="MANUAL-SIM",
+            sport=sp,
+            player_prop=parsed["player_prop"],
+            line=parsed["line"],
+            side=parsed["side"],
+            book_prob=0.50,
+            iterations=10000,
+        )
+        leg = SlipLeg(
+            market_ticker="MANUAL-SIM",
+            sport=sp,
+            player_prop=parsed["player_prop"],
+            player_name=parsed["player_name"],
+            stat_type=parsed["stat_type"],
+            line=s_res.line,
+            side=s_res.side,
+            book_prob=s_res.book_prob,
+            mc_true_prob=s_res.mc_true_prob,
+            p10=s_res.p10,
+            p50=s_res.p50,
+            p90=s_res.p90,
+            dist_family=s_res.dist_family,
+            archetype=s_res.archetype,
+            sim_method=s_res.sim_method,
+            telemetry_tag=s_res.telemetry_badge,
+            bid_cents=49,
+            ask_cents=51,
+        )
+
+    try:
+        log_sim_audit(
+            market_ticker=leg.market_ticker,
+            sport=leg.sport,
+            player_prop=leg.player_prop,
+            line=leg.line,
+            side=leg.side,
+            book_prob=leg.book_prob,
+            mc_true_prob=leg.mc_true_prob,
+            copula_joint_prob=leg.mc_true_prob,
+            ev_edge=leg.ev_edge,
+            kelly_stake=1.0,
+        )
+    except Exception:
+        pass
+
+    edge_sign = "+" if leg.edge_pct >= 0 else ""
+    return (
+        f"🎲 *10,000-ITERATION MONTE CARLO PROP SIM* 🎲\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"• 🏷 *Prop:* `{leg.market_ticker}`\n"
+        f"• 📌 *Contract:* {leg.player_prop} (*{leg.side} {leg.line}*)\n"
+        f"• 🧬 *Player Archetype:* `{getattr(leg, 'archetype', 'QUANT_HYBRID')}`\n"
+        f"• ⚙️ *Sport Sim Engine:* `{getattr(leg, 'sim_method', 'Monte Carlo NB')}`\n"
+        f"• 📐 *Parametric Family:* `{getattr(leg, 'dist_family', 'Negative Binomial')}` (`10,000 draws`)\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"*Simulated Stat Distribution Percentiles:*\n"
+        f"• 🔻 *10th Percentile (Floor):* `{leg.p10}`\n"
+        f"• 🎯 *50th Percentile (Median):* `{leg.p50}` (Line: `{leg.line}`)\n"
+        f"• 🚀 *90th Percentile (Ceiling):* `{leg.p90}`\n"
+        f"• 📊 *Mean Projected:* `{getattr(leg, 'mc_mean', leg.line):.1f} ± {getattr(leg, 'mc_std', 1.5):.1f}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"• 📊 *De-Vigged Book Prob:* `{round(leg.book_prob * 100.0, 1)}%` ({leg.american_odds})\n"
+        f"• 🧠 *10k Monte Carlo True Prob:* `{round(leg.mc_true_prob * 100.0, 1)}%`\n"
+        f"• 🔥 *True EV Edge:* `{edge_sign}{leg.edge_pct}%`\n"
+        f"• 🔗 [Direct Kalshi Market]({leg.market_url})"
+    )
+
+
+def build_audit_report() -> str:
+    """Run calibration and Cholesky symmetry audit for /audit command."""
+    audit = run_calibration_and_symmetry_audit(iterations=10000)
+    badge = "✅ PASSED (ZERO DIRECTIONAL BIAS)" if audit.get("passed") else "⚠️ REVIEW NEEDED"
+    vec_str = "NumPy Cholesky Vectorized" if audit.get("numpy_vectorized") else "Pure-Python Cholesky Math Engine"
+    return (
+        f"🔬 *MONTE CARLO & COPULA CALIBRATION AUDIT* 🔬\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"• 🏷 *Audit Status:* `{badge}`\n"
+        f"• ⚙️ *Backend:* `{vec_str}` (`{audit.get('iterations', 10000):,}` iterations)\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"*1. De-Vigged 50/50 Symmetry Test:*\n"
+        f"• OVER 24.5 Simulated Hit Rate: `{audit.get('over_50_prob', 50.0)}%`\n"
+        f"• UNDER 24.5 Simulated Hit Rate: `{audit.get('under_50_prob', 50.0)}%`\n"
+        f"• Total Probability Mass: `{audit.get('symmetry_sum_pct', 100.0)}%`\n"
+        f"• Directional Bias vs Consensus: `{audit.get('directional_bias_pct', 0.0)}%` (Target `< 1.0%`)\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"*2. Split-Half Convergence Check:*\n"
+        f"• 5k vs 10k Convergence Delta: `{audit.get('convergence_err_pct', 0.0)}%` (Target `< 0.8%`)\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"*3. Joint Gaussian Copula Stack Test (QB + WR):*\n"
+        f"• Independent Product Prob: `{audit.get('copula_indep_pct', 25.0)}%`\n"
+        f"• Correlated Copula Joint Prob: `{audit.get('copula_joint_pct', 30.0)}%`\n"
+        f"• Correlation Boost: `+{audit.get('copula_boost_pct', 0.0)}%`"
+    )
+
+
+def build_open_positions_report() -> tuple:
+    """Build open positions and active slips report for /open and /positions."""
+    slate_cap = get_dynamic_slate_cap()
+    exp = get_current_exposure()
+    pending = []
+    try:
+        pending = fetch_pending_parlays()
+    except Exception:
+        pass
+
+    rows = []
+    lines = [
+        "📋 *OPEN POSITIONS & ACTIVE SLIPS*",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"• 💰 *Exposure:* `${exp:.2f} / ${slate_cap:.2f}` Slate Cap ({int(bankroll_allocation_pct*100)}%)",
+        f"• 🎛 *Mode:* `{'🟢 LIVE REAL-MONEY' if LIVE_MODE else '🎮 SIMULATION'}`\n",
+    ]
+
+    has_items = False
+    if open_positions:
+        has_items = True
+        lines.append("🎯 *Active Open Contracts:*")
+        for tk, p in list(open_positions.items())[:6]:
+            st = resolve_streamed_pk_for_position(
+                ticker=tk,
+                title=p.get("title", tk),
+                engine=p.get("engine", "NBA"),
+                side=p.get("side", "yes"),
+                qty=p.get("qty", 1),
+                entry_cents=p.get("entry", 50),
+            )
+            cost = (p["qty"] * p["entry"]) / 100.0
+            bid_c = p.get("last_seen_bid", p["entry"])
+            cur_val = (p["qty"] * bid_c) / 100.0
+            unrealized = cur_val - cost
+            lines.append(
+                f"• `{tk}` (*{p.get('engine', 'NBA')}*)\n"
+                f"  🏷 {p.get('title', tk)[:40]}\n"
+                f"  📦 {p['qty']}x {p['side'].upper()} @ {p['entry']}c (HWM {p['hwm']}c | Bid {bid_c}c)\n"
+                f"  💵 Value: `${cur_val:.2f}` (Unrealized: `{unrealized:+.2f}`)\n"
+            )
+            rows.append([
+                {"text": f"📺 Watch: {st['match_title'][:20]}", "url": st["embed_url"]},
+                {"text": "⚡ Sweat HUD", "url": st["sweat_hud_url"]},
+            ])
+
+    if pending:
+        has_items = True
+        lines.append("📂 *Pending Correlated Parlays (Database):*")
+        for s in pending[:4]:
+            lines.append(format_db_slip_summary(s))
+            lines.append("")
+
+    if not has_items:
+        lines.append("📭 _No open positions or pending slips right now._")
+        lines.append("Tap *⚡ Force Scan* or choose a sport below to deploy a fresh 10k Monte Carlo run!")
+
+    rows.append([
+        {"text": "⚡ Force Scan", "callback_data": "menu_force_scan"},
+        {"text": "🔍 Scan by Sport", "callback_data": "menu_scan_options"},
+    ])
+    rows.append([{"text": "🔙 Back to HUD", "callback_data": "menu_refresh_hud"}])
+    return "\n".join(lines), {"inline_keyboard": rows}
+
+
+def build_pnl_report() -> str:
+    """Build bankroll and settled PnL report for /pnl."""
+    settled = []
+    try:
+        settled = fetch_settled_slips(limit=6)
+    except Exception:
+        pass
+
+    sign = "+" if sim_realized_pnl >= 0 else ""
+    slate_cap = get_dynamic_slate_cap()
+
+    exec_count = 0
+    total_vol = 0.0
+    try:
+        cconn = sqlite3.connect(str(BASE_DIR / "kalshi_trades.db"))
+        cur = cconn.execute("SELECT COUNT(*), SUM(price * count) FROM executions")
+        row = cur.fetchone()
+        if row:
+            exec_count = row[0] or 0
+            total_vol = (row[1] or 0) / 100.0
+        cconn.close()
+    except Exception:
+        pass
+
+    lines = [
+        "📈 *PEEZY BANKROLL & SETTLED PnL REPORT* 📈",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"• 💵 *Actual Kalshi Cash:* `${live_kalshi_balance:.2f}`",
+        f"• 🎮 *SIM Track Cash:* `${max(0.0, live_kalshi_balance + sim_realized_pnl):.2f}`",
+        f"• 📈 *Session Realized Net PnL:* `{sign}${sim_realized_pnl:.2f}`",
+        f"• 🛡️ *Current Slate Cap:* `${slate_cap:.2f}` ({int(bankroll_allocation_pct*100)}%)",
+        f"• 🎯 *Total Executions:* `{total_trades_count or exec_count}` | *Cashouts:* `{total_cashouts_count}`",
+        f"• 📊 *Volume Staked:* `${total_vol:.2f}`",
+    ]
+
+    if settled:
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━\n*Recent Settled Slips:*")
+        for s in settled:
+            icon = {"WON": "🟢", "LOST": "🔴", "PUSH": "🟡"}.get(s["status"], "⚪")
+            s_pnl = float(s.get("pnl", 0.0))
+            p_sign = "+" if s_pnl >= 0 else ""
+            lines.append(
+                f"{icon} `{s['slip_id']}` ({s.get('leg_count', 2)}-Leg `{s.get('american_odds', '+150')}`) — "
+                f"*[{s['status']}]* PnL: `{p_sign}${s_pnl:.2f}`"
+            )
+    else:
+        lines.append("\n_No settled slips logged yet. Open positions are actively trailed by the scalper worker._")
+
+    return "\n".join(lines)
+
+
+def build_simsettle_report() -> str:
+    """Simulate settlement of open positions for /simsettle."""
+    global sim_realized_pnl, total_cashouts_count
+    closed_cnt = 0
+    pnl_delta = 0.0
+    closed_details = []
+
+    for tk, p in list(open_positions.items()):
+        closed_cnt += 1
+        entry_c = p.get("entry", 50)
+        qty = p.get("qty", 1)
+        win = random.random() < (1.0 - (entry_c / 100.0) * 0.45)
+        exit_c = 100 if win else 0
+        leg_pnl = round(((exit_c - entry_c) * qty) / 100.0, 2)
+        pnl_delta += leg_pnl
+        closed_details.append(
+            f"• {'🟢 WON' if win else '🔴 LOST'} `{tk}`: {qty}x @ {entry_c}c ➡️ Exit {exit_c}c ({leg_pnl:+.2f})"
+        )
+        del open_positions[tk]
+
+    sim_realized_pnl += pnl_delta
+    total_cashouts_count += closed_cnt
+    sync_state_to_sqlite()
+
+    res_lines = [
+        "🏁 *SIMULATED SETTLEMENT REPORT* 🏁",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"• Graded `{closed_cnt}` active position(s).",
+        f"• Realized PnL Delta: `{pnl_delta:+.2f}`",
+        f"• Total Session PnL: `${sim_realized_pnl:+.2f}`",
+        f"• Open Positions Remaining: `{len(open_positions)}`\n",
+    ]
+    if closed_details:
+        res_lines.extend(closed_details)
+    else:
+        res_lines.append("_No open memory positions to settle. Use /scan or /slip to enter new positions!_")
+
+    return "\n".join(res_lines)
+
+
+def build_help_commands_report() -> str:
+    """Comprehensive command directory for /help."""
+    return (
+        "🤖 *PEEZY / AURASCAN COMMAND DIRECTORY* 🤖\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🔍 *MANUAL SPORT SCANS:*\n"
+        "• `/scan` — Force 10k Monte Carlo scan across ALL active slates\n"
+        "• `/nba` — Scan NBA player props (Points, Rebounds, Assists, 3PT)\n"
+        "• `/nfl` (or `/cfb`) — Scan NFL & CFB props (Passing, Rushing, Receiving)\n"
+        "• `/tennis` — Scan ATP & WTA tennis match/set props\n"
+        "• `/mlb` — Scan MLB player props (Strikeouts, Hits, HR)\n"
+        "• `/wnba` — Scan WNBA props\n"
+        "• `/esports` — Scan Esports markets\n\n"
+        "🎲 *QUANT MONTE CARLO & COPULA:*\n"
+        "• `/sim <prop>` — 10k MC stat distribution (P10, P50, P90, Edge)\n"
+        "  _Example:_ `/sim LeBron James O25.5 PTS`\n"
+        "• `/slip <leg1> | <leg2>` — Custom Joint Gaussian Copula parlay\n"
+        "  _Example:_ `/slip NFL:Mahomes O274.5 | NFL:Rice O68.5`\n"
+        "• `/audit` — 10k MC calibration, symmetry & Cholesky audit\n\n"
+        "📊 *PORTFOLIO & EXECUTION:*\n"
+        "• `/menu` — Live AuraScan Telemetry V2 HUD & action deck\n"
+        "• `/open` — View active open positions, HWM & streams\n"
+        "• `/pnl` — Bankroll & settled PnL report with ROI\n"
+        "• `/bal` — Verify live Kalshi cash balance\n"
+        "• `/cap <pct>` — Adjust bankroll cap (e.g. `/cap 100` for 100% full balance)\n"
+        "• `/mode [live|sim]` — Toggle Live Real-Money vs Simulation\n"
+        "• `/sniper [on|off]` — Arm or disarm autonomous order sniper\n"
+        "• `/watch` — Open live streamed.pk & Sweat HUD video streams\n"
+        "• `/clear_locks` — Flush all ticker cooldowns and unlock scanner\n"
+        "• `/simsettle` — Grade open positions with test outcomes\n"
+        "• `/reset` — Reset SIM balance to baseline"
+    )
+
+
+def execute_manual_slip(raw_query: str, target_cid: str = None) -> tuple:
+    """Build and execute a multi-leg Gaussian Copula parlay from /slip."""
+    if "|" in raw_query:
+        tokens = [t.strip() for t in raw_query.split("|") if t.strip()]
+    elif "," in raw_query:
+        tokens = [t.strip() for t in raw_query.split(",") if t.strip()]
+    else:
+        tokens = [t.strip() for t in raw_query.split() if t.strip()]
+
+    if len(tokens) < 2:
+        return (
+            "⚠️ *Usage:* `/slip <leg1> | <leg2> [| <leg3>]`\n\n"
+            "*Example (Correlated NFL Stack):*\n"
+            "`/slip NFL:Mahomes O274.5 PASS YDS@51 | NFL:Rashee Rice O68.5 REC YDS@50`",
+            build_menu_hud_payload()[1],
+        )
+
+    legs = []
+    for tok in tokens[:3]:
+        leg = parse_manual_leg_token(tok, iterations=10000)
+        legs.append(leg)
+
+    slate_cap = get_dynamic_slate_cap()
+    remaining_cap = max(0.0, slate_cap - get_current_exposure())
+    custom_slip = evaluate_parlay(legs, bankroll=live_kalshi_balance, remaining_slate_cap=remaining_cap)
+    custom_stake = min(custom_slip.kelly_stake, remaining_cap) if remaining_cap > 0 else 1.0
+    per_leg = custom_stake / max(1, len(custom_slip.legs))
+
+    exec_summary = []
+    if LIVE_MODE and SNIPER_ARMED:
+        for cl in custom_slip.legs:
+            cost_c = max(1, cl.ask_cents)
+            c_qty = max(1, min(int(per_leg // (cost_c / 100.0)), 5))
+            res = execute_order(cl.market_ticker, "buy", getattr(cl, "raw_side", "yes"), cost_c, c_qty)
+            if res:
+                open_positions[cl.market_ticker] = {
+                    "side": getattr(cl, "raw_side", "yes"),
+                    "entry": cost_c,
+                    "qty": c_qty,
+                    "hwm": cost_c,
+                    "last_seen_bid": cl.bid_cents,
+                    "last_tick_ts": time.time(),
+                    "engine": cl.sport,
+                    "title": cl.player_prop,
+                    "order_id": res.get("order_id", ""),
+                }
+                exec_summary.append(f"• `[LIVE FILL]` `{cl.market_ticker}` ({c_qty}x @ {cost_c}c)")
+    else:
+        for cl in custom_slip.legs:
+            cost_c = max(1, cl.ask_cents)
+            c_qty = max(1, min(int(per_leg // (cost_c / 100.0)), 5))
+            open_positions[cl.market_ticker] = {
+                "side": getattr(cl, "raw_side", "yes"),
+                "entry": cost_c,
+                "qty": c_qty,
+                "hwm": cost_c,
+                "last_seen_bid": cl.bid_cents,
+                "last_tick_ts": time.time(),
+                "engine": cl.sport,
+                "title": cl.player_prop,
+                "order_id": f"sim-{uuid.uuid4().hex[:8]}",
+            }
+            exec_summary.append(f"• `[SIM RECORD]` `{cl.market_ticker}` ({c_qty}x @ {cost_c}c)")
+
+    try:
+        log_new_slip(
+            legs_data=[leg.to_dict() for leg in custom_slip.legs],
+            book_prob=custom_slip.book_prob,
+            mc_independent_prob=custom_slip.mc_independent_prob,
+            copula_joint_prob=custom_slip.copula_joint_prob,
+            copula_boost_pct=custom_slip.copula_boost_pct,
+            decimal_odds=custom_slip.decimal_odds,
+            american_odds=custom_slip.american_odds,
+            ev_edge=custom_slip.ev_edge,
+            kelly_stake=custom_stake,
+            potential_payout=custom_stake * custom_slip.decimal_odds,
+            rfq_order_id=f"slip-{int(time.time())}",
+            rfq_expires_at=datetime.now(timezone.utc).isoformat(),
+            deduct_sim=(not LIVE_MODE),
+        )
+    except Exception:
+        pass
+
+    sync_state_to_sqlite()
+    rep = (
+        f"🧬 *CUSTOM JOINT GAUSSIAN COPULA SLIP* 🧬\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"• 🎛 *Mode:* `{'🟢 LIVE REAL-MONEY' if LIVE_MODE else '🎮 SIMULATION'}`\n"
+        f"• 🧬 *Copula Joint Prob:* `{custom_slip.copula_joint_prob*100:.1f}%` (Book `{custom_slip.book_prob*100:.1f}%`, *+{custom_slip.ev_pct:.1f}% EV*)\n"
+        f"• 🚀 *Correlation Boost:* `+{custom_slip.copula_boost_pct:.1f}%`\n"
+        f"• 💵 *Odds:* `{custom_slip.american_odds}` | *Stake:* `${custom_stake:.2f}` ➡️ Payout `${custom_stake * custom_slip.decimal_odds:.2f}`\n\n"
+        f"*Slip Legs:*\n"
+    )
+    for idx, l in enumerate(custom_slip.legs, 1):
+        rep += f"  {idx}. [{l.sport}] *{l.player_prop}* ({l.side} {l.line}) | Book `{l.book_prob*100:.1f}%` vs 10k MC `{l.mc_true_prob*100:.1f}%`\n"
+    if exec_summary:
+        rep += "\n*Execution Receipts:*\n" + "\n".join(exec_summary)
+
+    first_leg = custom_slip.legs[0]
+    st = resolve_streamed_pk_for_position(
+        ticker=first_leg.market_ticker,
+        title=first_leg.player_prop,
+        engine=first_leg.sport,
+        side=getattr(first_leg, "raw_side", "YES"),
+        qty=1,
+        entry_cents=first_leg.ask_cents,
+    )
+    _, hud_kb = build_menu_hud_payload()
+    kb = {
+        "inline_keyboard": [
+            [
+                {"text": f"📺 Watch: {st['match_title'][:22]}", "url": st["embed_url"]},
+                {"text": "⚡ Sweat HUD", "url": st["sweat_hud_url"]},
+            ],
+            *hud_kb["inline_keyboard"],
+        ]
+    }
+    return rep, kb
 
 
 # ==========================================
@@ -1867,6 +2451,156 @@ async def telegram_notifier_and_command_loop():
                             w_txt, w_kb = await asyncio.to_thread(build_watch_active_bets_payload)
                             await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, w_txt, w_kb)
 
+                        elif "slider_panel" in cb_data:
+                            slider_panel_active = not slider_panel_active
+                            hud_text, hud_kb = build_menu_hud_payload(show_slider=slider_panel_active)
+                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
+
+                        elif "slider_pct_" in cb_data:
+                            try:
+                                val = int(cb_data.split("slider_pct_")[1])
+                                bankroll_allocation_pct = max(0.05, min(1.00, val / 100.0))
+                                slate_cap = get_dynamic_slate_cap()
+                                sync_state_to_sqlite()
+                                toast_text = f"🎚️ Cap set to {val}% (${slate_cap:.2f})"
+                                last_scan_diag = f"🎚️ Bankroll Cap: {val}% (${slate_cap:.2f})"
+                            except Exception:
+                                pass
+                            hud_text, hud_kb = build_menu_hud_payload(show_slider=slider_panel_active)
+                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
+
+                        elif "slider_step_down" in cb_data:
+                            bankroll_allocation_pct = max(0.05, round(bankroll_allocation_pct - 0.10, 2))
+                            slate_cap = get_dynamic_slate_cap()
+                            sync_state_to_sqlite()
+                            toast_text = f"🎚️ Cap: {int(bankroll_allocation_pct*100)}% (${slate_cap:.2f})"
+                            hud_text, hud_kb = build_menu_hud_payload(show_slider=slider_panel_active)
+                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
+
+                        elif "slider_step_up" in cb_data:
+                            bankroll_allocation_pct = min(1.00, round(bankroll_allocation_pct + 0.10, 2))
+                            slate_cap = get_dynamic_slate_cap()
+                            sync_state_to_sqlite()
+                            toast_text = f"🎚️ Cap: {int(bankroll_allocation_pct*100)}% (${slate_cap:.2f})"
+                            hud_text, hud_kb = build_menu_hud_payload(show_slider=slider_panel_active)
+                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
+
+                        elif "slider_done" in cb_data:
+                            slider_panel_active = False
+                            hud_text, hud_kb = build_menu_hud_payload(show_slider=False)
+                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
+
+                        elif any(k in cb_data for k in ("build_combo", "custom_combo")):
+                            toast_text = "🛠️ Builder active (Auto paused)"
+                            b_txt, b_kb = await asyncio.to_thread(build_custom_combo_menu)
+                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, b_txt, b_kb)
+
+                        elif "combo_toggle_" in cb_data:
+                            try:
+                                idx = int(cb_data.split("combo_toggle_")[1])
+                                cached = user_building_combo.get("cached_props", [])
+                                if 0 <= idx < len(cached):
+                                    tk = cached[idx]["ticker"]
+                                    sel = user_building_combo.setdefault("selected_tickers", [])
+                                    if tk in sel:
+                                        sel.remove(tk)
+                                    else:
+                                        if len(sel) < 3:
+                                            sel.append(tk)
+                                        else:
+                                            toast_text = "Max 3 legs in combo"
+                            except Exception:
+                                pass
+                            b_txt, b_kb = await asyncio.to_thread(build_custom_combo_menu, user_building_combo.get("selected_tickers", []))
+                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, b_txt, b_kb)
+
+                        elif "combo_fire" in cb_data:
+                            sel = user_building_combo.get("selected_tickers", [])
+                            cached = user_building_combo.get("cached_props", [])
+                            chosen_props = [p for p in cached if p["ticker"] in sel]
+                            if len(chosen_props) >= 2:
+                                toast_text = "⚡ Executing custom combo..."
+                                chosen_legs = []
+                                for p in chosen_props:
+                                    s_res = simulate_prop_leg(
+                                        ticker=p["ticker"], sport=p["sport"], player_prop=p["player_prop"],
+                                        line=p["line"], side=p["sim_direction"], book_prob=p["implied_prob"], iterations=10000
+                                    )
+                                    leg = SlipLeg(
+                                        market_ticker=p["ticker"], sport=p["sport"], player_prop=p["player_prop"],
+                                        player_name=p["player_or_team"], stat_type=p["stat_type"], line=s_res.line,
+                                        side=p["sim_direction"], book_prob=s_res.book_prob, mc_true_prob=s_res.mc_true_prob,
+                                        p10=s_res.p10, p50=s_res.p50, p90=s_res.p90, bid_cents=p["bid_price_cents"], ask_cents=p["ask_price_cents"]
+                                    )
+                                    leg.raw_side = p["side"]
+                                    chosen_legs.append(leg)
+
+                                slate_cap = get_dynamic_slate_cap()
+                                remaining_cap = max(0.0, slate_cap - get_current_exposure())
+                                custom_slip = evaluate_parlay(chosen_legs, bankroll=live_kalshi_balance, remaining_slate_cap=remaining_cap)
+                                custom_stake = min(custom_slip.kelly_stake, remaining_cap)
+                                per_leg = custom_stake / max(1, len(custom_slip.legs))
+
+                                exec_summary = []
+                                for cl in custom_slip.legs:
+                                    cost_c = max(1, cl.ask_cents)
+                                    c_qty = max(1, min(int(per_leg // (cost_c / 100.0)), 5))
+                                    res = execute_order(cl.market_ticker, "buy", getattr(cl, "raw_side", "yes"), cost_c, c_qty)
+                                    if res:
+                                        open_positions[cl.market_ticker] = {
+                                            "side": getattr(cl, "raw_side", "yes"), "entry": cost_c, "qty": c_qty, "hwm": cost_c,
+                                            "last_tick_ts": time.time(), "engine": cl.sport, "title": cl.player_prop, "order_id": res.get("order_id", "")
+                                        }
+                                        exec_summary.append(f"• `{cl.market_ticker}` ({c_qty}x @ {cost_c}c)")
+
+                                user_building_combo["active"] = False
+                                user_building_combo["selected_tickers"] = []
+                                last_scan_diag = f"🎯 Fired custom combo ({len(exec_summary)} legs)"
+                                sync_state_to_sqlite()
+                                rep = (
+                                    f"🚨 *CUSTOM COMBO EXECUTED* 🚨\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"• 🧬 *Copula Joint Prob:* `{custom_slip.copula_joint_prob*100:.1f}%` (Book `{custom_slip.book_prob*100:.1f}%`, *+{custom_slip.ev_pct:.1f}% EV*)\n"
+                                    f"• 💵 *Odds:* `{custom_slip.american_odds}` | *Stake:* `${custom_stake:.2f}` ➡️ Payout `${custom_stake * custom_slip.decimal_odds:.2f}`\n"
+                                    + "\n".join(exec_summary)
+                                )
+                                _, hud_kb = build_menu_hud_payload()
+                                await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, rep, hud_kb)
+                            else:
+                                toast_text = "Select at least 2 legs"
+
+                        elif any(k in cb_data for k in ("combo_resume", "combo_cancel")):
+                            user_building_combo["active"] = False
+                            user_building_combo["selected_tickers"] = []
+                            toast_text = "▶️ Auto-Pilot Resumed"
+                            last_scan_diag = "▶️ Resumed full-auto engine"
+                            sync_state_to_sqlite()
+                            hud_text, hud_kb = build_menu_hud_payload()
+                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
+
+                        elif "menu_scan_options" in cb_data:
+                            scan_panel_active = not scan_panel_active
+                            hud_text, hud_kb = build_menu_hud_payload(show_scan_panel=scan_panel_active)
+                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
+
+                        elif "scan_panel_close" in cb_data:
+                            scan_panel_active = False
+                            hud_text, hud_kb = build_menu_hud_payload(show_scan_panel=False)
+                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
+
+                        elif "scan_sport_" in cb_data:
+                            sport_key = cb_data.split("scan_sport_")[1].upper()
+                            sp_arg = None if sport_key == "ALL" else sport_key
+                            toast_text = f"⚡ Scanning {sport_key} props..."
+                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, sp_arg, True, cb_chat_id)
+                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, rep_txt, rep_kb)
+
+                        elif any(k in cb_data for k in ("menu_pnl", "pnl", "profit")):
+                            toast_text = "📈 Settled PnL Report"
+                            p_txt = await asyncio.to_thread(build_pnl_report)
+                            _, hud_kb = build_menu_hud_payload()
+                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, p_txt, hud_kb)
+
                         elif any(k in cb_data for k in ("status", "exposure")):
                             toast_text = "📊 Status & Exposure"
                             st_txt = await asyncio.to_thread(build_status_exposure_text)
@@ -1874,9 +2608,9 @@ async def telegram_notifier_and_command_loop():
                             await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, st_txt, hud_kb)
 
                         elif any(k in cb_data for k in ("open_positions", "open", "positions")):
-                            toast_text = f"📋 {len(open_positions)} Open Position(s)"
-                            w_txt, w_kb = await asyncio.to_thread(build_watch_active_bets_payload)
-                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, w_txt, w_kb)
+                            toast_text = "📋 Open Positions & Slips"
+                            o_txt, o_kb = await asyncio.to_thread(build_open_positions_report)
+                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, o_txt, o_kb)
 
                         else:
                             hud_text, hud_kb = build_menu_hud_payload()
@@ -1915,6 +2649,25 @@ async def telegram_notifier_and_command_loop():
                             await asyncio.to_thread(notify_telegram, hud_text, hud_kb, target_cid)
                         else:
                             await asyncio.to_thread(notify_telegram, hud_text, hud_kb)
+
+                    elif low.startswith(("/push", "/deploy", "/sync", "push")):
+                        try:
+                            from deploy_push import sync_to_github
+                            push_res = await asyncio.to_thread(sync_to_github)
+                            rep_lines = ["🚀 *GITHUB SYNC DEPLOYMENT REPORT*", "━━━━━━━━━━━━━━━━━━━━━━━━"]
+                            for item in push_res:
+                                if item.get("ok"):
+                                    rep_lines.append(f"✅ *{item.get('repo')}* ({item.get('branch', 'main')})\n  Pushed {item.get('files_pushed')} files\n  🔗 [View Commit]({item.get('url')})")
+                                else:
+                                    rep_lines.append(f"⚠️ *{item.get('repo')}*: {item.get('error')}")
+                            push_msg = "\n".join(rep_lines)
+                        except Exception as p_err:
+                            push_msg = f"❌ GitHub push error: `{p_err}`"
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, push_msg, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, push_msg, hud_kb)
 
                     elif low.startswith(("/sniper", "/auto")):
                         parts = low.split()
@@ -1973,12 +2726,59 @@ async def telegram_notifier_and_command_loop():
                         else:
                             await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
 
-                    elif low.startswith(("/props", "/combo", "/parlay", "/slip")):
-                        rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, None, True, target_cid)
+                    elif low.startswith(("/mlb", "/baseball")):
+                        rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "MLB", True, target_cid)
                         if target_cid:
                             await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
                         else:
                             await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
+
+                    elif low.startswith("/wnba"):
+                        rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "WNBA", True, target_cid)
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
+
+                    elif low.startswith(("/esports", "/gaming")):
+                        rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "ESPORTS", True, target_cid)
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
+
+                    elif low.startswith("/sim"):
+                        sim_query = text[4:].strip() if low.startswith("/sim") else ""
+                        rep_txt = await asyncio.to_thread(build_sim_text, sim_query)
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
+
+                    elif low.startswith(("/slip", "/parlay", "/combo")):
+                        parts = text.split(maxsplit=1)
+                        if len(parts) > 1 and parts[1].strip():
+                            rep_txt, rep_kb = await asyncio.to_thread(execute_manual_slip, parts[1].strip(), target_cid)
+                        else:
+                            rep_txt = (
+                                "⚠️ *Usage:* `/slip <leg1> | <leg2> [| <leg3>]`\n\n"
+                                "*Example (Correlated NFL Stack):*\n"
+                                "`/slip NFL:Mahomes O274.5 PASS YDS@51 | NFL:Rashee Rice O68.5 REC YDS@50`"
+                            )
+                            _, rep_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
+
+                    elif low.startswith("/audit"):
+                        aud_txt = await asyncio.to_thread(build_audit_report)
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, aud_txt, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, aud_txt, hud_kb)
 
                     elif low.startswith(("/watch", "/streams")):
                         w_txt, w_kb = await asyncio.to_thread(build_watch_active_bets_payload)
@@ -2098,6 +2898,7 @@ async def telegram_notifier_and_command_loop():
 
                     elif low.startswith(("/bal", "/balance")):
                         chk = await asyncio.to_thread(test_kalshi_api_connection)
+                        slate_cap = get_dynamic_slate_cap(chk.get("balance", live_kalshi_balance))
                         bal_msg = (
                             f"💰 *AURASCAN ACCOUNT BALANCES*\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2105,7 +2906,7 @@ async def telegram_notifier_and_command_loop():
                             f"• 🎮 *SIM Tracked Cash:* `${max(0.0, chk['balance'] + sim_realized_pnl):.2f}`\n"
                             f"• 📈 *Session Realized PnL:* `${sim_realized_pnl:+.2f}`\n"
                             f"• 🎛 *Current Mode:* `{'🟢 LIVE REAL-MONEY' if LIVE_MODE else '🎮 SIMULATION'}`\n"
-                            f"• 🛡️ *Slate Exposure:* `${get_current_exposure():.2f} / ${SLATE_CAP_DOLLARS:.2f}`"
+                            f"• 🛡️ *Slate Exposure:* `${get_current_exposure():.2f} / ${slate_cap:.2f} ({int(bankroll_allocation_pct*100)}% Cap)`"
                         )
                         _, hud_kb = build_menu_hud_payload()
                         if target_cid:
@@ -2113,16 +2914,122 @@ async def telegram_notifier_and_command_loop():
                         else:
                             await asyncio.to_thread(notify_telegram, bal_msg, hud_kb)
 
+                    elif low.startswith(("/cap", "/bankroll", "/slider")):
+                        parts = low.split()
+                        if len(parts) > 1:
+                            try:
+                                raw_n = parts[1].replace("%", "").replace("$", "")
+                                p_num = float(raw_n)
+                                bankroll_allocation_pct = max(0.05, min(1.00, p_num / 100.0 if p_num > 1.0 else p_num))
+                                slate_cap = get_dynamic_slate_cap()
+                                sync_state_to_sqlite()
+                                rep = f"🎚️ *Bankroll Allocation Cap updated to {int(bankroll_allocation_pct*100)}% (${slate_cap:.2f})*"
+                            except Exception:
+                                rep = "⚠️ *Usage:* `/cap <pct>` (e.g. `/cap 100` for 100% full balance, `/cap 50` for 50%)"
+                        else:
+                            slate_cap = get_dynamic_slate_cap()
+                            rep = f"🎚️ *Current Bankroll Cap:* `{int(bankroll_allocation_pct*100)}%` (${slate_cap:.2f} of ${live_kalshi_balance:.2f} Live Cash)\nUsage: `/cap 100`"
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb)
+
+                    elif low.startswith(("/build", "/custom", "/slip_builder")):
+                        b_txt, b_kb = await asyncio.to_thread(build_custom_combo_menu)
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, b_txt, b_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, b_txt, b_kb)
+
+                    elif low.startswith(("/resume", "/unpause")):
+                        user_building_combo["active"] = False
+                        user_building_combo["selected_tickers"] = []
+                        last_scan_diag = "▶️ Auto-Pilot Resumed via /resume"
+                        sync_state_to_sqlite()
+                        hud_text, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, f"▶️ *Auto-Pilot Resumed*\n\n{hud_text}", hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, f"▶️ *Auto-Pilot Resumed*\n\n{hud_text}", hud_kb)
+
+                    elif low.startswith(("/pause", "/hold")):
+                        user_building_combo["active"] = True
+                        user_building_combo["ts"] = time.time()
+                        last_scan_diag = "⏸️ Auto-Pilot Paused via /pause"
+                        sync_state_to_sqlite()
+                        hud_text, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, f"⏸️ *Auto-Pilot Paused for 5m (Send /resume to restart)*\n\n{hud_text}", hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, f"⏸️ *Auto-Pilot Paused for 5m (Send /resume to restart)*\n\n{hud_text}", hud_kb)
+
                     elif low.startswith("/start"):
                         startup_notified = True
                         hud_text, hud_kb = build_menu_hud_payload()
-                        welcome_msg = f"🟢 *AURASCAN // KALSHI V2 HYBRID ENGINE ONLINE*\n\n{hud_text}"
+                        welcome_msg = (
+                            "🟢 *AURASCAN // KALSHI V2 HYBRID ENGINE ONLINE*\n\n"
+                            f"{hud_text}\n\n"
+                            "💡 *Quick Start Commands:*\n"
+                            "• `/scan` — All-Slate 10k Monte Carlo + Copula\n"
+                            "• `/nba` · `/nfl` · `/tennis` · `/mlb` — Sport Scans\n"
+                            "• `/sim <prop>` — Single Prop 10k Distribution\n"
+                            "• `/slip <l1> | <l2>` — Build Correlated Slip\n"
+                            "• `/audit` — Calibration & Symmetry Check\n"
+                            "• `/open` — View Open Positions & Streams\n"
+                            "• `/pnl` — Session Bankroll & Settled PnL\n"
+                            "• `/help` — Full Command Directory"
+                        )
                         if target_cid:
                             await asyncio.to_thread(notify_telegram, welcome_msg, hud_kb, target_cid)
                         else:
                             await asyncio.to_thread(notify_telegram, welcome_msg, hud_kb)
 
-                    elif low.startswith(("/status", "/pnl", "/positions", "/open", "status")):
+                    elif low.startswith(("/open", "/positions")):
+                        o_txt, o_kb = await asyncio.to_thread(build_open_positions_report)
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, o_txt, o_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, o_txt, o_kb)
+
+                    elif low.startswith("/pnl"):
+                        p_txt = await asyncio.to_thread(build_pnl_report)
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, p_txt, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, p_txt, hud_kb)
+
+                    elif low.startswith("/simsettle"):
+                        settle_txt = await asyncio.to_thread(build_simsettle_report)
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, settle_txt, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, settle_txt, hud_kb)
+
+                    elif low.startswith("/reset"):
+                        new_cash = reset_sim_account()
+                        open_positions.clear()
+                        sim_realized_pnl = 0.0
+                        last_scan_diag = f"♻️ SIM Account reset to ${new_cash:.2f} — positions cleared"
+                        sync_state_to_sqlite()
+                        hud_text, hud_kb = build_menu_hud_payload()
+                        rep = f"♻️ *SIM Account Reset!*\nSim Cash restored to `${new_cash:.2f}` and open memory positions cleared.\n\n{hud_text}"
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb)
+
+                    elif low.startswith(("/help", "/commands")):
+                        h_txt = build_help_commands_report()
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, h_txt, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, h_txt, hud_kb)
+
+                    elif low.startswith(("/status", "status")):
                         st_txt = await asyncio.to_thread(build_status_exposure_text)
                         _, hud_kb = build_menu_hud_payload()
                         if target_cid:
@@ -2186,6 +3093,72 @@ async def kalshi_ws_listener():
             await asyncio.sleep(4)
 
 
+async def auto_pilot_loop():
+    """
+    Component 3: TRUE HANDS-FREE FULL-AUTO ENGINE LOOP
+    Runs continuously (every 60–90 seconds) without waiting for user action.
+    When Sniper: ON and Mode: LIVE:
+    1. Fetches live Kalshi balance & open positions to compute deployable cash under the slider cap.
+    2. Pulls all active sports markets, maps all props, runs 10,000-iter MC + Joint Gaussian Copula.
+    3. Ranks top +EV single props and 2-to-3 leg correlated combos.
+    4. Automatically fires live limit orders sizing stakes dynamically via Fractional Kelly scaled to available balance.
+    5. Pushes instant Telegram execution alerts & updated HUD receipt for every auto-placed order.
+    """
+    global last_scan_ts, last_markets_checked, last_scan_diag
+    cycle_num = 0
+    await asyncio.sleep(5)  # Initial boot grace
+    print("[AUTO-PILOT] Full-auto background engine loop active (60s loop).")
+
+    while True:
+        try:
+            cycle_num += 1
+            if is_user_building_combo():
+                print(f"[AUTO-PILOT] Cycle #{cycle_num}: Paused (User is building manual combo in Telegram/Web App).")
+                await asyncio.sleep(15)
+                continue
+
+            if not SNIPER_ARMED:
+                await asyncio.sleep(30)
+                continue
+
+            try:
+                live_bal = await asyncio.to_thread(get_balance)
+            except Exception:
+                live_bal = live_kalshi_balance
+
+            slate_cap = get_dynamic_slate_cap(live_bal)
+            curr_exp = get_current_exposure()
+            avail_to_deploy = max(0.0, slate_cap - curr_exp)
+
+            if avail_to_deploy < 0.50:
+                last_scan_diag = f"🛡️ Slate Cap full (${curr_exp:.2f}/${slate_cap:.2f}) across {len(open_positions)} pos"
+                await asyncio.sleep(45)
+                continue
+
+            if circuit_breaker_tripped:
+                await asyncio.sleep(60)
+                continue
+
+            print(f"[AUTO-PILOT] Cycle #{cycle_num}: Scanning & simulating (Deployable: ${avail_to_deploy:.2f} / ${slate_cap:.2f} Cap)...")
+
+            # Run end-to-end MC + Copula + Execution pipeline
+            rep_txt, rep_kb = await asyncio.to_thread(
+                run_monte_carlo_and_combo_pipeline,
+                None,
+                None,
+                True,
+                TELEGRAM_CHAT_ID,
+            )
+
+            if "ORDER EXECUTION RECEIPT" in rep_txt and TELEGRAM_CHAT_ID:
+                notify_telegram(rep_txt, reply_markup=rep_kb)
+
+        except Exception as err:
+            print(f"[AUTO-PILOT-EXC] Cycle error: {err}")
+
+        await asyncio.sleep(60)
+
+
 async def rest_scanner_loop():
     global starting_bankroll, circuit_breaker_tripped, last_scan_ts, last_markets_checked, last_scan_diag
     sweep_count = 0
@@ -2223,29 +3196,22 @@ async def rest_scanner_loop():
             sport_live_counts["NBA"] = max(6, nba_c)
             sport_live_counts["NFL"] = max(2, nfl_c)
 
+            # High-frequency position scalper, trailing stop, take-profit & green-out
             for tk in list(open_positions.keys()):
                 manage_open_positions({"ticker": tk})
 
-            # Run 10,000-Iteration Monte Carlo, Combo Builder & Sniper Execution Pipeline
-            await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, markets, None, False)
-
+            slate_cap = get_dynamic_slate_cap(bankroll)
             if not SNIPER_ARMED:
                 last_scan_diag = f"🔴 Sniper DISARMED — {last_markets_checked} markets monitored (tap Sniper: ON)"
-            elif get_current_exposure() >= SLATE_CAP_DOLLARS - 0.25:
-                last_scan_diag = f"🟢 Active (${get_current_exposure():.2f}/${SLATE_CAP_DOLLARS:.2f} Slate Cap deployed across {len(open_positions)} pos)"
+            elif get_current_exposure() >= slate_cap - 0.25:
+                last_scan_diag = f"🟢 Active (${get_current_exposure():.2f}/${slate_cap:.2f} Cap across {len(open_positions)} pos)"
 
             if sweep_count % 5 == 0:
                 sync_state_to_sqlite()
 
             sweep_count += 1
             elapsed = time.time() - t0
-            print(
-                f"[{datetime.now().strftime('%H:%M:%S')}] Sweep #{sweep_count} ({elapsed:.2f}s) | "
-                f"Sniper: {'ON' if SNIPER_ARMED else 'OFF'} | Exp: ${get_current_exposure():.2f}/${SLATE_CAP_DOLLARS:.2f} | "
-                f"Open Pos: {len(open_positions)} | Trades: {total_trades_count} | Cashouts: {total_cashouts_count} | "
-                f"PnL: ${sim_realized_pnl:+.2f}"
-            )
-            await asyncio.sleep(max(0.2, SCAN_INTERVAL - elapsed))
+            await asyncio.sleep(max(0.5, SCAN_INTERVAL - elapsed))
 
         except Exception as e:
             print(f"[LOOP-WARN] Scanner recovery: {e}")
@@ -2264,16 +3230,18 @@ async def main():
     else:
         print(f"[KALSHI-API] ⚠️ Notice: {api_check['status']}")
 
+    curr_slate_cap = get_dynamic_slate_cap()
     mode_banner = "LIVE REAL-MONEY" if LIVE_MODE else "SIMULATION"
     print("======================================================================")
     print(f" AURASCAN // KALSHI V2 HYBRID ENGINE [{mode_banner}] (Ed25519 Native)")
-    print(f" Kalshi Bal: ${live_kalshi_balance:.2f} | Sniper: {'ARMED' if SNIPER_ARMED else 'DISARMED'} | Slate Cap: ${SLATE_CAP_DOLLARS:.2f}")
-    print(" Commands: /menu | /mode [live|sim] | /api | /bal | /sniper on|off | /status")
+    print(f" Kalshi Bal: ${live_kalshi_balance:.2f} | Sniper: {'ARMED' if SNIPER_ARMED else 'DISARMED'} | Slate Cap: ${curr_slate_cap:.2f} ({int(bankroll_allocation_pct*100)}%)")
+    print(" Commands: /menu | /mode [live|sim] | /api | /bal | /cap [10-100] | /build | /resume | /sniper on|off")
     print("======================================================================")
     await asyncio.gather(
         telegram_notifier_and_command_loop(),
         kalshi_ws_listener(),
         rest_scanner_loop(),
+        auto_pilot_loop(),
     )
 
 if __name__ == "__main__":

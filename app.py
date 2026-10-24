@@ -16,6 +16,7 @@ from db import (
     init_db,
     reset_sim_account,
     set_auto_mode,
+    set_bankroll_allocation_pct,
     set_mode,
 )
 from parlay import ParlaySlip, build_optimal_parlays, evaluate_parlay, format_slip_card
@@ -274,6 +275,34 @@ def create_web_app(
         elif act == "simsettle":
             cnt = await run_settlement_cycle(simulate_outcomes=True)
             return web.json_response({"ok": True, "msg": f"Simulated settlement for {cnt} slip(s)!"})
+        elif act == "bankroll_cap":
+            raw_pct = body.get("pct", 100)
+            try:
+                p_val = float(raw_pct)
+                pct_norm = p_val / 100.0 if p_val > 1.0 else p_val
+            except Exception:
+                pct_norm = 1.00
+            saved_pct = set_bankroll_allocation_pct(pct_norm)
+            stats = get_bot_stats()
+            cash = stats.get("sim_cash", 32.22)
+            new_cap = round(cash * saved_pct, 2)
+            return web.json_response(
+                {
+                    "ok": True,
+                    "bankroll_allocation_pct": saved_pct,
+                    "slate_cap": new_cap,
+                    "msg": f"🎚️ Bankroll Cap: {int(saved_pct * 100)}% (${new_cap:.2f} Exposure)",
+                }
+            )
+        elif act == "user_building_combo":
+            is_active = bool(body.get("active", True))
+            return web.json_response(
+                {
+                    "ok": True,
+                    "user_building_combo": is_active,
+                    "msg": "⏸️ Auto-Pilot paused (Combo Builder active)" if is_active else "▶️ Auto-Pilot resumed",
+                }
+            )
         elif act == "reset":
             cash = reset_sim_account()
             return web.json_response({"ok": True, "msg": f"Reset Sim Cash to ${cash:.2f}!"})
@@ -286,12 +315,34 @@ def create_web_app(
         res = await fetch_on_demand_stream(sport=sport, query=query)
         return web.json_response(res)
 
+    async def handle_bankroll_cap_endpoint(request: web.Request) -> web.Response:
+        body = await request.json()
+        raw_pct = body.get("pct", body.get("allocation_pct", 100))
+        try:
+            p_val = float(raw_pct)
+            pct_norm = p_val / 100.0 if p_val > 1.0 else p_val
+        except Exception:
+            pct_norm = 1.00
+        saved_pct = set_bankroll_allocation_pct(pct_norm)
+        stats = get_bot_stats()
+        cash = stats.get("sim_cash", 32.22)
+        new_cap = round(cash * saved_pct, 2)
+        return web.json_response(
+            {
+                "ok": True,
+                "bankroll_allocation_pct": saved_pct,
+                "slate_cap": new_cap,
+                "msg": f"🎚️ Bankroll Cap: {int(saved_pct * 100)}% (${new_cap:.2f} Exposure)",
+            }
+        )
+
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/state", handle_state)
     app.router.add_get("/api/stream", handle_stream)
     app.router.add_post("/api/evaluate", handle_evaluate)
     app.router.add_post("/api/execute", handle_execute)
     app.router.add_post("/api/action", handle_action)
+    app.router.add_post("/api/settings/bankroll_cap", handle_bankroll_cap_endpoint)
     return app
 
 
