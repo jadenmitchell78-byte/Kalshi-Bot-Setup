@@ -31,6 +31,15 @@ except BaseException:
     aiohttp = None
     HAS_AIOHTTP = False
 
+try:
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.primitives import hashes
+    HAS_CRYPTOGRAPHY = True
+except Exception:
+    HAS_CRYPTOGRAPHY = False
+
 BASE_DIR = Path(__file__).resolve().parent
 ENV_FILE = BASE_DIR / ".env"
 load_dotenv(ENV_FILE)
@@ -349,8 +358,10 @@ def _sign_rsa_pss_sha256(msg: bytes, n: int, d: int) -> bytes:
     k = (n.bit_length() + 7) // 8
     return s_int.to_bytes(k, "big")
 
+_PRIVATE_KEY_OBJ = None
+
 def _reload_key_signer(path: str = ""):
-    global _KEY_TYPE, _ED_SEED, _ED_PREFIX, _ED_PUB, _ED_A, _RSA_N, _RSA_D
+    global _KEY_TYPE, _PRIVATE_KEY_OBJ, _ED_SEED, _ED_PREFIX, _ED_PUB, _ED_A, _RSA_N, _RSA_D
     candidates = [
         Path(path) if path else None,
         Path(PRIVATE_KEY_PATH) if PRIVATE_KEY_PATH else None,
@@ -360,20 +371,45 @@ def _reload_key_signer(path: str = ""):
         BASE_DIR.parent / "kalshi_private_key.pem",
         BASE_DIR.parent / "kalshi_private.pem",
     ]
-    pem_text = os.getenv("KALSHI_PRIVATE_KEY", "").replace("\\n", "\n").strip()
-    if not pem_text:
-        for p in candidates:
-            if p and p.exists():
-                try:
-                    pem_text = p.read_text(encoding="utf-8").strip()
-                    if pem_text:
-                        break
-                except Exception:
-                    continue
-    if not pem_text:
-        pem_text = "MC4CAQAwBQYDK2VwBCIEIBuv3LT8M7MKQyBnJK5UqCbD6ynZr1BnBI/eYoRMOjLM"
+    pem_text = ""
+    # 1. Prefer reading directly from authentic PEM file
+    for p in candidates:
+        if p and p.exists():
+            try:
+                txt = p.read_text(encoding="utf-8").strip()
+                if txt and ("PRIVATE KEY" in txt or len(txt) > 30):
+                    pem_text = txt
+                    break
+            except Exception:
+                continue
 
-    b64_lines = [ln.strip() for ln in pem_text.splitlines() if ln.strip() and not ln.strip().startswith("-----")]
+    # 2. Fallback to KALSHI_PRIVATE_KEY env var
+    if not pem_text:
+        env_raw = os.getenv("KALSHI_PRIVATE_KEY", "").strip()
+        while env_raw and env_raw[0] in ('"', "'") and env_raw[-1] in ('"', "'"):
+            env_raw = env_raw[1:-1].strip()
+        env_raw = env_raw.replace("\\n", "\n")
+        if env_raw:
+            pem_text = env_raw
+
+    # Normalize PEM formatting
+    if pem_text and not pem_text.startswith("-----BEGIN"):
+        clean_b64 = "".join(ln.strip() for ln in pem_text.splitlines() if ln.strip() and not ln.strip().startswith("-----"))
+        pem_text = f"-----BEGIN PRIVATE KEY-----\n{clean_b64}\n-----END PRIVATE KEY-----"
+
+    if HAS_CRYPTOGRAPHY and pem_text:
+        try:
+            _PRIVATE_KEY_OBJ = load_pem_private_key(pem_text.encode("utf-8"), password=None)
+            if isinstance(_PRIVATE_KEY_OBJ, Ed25519PrivateKey):
+                _KEY_TYPE = "ED25519"
+            else:
+                _KEY_TYPE = "RSA-PSS"
+            print(f"[SIGNER] Initialized authentic Kalshi {_KEY_TYPE} key via Python cryptography engine.")
+            return
+        except Exception as crypt_err:
+            print(f"[SIGNER-WARN] Cryptography loader warning ({crypt_err}). Trying DER / pure-Python fallback...")
+
+    b64_lines = [ln.strip().strip('"\'') for ln in pem_text.splitlines() if ln.strip().strip('"\'') and not ln.strip().strip('"\'').startswith("-----")]
     try:
         der_bytes = base64.b64decode("".join(b64_lines))
     except Exception:
@@ -415,15 +451,36 @@ def get_auth_headers(method: str, path: str) -> dict:
     timestamp = str(int(time.time() * 1000))
     clean_path = path.split("?")[0]
     msg = f"{timestamp}{method.upper()}{clean_path}".encode("utf-8")
-    if _KEY_TYPE == "RSA" and _RSA_N > 0 and _RSA_D > 0:
-        sig_bytes = _sign_rsa_pss_sha256(msg, _RSA_N, _RSA_D)
-    else:
-        sig_bytes = sign_ed25519_msg(msg)
+
+    sig_bytes = None
+    if HAS_CRYPTOGRAPHY and _PRIVATE_KEY_OBJ is not None:
+        try:
+            if isinstance(_PRIVATE_KEY_OBJ, Ed25519PrivateKey):
+                sig_bytes = _PRIVATE_KEY_OBJ.sign(msg)
+            else:
+                sig_bytes = _PRIVATE_KEY_OBJ.sign(
+                    msg,
+                    padding.PSS(
+                        mgf=padding.MGF1(hashes.SHA256()),
+                        salt_length=padding.PSS.MAX_LENGTH,
+                    ),
+                    hashes.SHA256(),
+                )
+        except Exception:
+            sig_bytes = None
+
+    if sig_bytes is None:
+        if _KEY_TYPE == "RSA" and _RSA_N > 0 and _RSA_D > 0:
+            sig_bytes = _sign_rsa_pss_sha256(msg, _RSA_N, _RSA_D)
+        else:
+            sig_bytes = sign_ed25519_msg(msg)
+
     return {
         "KALSHI-ACCESS-KEY": KALSHI_KEY_ID,
         "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig_bytes).decode("utf-8"),
         "KALSHI-ACCESS-TIMESTAMP": timestamp,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Accept": "application/json",
     }
 
 # ==========================================
@@ -899,9 +956,10 @@ def test_kalshi_api_connection() -> dict:
     """
     global live_kalshi_balance, last_kalshi_api_result, BASE_URL
     endpoints = [
-        BASE_URL,
-        "https://api.elections.kalshi.com",
         "https://trading-api.kalshi.com",
+        "https://api.elections.kalshi.com",
+        "https://demo-api.kalshi.co",
+        BASE_URL,
     ]
     seen = set()
     unique_endpoints = [u for u in endpoints if not (u in seen or seen.add(u))]
@@ -935,11 +993,17 @@ def test_kalshi_api_connection() -> dict:
                 last_kalshi_api_result = res
                 return res
             elif r.status_code == 401:
-                last_err = f"401 Unauthorized (Check API Key ID or Private Key on {base})"
+                try:
+                    err_json = r.json()
+                    err_msg = (err_json.get("error") or {}).get("message") or r.text[:80]
+                except Exception:
+                    err_msg = r.text[:80]
+                host_label = base.replace("https://", "")
+                last_err = f"401 ({host_label}): {err_msg}"
             elif r.status_code == 403:
                 last_err = f"403 Forbidden on {base}"
             else:
-                last_err = f"HTTP {r.status_code}: {r.text[:60]}"
+                last_err = f"HTTP {r.status_code} ({base}): {r.text[:60]}"
         except Exception as exc:
             last_err = f"Connection error ({base}): {exc}"
 
