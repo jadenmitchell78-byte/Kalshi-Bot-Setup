@@ -40,7 +40,7 @@ load_dotenv(BASE_DIR.parent / ".env")
 # ==========================================
 KALSHI_KEY_ID = os.getenv(
     "KALSHI_KEY_ID",
-    os.getenv("KALSHI_API_KEY", "df3fbc6c-0d8c-4601-9b00-f4f5beb90c34"),
+    os.getenv("KALSHI_API_KEY", "8b3f09cf-3da9-4107-b8ff-ee08d6daab3d"),
 )
 PRIVATE_KEY_PATH = os.getenv(
     "KALSHI_KEY_PATH",
@@ -249,9 +249,84 @@ def _ed_encode(pt):
     y = (y * zi) % _P
     return (y | ((x & 1) << 255)).to_bytes(32, "little")
 
-def _extract_ed25519_seed(path: str) -> bytes:
+# ==========================================
+# PURE-PYTHON DUAL SIGNER (RSA-PSS + RFC 8032 ED25519)
+# ==========================================
+_KEY_TYPE = "ED25519"
+_ED_SEED = b""
+_ED_PREFIX = b""
+_ED_PUB = b""
+_ED_A = 0
+_RSA_N = 0
+_RSA_D = 0
+
+def _parse_asn1_ints(data: bytes) -> list:
+    ints = []
+    idx = 0
+    while idx < len(data):
+        tag = data[idx]
+        idx += 1
+        if tag == 0x02:  # INTEGER
+            length = data[idx]
+            idx += 1
+            if length & 0x80:
+                n_len_bytes = length & 0x7F
+                length = int.from_bytes(data[idx:idx+n_len_bytes], "big")
+                idx += n_len_bytes
+            val = int.from_bytes(data[idx:idx+length], "big")
+            ints.append(val)
+            idx += length
+        elif tag == 0x30:  # SEQUENCE
+            length = data[idx]
+            idx += 1
+            if length & 0x80:
+                n_len_bytes = length & 0x7F
+                idx += n_len_bytes
+            continue
+        elif tag in (0x04, 0x00):
+            length = data[idx]
+            idx += 1
+            if length & 0x80:
+                n_len_bytes = length & 0x7F
+                idx += n_len_bytes
+            continue
+        else:
+            idx += 1
+    return ints
+
+def _sign_rsa_pss_sha256(msg: bytes, n: int, d: int) -> bytes:
+    m_hash = hashlib.sha256(msg).digest()
+    em_bits = n.bit_length() - 1
+    em_len = (em_bits + 7) // 8
+    salt_len = 32
+    salt = os.urandom(salt_len)
+    m_prime = b"\x00" * 8 + m_hash + salt
+    h = hashlib.sha256(m_prime).digest()
+    ps = b"\x00" * (em_len - salt_len - 32 - 2)
+    db = ps + b"\x01" + salt
+    t = b""
+    c = 0
+    mask_len = em_len - 32 - 1
+    while len(t) < mask_len:
+        t += hashlib.sha256(h + c.to_bytes(4, "big")).digest()
+        c += 1
+    db_mask = t[:mask_len]
+    masked_db = bytes(x ^ y for x, y in zip(db, db_mask))
+    zero_bits = 8 * em_len - em_bits
+    if zero_bits > 0:
+        first = masked_db[0] & (0xFF >> zero_bits)
+        masked_db = bytes([first]) + masked_db[1:]
+    em = masked_db + h + b"\xbc"
+    em_int = int.from_bytes(em, "big")
+    s_int = pow(em_int, d, n)
+    k = (n.bit_length() + 7) // 8
+    return s_int.to_bytes(k, "big")
+
+def _reload_key_signer(path: str = ""):
+    global _KEY_TYPE, _ED_SEED, _ED_PREFIX, _ED_PUB, _ED_A, _RSA_N, _RSA_D
     candidates = [
-        Path(path),
+        Path(path) if path else None,
+        Path(PRIVATE_KEY_PATH) if PRIVATE_KEY_PATH else None,
         Path("/data/data/com.termux/files/home/peezy_bot/kalshi_private.pem"),
         BASE_DIR / "kalshi_private.pem",
         BASE_DIR / "kalshi_private_key.pem",
@@ -261,24 +336,46 @@ def _extract_ed25519_seed(path: str) -> bytes:
     pem_text = os.getenv("KALSHI_PRIVATE_KEY", "").replace("\\n", "\n").strip()
     if not pem_text:
         for p in candidates:
-            if p.exists():
-                pem_text = p.read_text(encoding="utf-8").strip()
-                break
+            if p and p.exists():
+                try:
+                    pem_text = p.read_text(encoding="utf-8").strip()
+                    if pem_text:
+                        break
+                except Exception:
+                    continue
     if not pem_text:
         pem_text = "MC4CAQAwBQYDK2VwBCIEIBuv3LT8M7MKQyBnJK5UqCbD6ynZr1BnBI/eYoRMOjLM"
-    b64_lines = [
-        ln.strip() for ln in pem_text.splitlines() if ln.strip() and not ln.strip().startswith("-----")
-    ]
-    der_bytes = base64.b64decode("".join(b64_lines))
-    return der_bytes[-32:]
 
-_ED_SEED = _extract_ed25519_seed(PRIVATE_KEY_PATH)
-_ED_H = hashlib.sha512(_ED_SEED).digest()
-_ED_A = int.from_bytes(_ED_H[:32], "little")
-_ED_A &= (1 << 254) - 8
-_ED_A |= (1 << 254)
-_ED_PREFIX = _ED_H[32:64]
-_ED_PUB = _ed_encode(_ed_scalarmult(_B, _ED_A))
+    b64_lines = [ln.strip() for ln in pem_text.splitlines() if ln.strip() and not ln.strip().startswith("-----")]
+    try:
+        der_bytes = base64.b64decode("".join(b64_lines))
+    except Exception:
+        der_bytes = b"\x00" * 32
+
+    if "RSA" in pem_text or len(der_bytes) > 80:
+        ints = _parse_asn1_ints(der_bytes)
+        if len(ints) >= 4 and ints[1] > 2**512 and ints[3] > 2**512:
+            _KEY_TYPE = "RSA"
+            _RSA_N = ints[1]
+            _RSA_D = ints[3]
+            return
+        elif len(ints) >= 3 and ints[0] > 2**512:
+            _KEY_TYPE = "RSA"
+            _RSA_N = ints[0]
+            _RSA_D = ints[2] if len(ints) >= 3 else ints[1]
+            return
+
+    # Fallback to Ed25519
+    _KEY_TYPE = "ED25519"
+    _ED_SEED = der_bytes[-32:] if len(der_bytes) >= 32 else (b"\x00" * 32)
+    _ED_H = hashlib.sha512(_ED_SEED).digest()
+    _ED_A = int.from_bytes(_ED_H[:32], "little")
+    _ED_A &= (1 << 254) - 8
+    _ED_A |= (1 << 254)
+    _ED_PREFIX = _ED_H[32:64]
+    _ED_PUB = _ed_encode(_ed_scalarmult(_B, _ED_A))
+
+_reload_key_signer(PRIVATE_KEY_PATH)
 
 def sign_ed25519_msg(msg: bytes) -> bytes:
     r = int.from_bytes(hashlib.sha512(_ED_PREFIX + msg).digest(), "little") % _L
@@ -291,10 +388,13 @@ def get_auth_headers(method: str, path: str) -> dict:
     timestamp = str(int(time.time() * 1000))
     clean_path = path.split("?")[0]
     msg = f"{timestamp}{method.upper()}{clean_path}".encode("utf-8")
-    signature = sign_ed25519_msg(msg)
+    if _KEY_TYPE == "RSA" and _RSA_N > 0 and _RSA_D > 0:
+        sig_bytes = _sign_rsa_pss_sha256(msg, _RSA_N, _RSA_D)
+    else:
+        sig_bytes = sign_ed25519_msg(msg)
     return {
         "KALSHI-ACCESS-KEY": KALSHI_KEY_ID,
-        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode("utf-8"),
+        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig_bytes).decode("utf-8"),
         "KALSHI-ACCESS-TIMESTAMP": timestamp,
         "Content-Type": "application/json"
     }
@@ -838,21 +938,30 @@ def get_balance() -> float:
 
 def fetch_all_open_markets() -> list:
     markets, cursor = [], None
-    try:
-        for _ in range(2):
-            path = "/trade-api/v2/markets?status=open&limit=100"
-            if cursor:
-                path += f"&cursor={cursor}"
-            r = session.get(f"{BASE_URL}{path}", headers=get_auth_headers("GET", path), timeout=5)
-            if r.status_code != 200:
+    public_headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    target_bases = [BASE_URL, "https://trading-api.kalshi.com", "https://api.elections.kalshi.com"]
+    seen_bases = set()
+    bases = [b for b in target_bases if not (b in seen_bases or seen_bases.add(b))]
+
+    for base in bases:
+        try:
+            for _ in range(2):
+                path = "/trade-api/v2/markets?status=open&limit=100"
+                if cursor:
+                    path += f"&cursor={cursor}"
+                r = session.get(f"{base}{path}", headers=public_headers, timeout=5)
+                if r.status_code == 200:
+                    data = r.json()
+                    new_m = data.get("markets", [])
+                    markets.extend(new_m)
+                    cursor = data.get("cursor")
+                    if not cursor:
+                        break
+            if markets:
                 break
-            data = r.json()
-            markets.extend(data.get("markets", []))
-            cursor = data.get("cursor")
-            if not cursor:
-                break
-    except Exception:
-        pass
+        except Exception:
+            continue
+
     # Always ensure Late-October NBA (5m), NFL/CFB (10m) & Tennis active props are in the scan pool
     existing_tickers = {m.get("ticker") for m in markets if m.get("ticker")}
     for demo in LATE_OCTOBER_ACTIVE_MARKETS:
@@ -868,22 +977,24 @@ def inspect_l2_and_obi(ticker: str, side: str, target_ask: int) -> tuple:
     Always provides safe liquidity floor so valid edges can fire.
     """
     path = f"/trade-api/v2/markets/{ticker}/orderbook"
-    try:
-        r = session.get(f"{BASE_URL}{path}", headers=get_auth_headers("GET", path), timeout=3.5)
-        if r.status_code == 200:
-            ob = r.json().get("orderbook", {})
-            yes_bids = ob.get("yes") or []
-            no_bids = ob.get("no") or []
-            yes_bid_vol = sum(qty for _, qty in yes_bids[-3:]) if yes_bids else 0
-            no_bid_vol = sum(qty for _, qty in no_bids[-3:]) if no_bids else 0
-            total_top_vol = yes_bid_vol + no_bid_vol
-            if total_top_vol > 0:
-                obi = (yes_bid_vol - no_bid_vol) / total_top_vol if side == "yes" else (no_bid_vol - yes_bid_vol) / total_top_vol
-                opposite_levels = no_bids if side == "yes" else yes_bids
-                available_qty = sum(qty for price_lvl, qty in opposite_levels if (100 - price_lvl) <= target_ask)
-                return max(1, available_qty), obi
-    except Exception:
-        pass
+    for base in (BASE_URL, "https://trading-api.kalshi.com"):
+        try:
+            r = session.get(f"{base}{path}", headers={"Accept": "application/json"}, timeout=3.5)
+            if r.status_code == 200:
+                ob = r.json().get("orderbook", {})
+                yes_bids = ob.get("yes") or []
+                no_bids = ob.get("no") or []
+                yes_bid_vol = sum(qty for _, qty in yes_bids[-3:]) if yes_bids else 0
+                no_bid_vol = sum(qty for _, qty in no_bids[-3:]) if no_bids else 0
+                total_top_vol = yes_bid_vol + no_bid_vol
+                if total_top_vol > 0:
+                    obi = (yes_bid_vol - no_bid_vol) / total_top_vol if side == "yes" else (no_bid_vol - yes_bid_vol) / total_top_vol
+                    opposite_levels = no_bids if side == "yes" else yes_bids
+                    available_qty = sum(qty for price_lvl, qty in opposite_levels if (100 - price_lvl) <= target_ask)
+                    return max(1, available_qty), obi
+                break
+        except Exception:
+            continue
 
     # Safe default depth if orderbook API is thin or private
     return (15, 0.14)
@@ -1556,6 +1667,68 @@ async def telegram_notifier_and_command_loop():
                         else:
                             await asyncio.to_thread(notify_telegram, hud_text, hud_kb)
 
+                    elif low.startswith(("/setkey", "/keyid")):
+                        parts = text.split(maxsplit=1)
+                        if len(parts) > 1 and len(parts[1].strip()) >= 10:
+                            new_key = parts[1].strip()
+                            global KALSHI_KEY_ID
+                            KALSHI_KEY_ID = new_key
+                            os.environ["KALSHI_KEY_ID"] = new_key
+                            os.environ["KALSHI_API_KEY"] = new_key
+                            try:
+                                env_p = BASE_DIR / ".env"
+                                lines = env_p.read_text(encoding="utf-8").splitlines() if env_p.exists() else []
+                                new_lines = []
+                                f1 = f2 = False
+                                for ln in lines:
+                                    if ln.startswith("KALSHI_KEY_ID="):
+                                        new_lines.append(f"KALSHI_KEY_ID={new_key}")
+                                        f1 = True
+                                    elif ln.startswith("KALSHI_API_KEY="):
+                                        new_lines.append(f"KALSHI_API_KEY={new_key}")
+                                        f2 = True
+                                    else:
+                                        new_lines.append(ln)
+                                if not f1:
+                                    new_lines.append(f"KALSHI_KEY_ID={new_key}")
+                                if not f2:
+                                    new_lines.append(f"KALSHI_API_KEY={new_key}")
+                                env_p.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+                            except Exception:
+                                pass
+                            chk = await asyncio.to_thread(test_kalshi_api_connection)
+                            rep = (
+                                f"✅ *Kalshi Access Key ID Updated to `{new_key[:8]}...`*\n"
+                                f"• Connection Test: `{'🟢 CONNECTED ($' + f'{chk['balance']:.2f}' + ')' if chk['ok'] else '🔴 ' + chk['status']}`"
+                            )
+                        else:
+                            rep = "⚠️ *Usage:* `/setkey <YOUR_KALSHI_KEY_UUID>`\nExample: `/setkey a1b2c3d4-e5f6-7890-abcd-ef1234567890`"
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb)
+
+                    elif low.startswith(("/setpem", "/setkeypem")):
+                        parts = text.split(maxsplit=1)
+                        if len(parts) > 1 and "PRIVATE KEY" in parts[1].upper():
+                            raw_pem = parts[1].strip()
+                            pem_p = BASE_DIR / "kalshi_private.pem"
+                            pem_p.write_text(raw_pem, encoding="utf-8")
+                            _reload_key_signer(str(pem_p))
+                            chk = await asyncio.to_thread(test_kalshi_api_connection)
+                            rep = (
+                                f"✅ *Kalshi Private Key (.pem) Updated & Reloaded!* (`{_KEY_TYPE}`)\n"
+                                f"• Connection Test: `{'🟢 CONNECTED ($' + f'{chk['balance']:.2f}' + ')' if chk['ok'] else '🔴 ' + chk['status']}`"
+                            )
+                        else:
+                            rep = "⚠️ *Usage:* Paste your full private key block starting with `-----BEGIN PRIVATE KEY-----`:\n`/setpem -----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----`"
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb)
+
                     elif low.startswith(("/api", "/test_api", "/key")):
                         chk = await asyncio.to_thread(test_kalshi_api_connection)
                         status_icon = "🟢" if chk["ok"] else "🔴"
@@ -1565,10 +1738,14 @@ async def telegram_notifier_and_command_loop():
                             f"• 🌐 *Status:* `{status_icon} {'CONNECTED' if chk['ok'] else 'FAILED'}`\n"
                             f"• 💵 *Live Cash Balance:* `${chk['balance']:.2f}`\n"
                             f"• 🆔 *Access Key ID:* `{chk['key_id']}`\n"
-                            f"• 🛡️ *Signer:* `Pure-Python Ed25519 Native (RFC 8032)`\n"
+                            f"• 🛡️ *Signer Engine:* `Native Pure-Python {_KEY_TYPE}`\n"
                             f"• 📡 *Active Base URL:* `{chk['base_url']}`\n"
                             f"• 🎛 *Engine Mode:* `{'🟢 LIVE REAL-MONEY' if LIVE_MODE else '🎮 SIMULATION'}`\n"
-                            f"• 🩺 *Response Status:* `{chk['status']}`"
+                            f"• 🩺 *Response Status:* `{chk['status']}`\n\n"
+                            "💡 *To sync your real Kalshi account:*\n"
+                            "• Set Key ID: `/setkey <YOUR_KEY_UUID>`\n"
+                            "• Set Private Key: `/setpem <PASTE_PEM>`\n"
+                            "• Or edit `~/peezy_bot/.env` directly"
                         )
                         _, hud_kb = build_menu_hud_payload()
                         if target_cid:
