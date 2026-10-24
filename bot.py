@@ -3188,6 +3188,19 @@ async def auto_pilot_loop():
 
             if "ORDER EXECUTION RECEIPT" in rep_txt and TELEGRAM_CHAT_ID:
                 notify_telegram(rep_txt, reply_markup=rep_kb)
+            elif (cycle_num == 1 or cycle_num % 10 == 0) and TELEGRAM_CHAT_ID:
+                # Periodic telemetry heartbeat so user sees active background auto-pilot monitoring
+                notify_telegram(
+                    f"📡 *AUTO-PILOT HEARTBEAT // CYCLE #{cycle_num}*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"• ⚡ *Engine:* 🟢 Full-Auto Background Loop Active (60s)\n"
+                    f"• 🎛 *Mode:* `{'🟢 LIVE REAL-MONEY' if LIVE_MODE else '🎮 SIMULATION'}` | 🎯 *Sniper:* `{'ARMED' if SNIPER_ARMED else 'DISARMED'}`\n"
+                    f"• 💵 *Live Cash:* `${live_bal:.2f}` | 🛡️ *Exposure:* `${curr_exp:.2f} / ${slate_cap:.2f}` Cap ({int(bankroll_allocation_pct*100)}%)\n"
+                    f"• 🩺 *Diagnostics:* `{last_scan_diag}`\n\n"
+                    f"💡 _Auto-Sniper is scanning {last_markets_checked} markets across NBA, NFL & Tennis._\n"
+                    f"Send `/scan` or tap [⚡ Force Scan] for immediate full 10k MC report.",
+                    reply_markup=rep_kb,
+                )
 
         except Exception as err:
             print(f"[AUTO-PILOT-EXC] Cycle error: {err}")

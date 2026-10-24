@@ -14,6 +14,7 @@ if str(ROOT_DIR) not in sys.path:
 from app import _WEB_CACHE, fetch_on_demand_stream, serialize_slip
 from config import MAX_PICK6_LEGS, MC_ITERATIONS
 from db import (
+    clear_idempotency_locks,
     fetch_pending_parlays,
     fetch_settled_slips,
     get_bot_stats,
@@ -21,10 +22,12 @@ from db import (
     init_db,
     reset_sim_account,
     set_auto_mode,
+    set_bankroll_allocation_pct,
     set_mode,
 )
 from parlay import build_optimal_parlays, evaluate_parlay
 from peezy import execute_and_persist_slip, scan_markets_with_telemetry
+from slip import clear_cooldown_locks
 from telemetry import fetch_all_telemetry
 
 
@@ -154,7 +157,7 @@ class handler(BaseHTTPRequestHandler):
 
         if path == "/api/action":
             act = body.get("act")
-            if act == "auto":
+            if act in ("auto", "sniper"):
                 new_auto = set_auto_mode(None)
                 return self._send_json(
                     {"ok": True, "msg": f"Auto-Sniper set to {'ON' if new_auto else 'OFF'}"}
@@ -163,6 +166,58 @@ class handler(BaseHTTPRequestHandler):
                 rt = get_runtime_state()
                 new_mode = set_mode("LIVE" if rt["mode"] == "SIM" else "SIM")
                 return self._send_json({"ok": True, "msg": f"Switched mode to {new_mode}"})
+            if act == "force_scan":
+                legs = _run_coro(scan_markets_with_telemetry())
+                stats = get_bot_stats()
+                _WEB_CACHE["props"] = legs
+                _WEB_CACHE["slips"] = build_optimal_parlays(
+                    legs, min_legs=2, max_legs=3, bankroll=stats["sim_cash"]
+                )[:4]
+                return self._send_json(
+                    {
+                        "ok": True,
+                        "msg": f"⚡ Force Scan complete ({len(legs)} props) | {stats.get('last_scan_diag', '')}",
+                    }
+                )
+            if act == "clear_locks":
+                c_cnt = clear_cooldown_locks()
+                db_info = clear_idempotency_locks()
+                return self._send_json(
+                    {
+                        "ok": True,
+                        "msg": f"🔓 Flushed {c_cnt + db_info.get('cleared_db_locks', 0)} cooldown & idempotency locks!",
+                    }
+                )
+            if act == "bankroll_cap":
+                raw_pct = body.get("pct", 100)
+                try:
+                    p_val = float(raw_pct)
+                    pct_norm = p_val / 100.0 if p_val > 1.0 else p_val
+                except Exception:
+                    pct_norm = 1.00
+                saved_pct = set_bankroll_allocation_pct(pct_norm)
+                stats = get_bot_stats()
+                cash = stats.get("sim_cash", 32.22)
+                new_cap = round(cash * saved_pct, 2)
+                return self._send_json(
+                    {
+                        "ok": True,
+                        "bankroll_allocation_pct": saved_pct,
+                        "slate_cap": new_cap,
+                        "msg": f"🎚️ Bankroll Cap: {int(saved_pct * 100)}% (${new_cap:.2f} Exposure)",
+                    }
+                )
+            if act == "user_building_combo":
+                is_active = bool(body.get("active", True))
+                return self._send_json(
+                    {
+                        "ok": True,
+                        "msg": "⏸️ Auto-Sniper paused for combo building"
+                        if is_active
+                        else "▶️ Auto-Sniper resumed",
+                        "user_building_combo": is_active,
+                    }
+                )
             if act == "reset":
                 cash = reset_sim_account()
                 return self._send_json({"ok": True, "msg": f"Reset Sim Cash to ${cash:.2f}!"})
