@@ -303,14 +303,17 @@ def _draw_sport_archetype_samples(
     samples: List[float] = []
     for _ in range(iterations):
         if sp in ("NBA", "WNBA"):
-            # Simulate active minutes fraction (blowout or foul trouble reduces minutes by 12-22%)
+            # Simulate active minutes fraction (blowout/foul trouble down, clutch/OT up)
             min_factor = 1.0
-            if random.random() < blowout_prob:
-                min_factor -= 0.16 * blowout_sens
-            elif random.random() < 0.06:  # Foul trouble hazard
+            r = random.random()
+            if r < blowout_prob:
+                min_factor -= 0.15 * blowout_sens
+            elif r < (blowout_prob + 0.05):  # Foul trouble hazard
                 min_factor -= 0.12
+            elif r > (1.0 - blowout_prob * 1.2):  # Close game / clutch / OT upside
+                min_factor += 0.12 * float(arch_cfg.get("clutch_boost", 1.04))
             # Gamma-Poisson / Negative Binomial dispersion on possessions
-            rate_draw = max(0.2, random.gauss(expected_mean * min_factor, std_est * 0.92))
+            rate_draw = max(0.2, random.gauss(expected_mean * min_factor, std_est))
             val = float(max(0, round(rate_draw))) if dist_family != "STUDENT_T" else rate_draw
 
         elif sp == "NFL":
@@ -319,7 +322,7 @@ def _draw_sport_archetype_samples(
             # Student-t heavy tail (explosive plays / YAC burst)
             chi_approx = max(0.25, random.gammavariate(3.5, 1.0 / 3.5))
             t_noise = random.gauss(0.0, 1.0) / math.sqrt(chi_approx)
-            val = max(0.0, expected_mean * script_Roll + t_noise * std_est * 0.88)
+            val = max(0.0, expected_mean * script_Roll + t_noise * std_est)
 
         elif sp == "MLB":
             if dist_family == "BETA_BINOMIAL_PITCH":
@@ -396,7 +399,7 @@ def simulate_prop_leg(
 
     target_prob = max(0.05, min(0.95, book_prob + prior_edge_boost))
     z_shift = _norm_ppf(target_prob) if is_over else -_norm_ppf(target_prob)
-    base_mean = max(0.3, eff_line + z_shift * std_est * 0.90)
+    base_mean = max(0.3, eff_line + z_shift * std_est)
     expected_mean = max(0.3, base_mean * (0.72 + 0.28 * min(1.15, max(0.88, telem_factor))))
 
     samples_list = _draw_sport_archetype_samples(

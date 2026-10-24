@@ -1224,6 +1224,69 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _ensure_chat_id(update)
+    if not update.message:
+        return
+    help_text = (
+        "🤖 *AURASCAN // KALSHI QUANT COMMAND DIRECTORY* 🤖\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📡 *CORE HUD & EXECUTION CONTROLS:*\n"
+        "• `/start` or `/menu` — Live AuraScan V2 Telemetry HUD & action deck\n"
+        "• `/sniper [on|off]` — Arm or disarm autonomous order sniper\n"
+        "• `/mode [live|sim]` — Toggle between Live Real-Money and Paper Simulation\n"
+        "• `/cap <pct>` — Adjust bankroll exposure cap (`/cap 100` for 100% full balance, `/cap 50` for 50%)\n"
+        "• `/bal` — Verify live Kalshi cash balance and session PnL\n"
+        "• `/clear_locks` — Flush all ticker cooldowns and idempotency locks\n"
+        "• `/push` — Synchronize code & deploy updates to GitHub\n\n"
+        "🔍 *MANUAL SPORT SCANS (10,000 MC DRAWS):*\n"
+        "• `/scan` — Force 10k Monte Carlo scan across ALL active slates\n"
+        "• `/nba` — Scan NBA player props (Points, Rebounds, Assists, 3PT)\n"
+        "• `/nfl` (or `/cfb`) — Scan NFL & CFB props (Passing, Rushing, Receiving)\n"
+        "• `/tennis` (or `/atp`, `/wta`) — Scan Tennis match & set props\n"
+        "• `/mlb` — Scan MLB player props (Strikeouts, Hits, HR)\n"
+        "• `/wnba` — Scan WNBA props\n"
+        "• `/esports` — Scan Esports markets\n\n"
+        "🎲 *QUANT SIMULATIONS & COPULA PARLAYS:*\n"
+        "• `/sim <prop>` — Run 10k Monte Carlo simulation on a specific prop\n"
+        "  _Examples:_\n"
+        "  • `/sim LeBron James O25.5 PTS`\n"
+        "  • `/sim Patrick Mahomes O274.5 PASS YDS`\n"
+        "• `/slip <leg1> | <leg2> [| <leg3>]` — Evaluate Joint Gaussian Copula parlay\n"
+        "  _Example:_\n"
+        "  • `/slip NFL:Mahomes O274.5 | NFL:Rice O68.5`\n"
+        "• `/audit` — 10k MC calibration, 50/50 symmetry & Cholesky audit\n\n"
+        "📊 *PORTFOLIO, STREAMS & SETTLEMENT:*\n"
+        "• `/open` (or `/positions`) — View active open contracts, HWM & streams\n"
+        "• `/pnl` — Session bankroll, Win-Loss-Push record & settled ROI\n"
+        "• `/watch` — Live streamed.pk & Sweat HUD video stream links\n"
+        "• `/simsettle` — Grade open positions with test outcomes\n"
+        "• `/reset` — Reset SIM account balance to baseline ($32.22)"
+    )
+    _, kb = await build_menu_hud_and_keyboard()
+    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+
+async def cmd_push(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _ensure_chat_id(update)
+    if not update.message:
+        return
+    try:
+        from deploy_push import sync_to_github
+        push_res = await asyncio.to_thread(sync_to_github)
+        rep_lines = ["🚀 *GITHUB SYNC DEPLOYMENT REPORT*", "━━━━━━━━━━━━━━━━━━━━━━━━"]
+        for item in push_res:
+            if item.get("ok"):
+                rep_lines.append(f"✅ *{item.get('repo')}* ({item.get('branch', 'main')})\n  Pushed {item.get('files_pushed')} files\n  🔗 [View Commit]({item.get('url')})")
+            else:
+                rep_lines.append(f"⚠️ *{item.get('repo')}*: {item.get('error')}")
+        push_msg = "\n".join(rep_lines)
+    except Exception as exc:
+        push_msg = f"❌ GitHub push error: `{exc}`"
+    _, kb = await build_menu_hud_and_keyboard()
+    await update.message.reply_text(push_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+
 async def post_init(application: Application) -> None:
     stop_event = asyncio.Event()
     application.bot_data["stop_event"] = stop_event
@@ -1507,6 +1570,9 @@ def main() -> None:
     app.add_handler(CommandHandler("mode", cmd_mode))
     app.add_handler(CommandHandler("simsettle", cmd_simsettle))
     app.add_handler(CommandHandler("reset", cmd_reset))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("commands", cmd_help))
+    app.add_handler(CommandHandler("push", cmd_push))
     app.add_handler(CallbackQueryHandler(handle_menu_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cmd_menu))
 

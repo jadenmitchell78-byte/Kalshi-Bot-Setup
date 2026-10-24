@@ -543,12 +543,21 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
     if no_bid <= 0:
         no_bid = max(1, no_ask - 3)
 
-    # De-vigged market midpoint
+    # De-vigged market midpoint & sharp predictive edge calculation
     mid_yes = (yes_bid + yes_ask) / 2.0
     mid_no = (no_bid + no_ask) / 2.0
     tot_mid = mid_yes + mid_no
     devig_p_yes = (mid_yes / tot_mid) if tot_mid > 0 else 0.50
     devig_p_no = (mid_no / tot_mid) if tot_mid > 0 else 0.50
+
+    spread = max(1, yes_ask - yes_bid)
+    spread_bonus = max(0.0, (6 - spread) * 0.004)
+    vol_bonus = min(0.015, (volume / 60000.0))
+    base_alpha = 0.045 + spread_bonus + vol_bonus
+    devig_edge_yes = max(0.0, devig_p_yes - (yes_ask / 100.0))
+    devig_edge_no = max(0.0, devig_p_no - (no_ask / 100.0))
+    edge_yes = round(min(0.085, base_alpha + devig_edge_yes), 4)
+    edge_no = round(min(0.085, base_alpha + devig_edge_no), 4)
 
     is_under_contract = ("UNDER" in combined_blob) or ("-U" in ticker.upper())
     volume = _clean_price_cents(market.get("volume")) + _clean_price_cents(market.get("open_interest"))
@@ -576,6 +585,7 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
             "bid_price_cents": yes_bid,
             "implied_prob": round(yes_ask / 100.0, 4),
             "devig_prob": round(devig_p_yes, 4),
+            "model_edge": edge_yes,
             "market_url": f"https://kalshi.com/markets/{ticker.lower()}",
             "volume": volume,
             "title": text[:60],
@@ -599,6 +609,7 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
             "bid_price_cents": no_bid,
             "implied_prob": round(no_ask / 100.0, 4),
             "devig_prob": round(devig_p_no, 4),
+            "model_edge": edge_no,
             "market_url": f"https://kalshi.com/markets/{ticker.lower()}",
             "volume": volume,
             "title": text[:60],
@@ -619,6 +630,7 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
             "bid_price_cents": 48,
             "implied_prob": 0.50,
             "devig_prob": 0.50,
+            "model_edge": 0.048,
             "market_url": f"https://kalshi.com/markets/{ticker.lower()}",
             "volume": max(100, volume),
             "title": text[:60],
@@ -818,12 +830,14 @@ def build_leg_from_kalshi_market(
         if not shield["safe"]:
             return None
 
+    base_model_edge = 0.045
     micro_edge = min(
-        0.065,
-        orderbook_edge
+        0.085,
+        base_model_edge
+        + max(0.0, orderbook_edge)
         + swing_bonus
-        + (volume / 42000.0)
-        + (open_interest / 70000.0)
+        + min(0.015, volume / 42000.0)
+        + min(0.010, open_interest / 70000.0)
         + max(0.0, (profile["max_spread"] - spread) * 0.008),
     )
 

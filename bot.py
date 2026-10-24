@@ -895,6 +895,10 @@ def build_menu_hud_payload(show_slider: Optional[bool] = None, show_scan_panel: 
             {"text": "🔓 Flush Locks", "callback_data": "menu_flush_locks"},
         ],
         [
+            {"text": "❓ Help & Commands", "callback_data": "menu_help"},
+            {"text": "🚀 Push to GitHub", "callback_data": "menu_push"},
+        ],
+        [
             {"text": "📺 Watch Active Bets", "callback_data": "menu_watch_bets"},
             {"text": "🔄 Refresh HUD", "callback_data": "menu_refresh_hud"},
         ],
@@ -1468,6 +1472,7 @@ def run_monte_carlo_and_combo_pipeline(
             continue
 
         try:
+            prior_edge = float(p.get("model_edge") or 0.048)
             sim_res: PropSimResult = simulate_prop_leg(
                 ticker=p["ticker"],
                 sport=p["sport"],
@@ -1476,7 +1481,7 @@ def run_monte_carlo_and_combo_pipeline(
                 side=p["sim_direction"],
                 book_prob=max(0.03, min(0.96, p["implied_prob"])),
                 iterations=10000,
-                prior_edge_boost=max(0.0, p["devig_prob"] - p["implied_prob"]),
+                prior_edge_boost=prior_edge,
             )
 
             leg = SlipLeg(
@@ -1800,6 +1805,7 @@ def evaluate_market(m: dict, bankroll: float, force: bool = False) -> str:
         return "REJECT_MAPPING"
     for p in props:
         try:
+            prior_edge = float(p.get("model_edge") or 0.048)
             sim_res = simulate_prop_leg(
                 ticker=p["ticker"],
                 sport=p["sport"],
@@ -1808,7 +1814,7 @@ def evaluate_market(m: dict, bankroll: float, force: bool = False) -> str:
                 side=p["sim_direction"],
                 book_prob=max(0.03, min(0.96, p["implied_prob"])),
                 iterations=10000,
-                prior_edge_boost=max(0.0, p["devig_prob"] - p["implied_prob"]),
+                prior_edge_boost=prior_edge,
             )
             ev = sim_res.mc_true_prob - p["implied_prob"]
             if ev >= 0.025:
@@ -2171,34 +2177,41 @@ def build_simsettle_report() -> str:
 def build_help_commands_report() -> str:
     """Comprehensive command directory for /help."""
     return (
-        "🤖 *PEEZY / AURASCAN COMMAND DIRECTORY* 🤖\n"
+        "🤖 *AURASCAN // KALSHI QUANT COMMAND DIRECTORY* 🤖\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔍 *MANUAL SPORT SCANS:*\n"
+        "📡 *CORE HUD & EXECUTION CONTROLS:*\n"
+        "• `/start` or `/menu` — Live AuraScan V2 Telemetry HUD & action deck\n"
+        "• `/sniper [on|off]` — Arm or disarm autonomous order sniper\n"
+        "• `/mode [live|sim]` — Toggle between Live Real-Money and Paper Simulation\n"
+        "• `/cap <pct>` — Adjust bankroll exposure cap (`/cap 100` for 100% full balance, `/cap 50` for 50%)\n"
+        "• `/bal` — Verify live Kalshi cash balance, signer status, and session PnL\n"
+        "• `/clear_locks` — Flush all ticker cooldowns and idempotency locks\n"
+        "• `/push` — Synchronize code & deploy updates to GitHub\n\n"
+        "🔍 *MANUAL SPORT SCANS (10,000 MC DRAWS):*\n"
         "• `/scan` — Force 10k Monte Carlo scan across ALL active slates\n"
         "• `/nba` — Scan NBA player props (Points, Rebounds, Assists, 3PT)\n"
         "• `/nfl` (or `/cfb`) — Scan NFL & CFB props (Passing, Rushing, Receiving)\n"
-        "• `/tennis` — Scan ATP & WTA tennis match/set props\n"
+        "• `/tennis` (or `/atp`, `/wta`) — Scan Tennis match & set props\n"
         "• `/mlb` — Scan MLB player props (Strikeouts, Hits, HR)\n"
         "• `/wnba` — Scan WNBA props\n"
         "• `/esports` — Scan Esports markets\n\n"
-        "🎲 *QUANT MONTE CARLO & COPULA:*\n"
-        "• `/sim <prop>` — 10k MC stat distribution (P10, P50, P90, Edge)\n"
-        "  _Example:_ `/sim LeBron James O25.5 PTS`\n"
-        "• `/slip <leg1> | <leg2>` — Custom Joint Gaussian Copula parlay\n"
-        "  _Example:_ `/slip NFL:Mahomes O274.5 | NFL:Rice O68.5`\n"
-        "• `/audit` — 10k MC calibration, symmetry & Cholesky audit\n\n"
-        "📊 *PORTFOLIO & EXECUTION:*\n"
-        "• `/menu` — Live AuraScan Telemetry V2 HUD & action deck\n"
-        "• `/open` — View active open positions, HWM & streams\n"
-        "• `/pnl` — Bankroll & settled PnL report with ROI\n"
-        "• `/bal` — Verify live Kalshi cash balance\n"
-        "• `/cap <pct>` — Adjust bankroll cap (e.g. `/cap 100` for 100% full balance)\n"
-        "• `/mode [live|sim]` — Toggle Live Real-Money vs Simulation\n"
-        "• `/sniper [on|off]` — Arm or disarm autonomous order sniper\n"
-        "• `/watch` — Open live streamed.pk & Sweat HUD video streams\n"
-        "• `/clear_locks` — Flush all ticker cooldowns and unlock scanner\n"
+        "🎲 *QUANT SIMULATIONS & COPULA PARLAYS:*\n"
+        "• `/sim <prop>` — Run 10k Monte Carlo simulation on a specific prop\n"
+        "  _Examples:_\n"
+        "  • `/sim LeBron James O25.5 PTS`\n"
+        "  • `/sim Patrick Mahomes O274.5 PASS YDS`\n"
+        "  • `/sim KXNBA-LAL-LBJ-O25P5`\n"
+        "• `/slip <leg1> | <leg2> [| <leg3>]` — Evaluate Joint Gaussian Copula parlay\n"
+        "  _Example:_\n"
+        "  • `/slip NFL:Mahomes O274.5 | NFL:Rice O68.5`\n"
+        "• `/audit` — 10k MC calibration, 50/50 symmetry & Cholesky audit\n"
+        "• `/build` — Open interactive manual slip builder with auto-pilot paused\n\n"
+        "📊 *PORTFOLIO, STREAMS & SETTLEMENT:*\n"
+        "• `/open` (or `/positions`) — View active open contracts, HWM & streams\n"
+        "• `/pnl` — Session bankroll, Win-Loss-Push record & settled ROI\n"
+        "• `/watch` — Live streamed.pk & Sweat HUD video stream links\n"
         "• `/simsettle` — Grade open positions with test outcomes\n"
-        "• `/reset` — Reset SIM balance to baseline"
+        "• `/reset` — Reset SIM account balance to baseline ($32.22)"
     )
 
 
@@ -2606,6 +2619,29 @@ async def telegram_notifier_and_command_loop():
                             st_txt = await asyncio.to_thread(build_status_exposure_text)
                             _, hud_kb = build_menu_hud_payload()
                             await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, st_txt, hud_kb)
+
+                        elif any(k in cb_data for k in ("menu_help", "help", "commands")):
+                            toast_text = "📖 Commands Directory"
+                            h_txt = build_help_commands_report()
+                            _, hud_kb = build_menu_hud_payload()
+                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, h_txt, hud_kb)
+
+                        elif any(k in cb_data for k in ("menu_push", "push")):
+                            toast_text = "🚀 Pushing to GitHub..."
+                            try:
+                                from deploy_push import sync_to_github
+                                push_res = await asyncio.to_thread(sync_to_github)
+                                rep_lines = ["🚀 *GITHUB SYNC DEPLOYMENT REPORT*", "━━━━━━━━━━━━━━━━━━━━━━━━"]
+                                for item in push_res:
+                                    if item.get("ok"):
+                                        rep_lines.append(f"✅ *{item.get('repo')}* ({item.get('branch', 'main')})\n  Pushed {item.get('files_pushed')} files\n  🔗 [View Commit]({item.get('url')})")
+                                    else:
+                                        rep_lines.append(f"⚠️ *{item.get('repo')}*: {item.get('error')}")
+                                push_msg = "\n".join(rep_lines)
+                            except Exception as p_err:
+                                push_msg = f"❌ GitHub push error: `{p_err}`"
+                            _, hud_kb = build_menu_hud_payload()
+                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, push_msg, hud_kb)
 
                         elif any(k in cb_data for k in ("open_positions", "open", "positions")):
                             toast_text = "📋 Open Positions & Slips"
@@ -3021,7 +3057,7 @@ async def telegram_notifier_and_command_loop():
                         else:
                             await asyncio.to_thread(notify_telegram, rep, hud_kb)
 
-                    elif low.startswith(("/help", "/commands")):
+                    elif low.startswith(("/help", "/commands", "help", "commands")) or low in ("?", "info", "/info"):
                         h_txt = build_help_commands_report()
                         _, hud_kb = build_menu_hud_payload()
                         if target_cid:
