@@ -182,6 +182,8 @@ last_scan_ts = time.time()
 last_markets_checked = 14
 last_scan_diag = "Armed — NBA (5m) & NFL (10m) sub-engines active"
 sport_live_counts = {"NBA": 6, "NFL": 2, "TENNIS": 2, "MLB": 0, "WNBA": 0}
+last_kalshi_api_result = {"ok": False, "balance": 0.0, "status": "Testing...", "code": 0}
+live_kalshi_balance = 0.0
 
 
 def kill_stale_bot_processes() -> int:
@@ -502,20 +504,35 @@ def resolve_streamed_pk_for_position(ticker: str, title: str, engine: str, side:
 # ==========================================
 def build_menu_hud_payload() -> tuple:
     """
-    Build the exact `📡 AURASCAN // TELEMETRY V2` HUD text and 4-Row Inline Keyboard JSON
-    reading live runtime state from the trading engine.
+    Build the exact `📡 AURASCAN // TELEMETRY V2` HUD text and 5-Row Inline Keyboard JSON
+    reading live runtime state from the trading engine, Kalshi balance, and API status.
     """
-    mode_tag = "LIVE" if LIVE_MODE else "SIM"
+    mode_str = "LIVE REAL-MONEY" if LIVE_MODE else "SIMULATION"
+    mode_icon = "🟢" if LIVE_MODE else "🎮"
+    mode_btn = "🎛 Mode: LIVE (Tap ➡️ SIM)" if LIVE_MODE else "🎛 Mode: SIM (Tap ➡️ LIVE)"
+
     if SNIPER_ARMED:
-        sniper_status = f"🟢 ARMED ({mode_tag})"
+        sniper_status = f"🟢 ARMED ({'LIVE' if LIVE_MODE else 'SIM'})"
         sniper_btn = "🎯 Sniper: ON"
     else:
-        sniper_status = f"🔴 DISARMED ({mode_tag})"
+        sniper_status = f"🔴 DISARMED ({'LIVE' if LIVE_MODE else 'SIM'})"
         sniper_btn = "🎯 Sniper: OFF"
 
     exposure = get_current_exposure()
     mins_ago = max(0, int((time.time() - last_scan_ts) // 60))
     scan_age = f"{mins_ago}m ago" if mins_ago > 0 else "just now"
+
+    # Kalshi API and Bankroll telemetry
+    if last_kalshi_api_result.get("ok"):
+        api_line = f"🔑 *Kalshi API:* 🟢 Connected | 💵 *Live Bal:* `${live_kalshi_balance:.2f}`"
+    else:
+        api_stat = last_kalshi_api_result.get("status", "Pending check")
+        api_line = f"🔑 *Kalshi API:* 🔴 `{api_stat[:45]}`"
+
+    if LIVE_MODE:
+        bankroll_line = f"💵 *Live Bankroll:* `${live_kalshi_balance:.2f}` (Session PnL: `${sim_realized_pnl:+.2f}`)"
+    else:
+        bankroll_line = f"🎮 *SIM Bankroll:* `${1009.00 + sim_realized_pnl:.2f}` | 💵 *Kalshi Live:* `${live_kalshi_balance:.2f}`"
 
     nba_live = max(6, sport_live_counts.get("NBA", 6))
     nfl_live = max(2, sport_live_counts.get("NFL", 2))
@@ -525,7 +542,10 @@ def build_menu_hud_payload() -> tuple:
         "📡 *AURASCAN // TELEMETRY V2*\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"⚡ *Sniper:* {sniper_status}\n"
-        f"💰 *Exposure:* `${exposure:.2f} / ${SLATE_CAP_DOLLARS:.2f}` Slate Cap\n"
+        f"🎛 *Engine Mode:* {mode_icon} `{mode_str}`\n"
+        f"{api_line}\n"
+        f"💰 *Bankroll:* {bankroll_line}\n"
+        f"🛡️ *Exposure:* `${exposure:.2f} / ${SLATE_CAP_DOLLARS:.2f}` Slate Cap\n"
         f"🔄 *Last Scan:* {scan_age} ({last_markets_checked} markets checked)\n"
         f"🩺 *Diagnostics:* `{last_scan_diag}`\n\n"
         "📊 *ACTIVE SUB-ENGINES*\n"
@@ -541,7 +561,11 @@ def build_menu_hud_payload() -> tuple:
         "inline_keyboard": [
             [
                 {"text": sniper_btn, "callback_data": "menu_toggle_sniper"},
+                {"text": mode_btn, "callback_data": "menu_toggle_mode"},
+            ],
+            [
                 {"text": "⚡ Force Scan", "callback_data": "menu_force_scan"},
+                {"text": "🔑 Test Kalshi API", "callback_data": "menu_test_api"},
             ],
             [
                 {"text": "📊 Status & Exposure", "callback_data": "menu_status"},
@@ -605,13 +629,15 @@ def discover_telegram_chat_id() -> str:
     return TELEGRAM_CHAT_ID
 
 
-def notify_telegram(msg: str, reply_markup: dict = None):
+def notify_telegram(msg: str, reply_markup: dict = None, chat_id: str = None):
     if not TELEGRAM_BOT_TOKEN:
         return
-    cid = TELEGRAM_CHAT_ID or discover_telegram_chat_id()
+    cid = chat_id or TELEGRAM_CHAT_ID or discover_telegram_chat_id()
     if not cid:
         pending_tg_Queue.append((msg, reply_markup))
         return
+    if not TELEGRAM_CHAT_ID and cid:
+        _save_chat_id(str(cid))
     if reply_markup is None:
         _, reply_markup = build_menu_hud_payload()
     payload = {"chat_id": cid, "text": msg, "parse_mode": "Markdown", "reply_markup": reply_markup}
@@ -686,11 +712,69 @@ def log_trade(ticker, engine, strategy, action, side, price, count, metric, obi=
 # ==========================================
 # API & ORDERBOOK IMBALANCE (OBI) ENGINE
 # ==========================================
+def test_kalshi_api_connection() -> dict:
+    """
+    Test Kalshi API connectivity & Ed25519 signature authentication.
+    Queries /trade-api/v2/portfolio/balance across elections and trading-api endpoints.
+    Returns: {"ok": bool, "balance": float, "status": str, "code": int, "base_url": str, "key_id": str}
+    """
+    global live_kalshi_balance, last_kalshi_api_result, BASE_URL
+    endpoints = [
+        BASE_URL,
+        "https://api.elections.kalshi.com",
+        "https://trading-api.kalshi.com",
+    ]
+    seen = set()
+    unique_endpoints = [u for u in endpoints if not (u in seen or seen.add(u))]
+
+    last_err = ""
+    for base in unique_endpoints:
+        path = "/trade-api/v2/portfolio/balance"
+        try:
+            headers = get_auth_headers("GET", path)
+            r = session.get(f"{base}{path}", headers=headers, timeout=5)
+            if r.status_code == 200:
+                bal_cents = r.json().get("balance", 0)
+                bal_dollars = round(bal_cents / 100.0, 2)
+                BASE_URL = base
+                live_kalshi_balance = bal_dollars
+                res = {
+                    "ok": True,
+                    "balance": bal_dollars,
+                    "status": f"Connected (${bal_dollars:.2f} Live)",
+                    "code": 200,
+                    "base_url": base,
+                    "key_id": (KALSHI_KEY_ID[:8] + "...") if KALSHI_KEY_ID else "None",
+                }
+                last_kalshi_api_result = res
+                return res
+            elif r.status_code == 401:
+                last_err = f"401 Unauthorized (Check API Key ID or Private Key on {base})"
+            elif r.status_code == 403:
+                last_err = f"403 Forbidden on {base}"
+            else:
+                last_err = f"HTTP {r.status_code}: {r.text[:60]}"
+        except Exception as exc:
+            last_err = f"Connection error ({base}): {exc}"
+
+    res = {
+        "ok": False,
+        "balance": 0.0,
+        "status": last_err or "Failed to connect",
+        "code": 401 if "401" in last_err else 500,
+        "base_url": BASE_URL,
+        "key_id": (KALSHI_KEY_ID[:8] + "...") if KALSHI_KEY_ID else "None",
+    }
+    last_kalshi_api_result = res
+    return res
+
+
 def get_balance() -> float:
-    path = "/trade-api/v2/portfolio/balance"
-    r = session.get(f"{BASE_URL}{path}", headers=get_auth_headers("GET", path), timeout=5)
-    r.raise_for_status()
-    return r.json().get("balance", 0) / 100.0
+    global live_kalshi_balance
+    res = test_kalshi_api_connection()
+    if res["ok"]:
+        return res["balance"]
+    return live_kalshi_balance
 
 
 def fetch_all_open_markets() -> list:
@@ -1122,10 +1206,20 @@ def build_watch_active_bets_payload() -> tuple:
 
 
 def build_status_exposure_text() -> str:
-    bal = (1009.00 + sim_realized_pnl) if not LIVE_MODE else get_balance()
     exp = get_current_exposure()
-    mode_tag = "LIVE" if LIVE_MODE else "SIM"
-    sniper_tag = f"🟢 ARMED ({mode_tag})" if SNIPER_ARMED else f"🔴 DISARMED ({mode_tag})"
+    mode_tag = "LIVE REAL-MONEY" if LIVE_MODE else "SIMULATION"
+    sniper_tag = (
+        f"🟢 ARMED ({'LIVE' if LIVE_MODE else 'SIM'})"
+        if SNIPER_ARMED
+        else f"🔴 DISARMED ({'LIVE' if LIVE_MODE else 'SIM'})"
+    )
+
+    api_stat = (
+        f"🟢 Connected (${live_kalshi_balance:.2f} Live Cash)"
+        if last_kalshi_api_result.get("ok")
+        else f"🔴 {last_kalshi_api_result.get('status', 'Unverified')}"
+    )
+
     pos_lines = [
         f"  • `{tk}` ({p['side'].upper()} x{p['qty']} @ `{p['entry']}c` | HWM `{p['hwm']}c`)"
         for tk, p in list(open_positions.items())[:6]
@@ -1134,9 +1228,13 @@ def build_status_exposure_text() -> str:
         f"📊 *AURASCAN V2 // STATUS & EXPOSURE*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"• ⚡ *Sniper:* `{sniper_tag}` | *Model:* `V2 Hybrid`\n"
-        f"• 💰 *Exposure:* `${exp:.2f} / ${SLATE_CAP_DOLLARS:.2f}` Slate Cap\n"
-        f"• 🏦 *Bankroll:* `${bal:.2f}` | *Session PnL:* `${sim_realized_pnl:+.2f}`\n"
-        f"• 🎯 *Trades:* `{total_trades_count}` | *Cashouts:* `{total_cashouts_count}`\n"
+        f"• 🎛 *Engine Mode:* `{'🟢 LIVE' if LIVE_MODE else '🎮 SIM'}` ({mode_tag})\n"
+        f"• 🔑 *Kalshi API:* `{api_stat}`\n"
+        f"• 💵 *Kalshi Live Cash:* `${live_kalshi_balance:.2f}`\n"
+        f"• 🎮 *SIM Virtual Cash:* `${1009.00 + sim_realized_pnl:.2f}`\n"
+        f"• 💰 *Slate Exposure:* `${exp:.2f} / ${SLATE_CAP_DOLLARS:.2f}` Slate Cap\n"
+        f"• 📈 *Session Realized PnL:* `${sim_realized_pnl:+.2f}`\n"
+        f"• 🎯 *Trades Executed:* `{total_trades_count}` | *Cashouts:* `{total_cashouts_count}`\n"
         f"• 🔒 *Active Cooldown Locks:* `{len(cooldown_tracker)}`\n"
         f"• 🩺 *Last Diagnostic:* `{last_scan_diag}`\n"
         f"• 📂 *Open Positions ({len(open_positions)}):*\n" + "\n".join(pos_lines)
@@ -1226,6 +1324,35 @@ async def telegram_notifier_and_command_loop():
                             hud_text, hud_kb = build_menu_hud_payload()
                             await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
 
+                        elif any(k in cb_data for k in ("toggle_mode", "mode", "swap_mode")):
+                            LIVE_MODE = not LIVE_MODE
+                            sync_state_to_sqlite()
+                            mode_name = "LIVE REAL-MONEY" if LIVE_MODE else "SIMULATION"
+                            last_scan_diag = f"🎛 Switched mode to {mode_name}"
+                            if LIVE_MODE:
+                                chk = await asyncio.to_thread(test_kalshi_api_connection)
+                                if chk["ok"]:
+                                    toast_text = f"🟢 LIVE Mode! Kalshi Bal: ${chk['balance']:.2f}"
+                                    last_scan_diag = f"🟢 LIVE Mode active — Kalshi Bal: ${chk['balance']:.2f}"
+                                else:
+                                    toast_text = f"⚠️ LIVE (API: {chk['status'][:25]})"
+                                    last_scan_diag = f"⚠️ LIVE Mode active but API warning: {chk['status']}"
+                            else:
+                                toast_text = "🎮 Switched to SIM Mode"
+                            hud_text, hud_kb = build_menu_hud_payload()
+                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
+
+                        elif any(k in cb_data for k in ("test_api", "api", "key")):
+                            chk = await asyncio.to_thread(test_kalshi_api_connection)
+                            if chk["ok"]:
+                                toast_text = f"🟢 API OK! Bal: ${chk['balance']:.2f}"
+                                last_scan_diag = f"🔑 API OK: ${chk['balance']:.2f} Live Cash"
+                            else:
+                                toast_text = f"🔴 API: {chk['status'][:25]}"
+                                last_scan_diag = f"🔴 Kalshi API check failed: {chk['status']}"
+                            hud_text, hud_kb = build_menu_hud_payload()
+                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
+
                         elif any(k in cb_data for k in ("force_scan", "scan")):
                             diag = await asyncio.to_thread(run_force_scan_now)
                             toast_text = f"⚡ {diag[:42]}"
@@ -1275,14 +1402,22 @@ async def telegram_notifier_and_command_loop():
                     chat = msg.get("chat") or {}
                     cid = chat.get("id")
                     text = (msg.get("text") or "").strip()
-                    if cid and not TELEGRAM_CHAT_ID:
+                    if cid and str(cid) != TELEGRAM_CHAT_ID:
                         _save_chat_id(str(cid))
                         print(f"[TELEGRAM] ✅ Linked Chat ID {cid} from incoming Telegram message!")
 
                     low = text.lower()
+                    if cid:
+                        target_cid = str(cid)
+                    else:
+                        target_cid = TELEGRAM_CHAT_ID
+
                     if low.startswith("/menu") or low in ("menu", "hud", "hi", "hello"):
                         hud_text, hud_kb = build_menu_hud_payload()
-                        await asyncio.to_thread(notify_telegram, hud_text, hud_kb)
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, hud_text, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, hud_text, hud_kb)
 
                     elif low.startswith(("/sniper", "/auto")):
                         parts = low.split()
@@ -1300,37 +1435,110 @@ async def telegram_notifier_and_command_loop():
                         )
                         sync_state_to_sqlite()
                         hud_text, hud_kb = build_menu_hud_payload()
-                        await asyncio.to_thread(notify_telegram, hud_text, hud_kb)
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, hud_text, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, hud_text, hud_kb)
 
                     elif low.startswith(("/clear_locks", "/flush_locks", "/unlock")):
                         clear_all_locks()
                         hud_text, hud_kb = build_menu_hud_payload()
-                        await asyncio.to_thread(notify_telegram, hud_text, hud_kb)
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, hud_text, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, hud_text, hud_kb)
 
                     elif low.startswith("/scan"):
                         await asyncio.to_thread(run_force_scan_now)
                         hud_text, hud_kb = build_menu_hud_payload()
-                        await asyncio.to_thread(notify_telegram, hud_text, hud_kb)
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, hud_text, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, hud_text, hud_kb)
 
                     elif low.startswith(("/watch", "/streams")):
                         w_txt, w_kb = await asyncio.to_thread(build_watch_active_bets_payload)
-                        await asyncio.to_thread(notify_telegram, w_txt, w_kb)
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, w_txt, w_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, w_txt, w_kb)
 
                     elif low.startswith("/mode"):
                         parts = low.split()
-                        if len(parts) > 1 and parts[1] in ("live", "sim", "paper"):
-                            LIVE_MODE = parts[1] == "live"
+                        if len(parts) > 1 and parts[1] in ("live", "real"):
+                            LIVE_MODE = True
+                        elif len(parts) > 1 and parts[1] in ("sim", "paper"):
+                            LIVE_MODE = False
                         else:
                             LIVE_MODE = not LIVE_MODE
-                        last_scan_diag = f"🎛 Switched engine mode to {'LIVE' if LIVE_MODE else 'SIM'}"
+                        mode_name = "LIVE REAL-MONEY" if LIVE_MODE else "SIMULATION"
+                        last_scan_diag = f"🎛 Switched engine mode to {mode_name}"
+                        if LIVE_MODE:
+                            chk = await asyncio.to_thread(test_kalshi_api_connection)
+                            if chk["ok"]:
+                                last_scan_diag = f"🟢 LIVE Mode active — Kalshi Bal: ${chk['balance']:.2f}"
+                            else:
+                                last_scan_diag = f"⚠️ LIVE Mode active but API warning: {chk['status']}"
                         sync_state_to_sqlite()
                         hud_text, hud_kb = build_menu_hud_payload()
-                        await asyncio.to_thread(notify_telegram, hud_text, hud_kb)
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, hud_text, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, hud_text, hud_kb)
 
-                    elif low.startswith(("/start", "/status", "/pnl", "/positions", "/open", "status")):
+                    elif low.startswith(("/api", "/test_api", "/key")):
+                        chk = await asyncio.to_thread(test_kalshi_api_connection)
+                        status_icon = "🟢" if chk["ok"] else "🔴"
+                        api_msg = (
+                            f"🔑 *KALSHI API DIAGNOSTIC REPORT*\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"• 🌐 *Status:* `{status_icon} {'CONNECTED' if chk['ok'] else 'FAILED'}`\n"
+                            f"• 💵 *Live Cash Balance:* `${chk['balance']:.2f}`\n"
+                            f"• 🆔 *Access Key ID:* `{chk['key_id']}`\n"
+                            f"• 🛡️ *Signer:* `Pure-Python Ed25519 Native (RFC 8032)`\n"
+                            f"• 📡 *Active Base URL:* `{chk['base_url']}`\n"
+                            f"• 🎛 *Engine Mode:* `{'🟢 LIVE REAL-MONEY' if LIVE_MODE else '🎮 SIMULATION'}`\n"
+                            f"• 🩺 *Response Status:* `{chk['status']}`"
+                        )
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, api_msg, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, api_msg, hud_kb)
+
+                    elif low.startswith(("/bal", "/balance")):
+                        chk = await asyncio.to_thread(test_kalshi_api_connection)
+                        bal_msg = (
+                            f"💰 *AURASCAN ACCOUNT BALANCES*\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"• 💵 *Kalshi Live Cash:* `${chk['balance']:.2f}` ({'🟢 Verified' if chk['ok'] else '🔴 Check API'})\n"
+                            f"• 🎮 *SIM Virtual Cash:* `${1009.00 + sim_realized_pnl:.2f}`\n"
+                            f"• 📈 *Session Realized PnL:* `${sim_realized_pnl:+.2f}`\n"
+                            f"• 🎛 *Current Mode:* `{'🟢 LIVE REAL-MONEY' if LIVE_MODE else '🎮 SIMULATION'}`\n"
+                            f"• 🛡️ *Slate Exposure:* `${get_current_exposure():.2f} / ${SLATE_CAP_DOLLARS:.2f}`"
+                        )
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, bal_msg, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, bal_msg, hud_kb)
+
+                    elif low.startswith("/start"):
+                        startup_notified = True
+                        hud_text, hud_kb = build_menu_hud_payload()
+                        welcome_msg = f"🟢 *AURASCAN // KALSHI V2 HYBRID ENGINE ONLINE*\n\n{hud_text}"
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, welcome_msg, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, welcome_msg, hud_kb)
+
+                    elif low.startswith(("/status", "/pnl", "/positions", "/open", "status")):
                         st_txt = await asyncio.to_thread(build_status_exposure_text)
                         _, hud_kb = build_menu_hud_payload()
-                        await asyncio.to_thread(notify_telegram, st_txt, hud_kb)
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, st_txt, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, st_txt, hud_kb)
 
             if TELEGRAM_CHAT_ID and not startup_notified:
                 startup_notified = True
@@ -1457,11 +1665,18 @@ async def main():
     if reaped:
         print(f"[PROCESS-GUARD] Terminated {reaped} stale background bot process(es).")
     init_db()
+    print("[KALSHI-INIT] Testing Kalshi API connectivity & Ed25519 signer...")
+    api_check = test_kalshi_api_connection()
+    if api_check["ok"]:
+        print(f"[KALSHI-API] ✅ Connected! Live Cash Balance: ${api_check['balance']:.2f} (Base: {api_check['base_url']})")
+    else:
+        print(f"[KALSHI-API] ⚠️ Notice: {api_check['status']}")
+
     mode_banner = "LIVE REAL-MONEY" if LIVE_MODE else "SIMULATION"
     print("======================================================================")
     print(f" AURASCAN // KALSHI V2 HYBRID ENGINE [{mode_banner}] (Ed25519 Native)")
-    print(f" Sniper: {'ARMED' if SNIPER_ARMED else 'DISARMED'} | Slate Cap: ${SLATE_CAP_DOLLARS:.2f} | NBA (5m) + NFL (10m)")
-    print(" Commands: /menu | /sniper on|off | /clear_locks | /watch | /status")
+    print(f" Kalshi Bal: ${live_kalshi_balance:.2f} | Sniper: {'ARMED' if SNIPER_ARMED else 'DISARMED'} | Slate Cap: ${SLATE_CAP_DOLLARS:.2f}")
+    print(" Commands: /menu | /mode [live|sim] | /api | /bal | /sniper on|off | /status")
     print("======================================================================")
     await asyncio.gather(
         telegram_notifier_and_command_loop(),
