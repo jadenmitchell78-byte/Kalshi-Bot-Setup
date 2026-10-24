@@ -14,6 +14,7 @@ import requests
 from pathlib import Path
 from collections import deque
 from datetime import datetime, timezone
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 from dotenv import load_dotenv
 
 try:
