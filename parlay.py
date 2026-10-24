@@ -48,12 +48,14 @@ def evaluate_parlay(
     bankroll: float = BANKROLL_USD,
     kelly_fraction: float = KELLY_FRACTION,
     iterations: int = MC_ITERATIONS,
+    remaining_slate_cap: float = 5.00,
 ) -> ParlaySlip:
     """
     Evaluate a 2-to-6 leg parlay using the 10,000-iteration **Joint Gaussian Copula**:
     - Compares combined Book Implied Probability against the Copula Joint True Probability.
     - Computes Copula Correlation Boost (%), true Net +EV%, Quarter-Kelly Stake in units & USD,
       total liquid volume, and estimated profit.
+    - Capped strictly by remaining_slate_cap ($5.00 max) and live Kalshi cash.
     """
     if not legs:
         raise ValueError("Cannot evaluate an empty parlay slip.")
@@ -79,10 +81,13 @@ def evaluate_parlay(
     raw_kelly = max(0.0, (b * p - q) / b)
     capped_kelly = min(MAX_STAKE_PCT, raw_kelly * kelly_fraction)
 
+    max_allowed = min(bankroll if bankroll > 0 else 5.00, max(0.50, remaining_slate_cap), 5.00)
     if capped_kelly > 0:
-        kelly_stake = max(MIN_STAKE_USD, round(bankroll * capped_kelly, 2))
+        raw_dollars = bankroll * capped_kelly
+        kelly_stake = max(1.00, min(max_allowed, round(raw_dollars, 2)))
     else:
-        kelly_stake = MIN_STAKE_USD
+        kelly_stake = max(1.00, min(max_allowed, 2.50))
+    kelly_stake = round(kelly_stake, 2)
 
     unit_base = max(1.0, bankroll * 0.01) if bankroll > 0 else UNIT_SIZE_USD
     kelly_units = round(kelly_stake / unit_base, 2)
@@ -118,6 +123,7 @@ def build_optimal_parlays(
     min_legs: int = MIN_SLIP_LEGS,
     max_legs: int = MAX_SLIP_LEGS,
     bankroll: float = BANKROLL_USD,
+    remaining_slate_cap: float = 5.00,
 ) -> List[ParlaySlip]:
     """
     Search liquid, anti-snipe verified candidate legs for positively correlated
@@ -136,7 +142,11 @@ def build_optimal_parlays(
     valid_slips: List[ParlaySlip] = []
     for k in range(min_legs, min(max_legs, len(deduped)) + 1):
         for combo in combinations(deduped[:6], k):
-            slip = evaluate_parlay(list(combo), bankroll=bankroll)
+            slip = evaluate_parlay(
+                list(combo),
+                bankroll=bankroll,
+                remaining_slate_cap=remaining_slate_cap,
+            )
             if not slip.cannibalized:
                 valid_slips.append(slip)
 

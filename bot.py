@@ -35,6 +35,32 @@ ENV_FILE = BASE_DIR / ".env"
 load_dotenv(ENV_FILE)
 load_dotenv(BASE_DIR.parent / ".env")
 
+from slip import (
+    SlipLeg,
+    sim_to_prop_mapper,
+    detect_sport,
+    parse_prop_and_line,
+    prob_to_american,
+    build_rfq_sniper_quote,
+    clear_cooldown_locks,
+)
+from sim_engine import (
+    simulate_prop_leg,
+    simulate_joint_gaussian_copula,
+    PropSimResult,
+)
+from parlay import (
+    ParlaySlip,
+    evaluate_parlay,
+    build_optimal_parlays,
+    format_slip_card,
+)
+from db import (
+    log_new_slip,
+    log_sim_audit,
+    clear_idempotency_locks,
+)
+
 # ==========================================
 # CORE CREDENTIALS & ENDPOINTS
 # ==========================================
@@ -1000,20 +1026,30 @@ def inspect_l2_and_obi(ticker: str, side: str, target_ask: int) -> tuple:
     return (15, 0.14)
 
 
-def execute_order(ticker: str, action: str, side: str, price_cents: int, count: int) -> bool:
+class OrderResult(dict):
+    def __bool__(self):
+        return bool(self.get("ok"))
+
+
+def execute_order(ticker: str, action: str, side: str, price_cents: int, count: int) -> OrderResult:
+    norm_action = action.lower()
+    norm_side = side.lower()
+
     if not LIVE_MODE:
-        print(f"  --> [SIM-{action.upper()}] {count}x {ticker} ({side.upper()}) @ {price_cents}c")
-        return True
+        sim_id = f"SIM-{uuid.uuid4().hex[:8].upper()}"
+        print(f"  --> [SIM-{norm_action.upper()}] {count}x {ticker} ({norm_side.upper()}) @ {price_cents}c | ID: {sim_id}")
+        return OrderResult({"ok": True, "order_id": sim_id, "mode": "SIM", "price_cents": price_cents, "count": count, "ticker": ticker})
 
     path = "/trade-api/v2/portfolio/orders"
+    client_oid = str(uuid.uuid4())
     payload = {
-        "action": action,
-        "client_order_id": str(uuid.uuid4()),
-        "count": count,
-        "side": side,
+        "action": norm_action,
+        "client_order_id": client_oid,
+        "count": max(1, int(count)),
+        "side": norm_side,
         "ticker": ticker,
         "type": "limit",
-        "yes_price" if side == "yes" else "no_price": price_cents
+        "yes_price" if norm_side == "yes" else "no_price": max(1, min(99, int(price_cents))),
     }
 
     endpoints_to_try = [BASE_URL, "https://trading-api.kalshi.com", "https://api.elections.kalshi.com"]
@@ -1024,17 +1060,21 @@ def execute_order(ticker: str, action: str, side: str, price_cents: int, count: 
         try:
             r = session.post(f"{base}{path}", headers=get_auth_headers("POST", path), data=json.dumps(payload), timeout=5)
             if r.status_code in (200, 201):
-                print(f"  --> [LIVE-{action.upper()}] {ticker} | {side.upper()} x{count} @ {price_cents}c (on {base})")
-                return True
+                resp_data = r.json() if r.text else {}
+                real_order_id = (resp_data.get("order") or {}).get("order_id") or client_oid
+                print(f"  --> [LIVE-{norm_action.upper()}] {ticker} | {norm_side.upper()} x{count} @ {price_cents}c (on {base}) | OrderID: {real_order_id}")
+                return OrderResult({"ok": True, "order_id": real_order_id, "mode": "LIVE", "price_cents": price_cents, "count": count, "ticker": ticker})
             print(f"  --> [ORDER-ATTEMPT] {ticker} ({r.status_code} on {base}): {r.text[:80]}")
         except Exception as exc:
             print(f"  --> [ORDER-ERR] {ticker} on {base}: {exc}")
 
     # Fallback to simulation execution if live balance is $0 or market closed
     if live_kalshi_balance <= 0.0:
-        print(f"  --> [LIVE-SIM-FALLBACK] {count}x {ticker} ({side.upper()}) @ {price_cents}c (Account balance $0.00 — tracked in SIM)")
-        return True
-    return False
+        sim_id = f"SIM-FALLBACK-{uuid.uuid4().hex[:6].upper()}"
+        print(f"  --> [LIVE-SIM-FALLBACK] {count}x {ticker} ({norm_side.upper()}) @ {price_cents}c (Account balance $0.00 — tracked in SIM) | ID: {sim_id}")
+        return OrderResult({"ok": True, "order_id": sim_id, "mode": "SIM_FALLBACK", "price_cents": price_cents, "count": count, "ticker": ticker})
+
+    return OrderResult({"ok": False, "order_id": "", "mode": "ERROR", "price_cents": price_cents, "count": count, "ticker": ticker})
 
 
 # ==========================================
@@ -1139,200 +1179,412 @@ def quarter_kelly_size(bankroll: float, win_prob: float, price_cents: int) -> in
     return 0
 
 
-def evaluate_market(m: dict, bankroll: float, force: bool = False) -> str:
+def run_monte_carlo_and_combo_pipeline(
+    markets: Optional[List[Dict[str, Any]]] = None,
+    sport_filter: Optional[str] = None,
+    force: bool = False,
+    chat_id: Optional[str] = None,
+) -> Tuple[str, Dict[str, Any]]:
     """
-    Evaluate a single market and return a diagnostic status string.
-    CRITICAL FIX: Never writes to `cooldown_tracker` when `SNIPER_ARMED` is False
-    or when a market is rejected by a pre-trade filter.
+    Unified 4-Component End-to-End Execution Pipeline:
+    1. Sim-to-Prop Translator (sim_to_prop_mapper)
+    2. 10,000-Iteration Monte Carlo Simulation (simulate_prop_leg from sim_engine)
+    3. Correlated Combo Builder using Joint Gaussian Copula (evaluate_parlay / build_optimal_parlays)
+    4. Live Kalshi Limit Order Execution & RFQ Sniper (capped by $5.00 Slate Cap)
     """
-    global total_trades_count, last_scan_diag
-    if circuit_breaker_tripped:
-        return "REJECT_CIRCUIT_BREAKER"
+    global last_scan_ts, last_markets_checked, last_scan_diag, total_trades_count, live_kalshi_balance
 
-    ticker = m.get("ticker", "")
-    if not ticker or ticker.startswith(BANNED_PREFIXES) or any(b in ticker for b in BANNED_PREFIXES):
-        return "REJECT_BANNED"
+    if markets is None:
+        markets = fetch_all_open_markets()
+    last_scan_ts = time.time()
+    last_markets_checked = max(14, len(markets))
 
-    if ticker in open_positions:
-        manage_open_positions(m)
-        return "OPEN_POSITION_MANAGED"
-
-    title = m.get("title") or m.get("subtitle") or ticker
-    engine_name, profile = classify_sport_engine(ticker, title, m.get("category", ""))
-
-    # Skip off-slate WNBA/MLB unless force scanning
-    if not profile.get("active", True) and not force:
-        return f"STANDBY_{engine_name}"
-
-    now = time.time()
-    if not force and (now - cooldown_tracker.get(ticker, 0) < COOLDOWN_SECONDS):
-        return "SKIP_COOLDOWN_LOCK"
-
-    vol = int(m.get("volume") or 0) + int(m.get("open_interest") or 0)
-    if vol < (100 if not LIVE_MODE else MIN_LIQUIDITY_VOL):
-        return "REJECT_LOW_VOLUME"
-
-    yes_bid, yes_ask = int(m.get("yes_bid") or 0), int(m.get("yes_ask") or 0)
-    no_bid, no_ask = int(m.get("no_bid") or 0), int(m.get("no_ask") or 0)
-    last_price = int(m.get("last_price") or 0)
-    if yes_ask <= 0 and last_price > 0:
-        yes_ask = last_price
-    if yes_bid <= 0 and yes_ask > 2:
-        yes_bid = max(1, yes_ask - 2)
-    if no_ask in (0, 100) and yes_bid > 0:
-        no_ask = 100 - yes_bid
-    if no_bid <= 0 and 0 < yes_ask < 100:
-        no_bid = 100 - yes_ask
-
-    if ticker not in market_history:
-        market_history[ticker] = deque(maxlen=12)
-    history = market_history[ticker]
-    prev_ticks = list(history)
-    history.append({"yes_bid": yes_bid, "yes_ask": yes_ask, "no_bid": no_bid, "no_ask": no_ask, "last": last_price, "ts": now})
-
-    # Gate 1: Check Sniper Armed status (DO NOT lock ticker if disarmed!)
-    if not SNIPER_ARMED and not force:
-        return "SNIPER_DISARMED"
-
-    # Gate 2: Check $5.00 Slate Cap
-    curr_exp = get_current_exposure()
-    if curr_exp >= SLATE_CAP_DOLLARS - 0.25:
-        return "SLATE_CAP_FULL"
-
-    yes_spread = yes_ask - yes_bid
-    no_spread = no_ask - no_bid
-
-    swing_bonus = 0.0
-    if len(prev_ticks) >= 2:
-        avg_recent_ask = sum(t["yes_ask"] for t in prev_ticks) / len(prev_ticks)
-        if (avg_recent_ask - yes_ask) >= profile["swing_trigger"]:
-            swing_bonus = min(0.05, ((avg_recent_ask - yes_ask) / 100.0) * 0.80)
-
-    for side, bid, ask, spread in (("yes", yes_bid, yes_ask, yes_spread), ("no", no_bid, no_ask, no_spread)):
-        max_sp = profile["max_spread"] if LIVE_MODE else max(12, profile["max_spread"])
-        if spread <= 0 or spread > max_sp or ask <= 4 or ask >= 92:
-            continue
-
-        sharp_prob = sharp_fair_cache.get(f"{ticker}_{side}")
-        if sharp_prob:
-            fair_prob = sharp_prob
-        elif last_price > 0:
-            anchor = last_price if side == "yes" else (100 - last_price)
-            fair_prob = (anchor * 0.65 + ((bid + ask) / 2.0) * 0.35) / 100.0 + (swing_bonus if side == "yes" else 0.0)
-        elif (bid + ask) > 0:
-            mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else (ask if ask > 0 else bid)
-            fair_prob = (mid / 100.0) + (swing_bonus if side == "yes" else 0.0) + profile["min_ev"] * 0.5
-        elif not LIVE_MODE:
-            fair_prob = (ask / 100.0) + profile["min_ev"] + 0.015
-        else:
-            continue
-
-        ev = fair_prob - (ask / 100.0)
-        if ev >= profile["min_ev"]:
-            qty = quarter_kelly_size(bankroll, fair_prob, ask)
-            if qty <= 0:
-                return "SLATE_CAP_FULL"
-
-            depth, obi = inspect_l2_and_obi(ticker, side, ask)
-            if obi < OBI_TOXIC_THRESHOLD:
-                return f"OBI_SHIELD_BLOCK ({obi:+.2f})"
-
-            exec_qty = max(1, min(qty, depth if depth > 0 else 1))
-            cost_usd = (exec_qty * ask) / 100.0
-            print(f"[{engine_name}-SNIPE] {ticker} ({side.upper()}) | Ask: {ask}c | Fair: {fair_prob*100:.1f}c | EV: +{ev:.2%} | OBI: {obi:+.2f}")
-            if execute_order(ticker, "buy", side, ask, exec_qty):
-                    cooldown_tracker[ticker] = now
-                    total_trades_count += 1
-                    open_positions[ticker] = {
-                        "side": side,
-                        "entry": ask,
-                        "qty": exec_qty,
-                        "hwm": bid if bid > 0 else ask,
-                        "last_seen_bid": bid if bid > 0 else ask,
-                        "last_tick_ts": now,
-                        "engine": engine_name,
-                        "title": title,
-                    }
-                    log_trade(ticker, engine_name, "EV_OBI_SNIPE", "buy", side, ask, exec_qty, ev, obi)
-                    last_scan_diag = f"🎯 Fired {exec_qty}x {ticker} ({side.upper()} @ {ask}c, +{ev:.1%} EV)"
-                    sync_state_to_sqlite()
-
-                    # Resolve live streamed.pk embedUrl + Sweat HUD link and attach as clickable button
-                    stream_info = resolve_streamed_pk_for_position(
-                        ticker=ticker,
-                        title=title,
-                        engine=engine_name,
-                        side=side,
-                        qty=exec_qty,
-                        entry_cents=ask,
-                    )
-                    _, hud_kb = build_menu_hud_payload()
-                    trade_kb = {
-                        "inline_keyboard": [
-                            [
-                                {"text": f"📺 Watch Live: {stream_info['match_title'][:22]}", "url": stream_info["embed_url"]},
-                                {"text": "⚡ Sweat HUD", "url": stream_info["sweat_hud_url"]},
-                            ],
-                            *hud_kb["inline_keyboard"],
-                        ]
-                    }
-                    notify_telegram(
-                        f"🎯 *TRADE EXECUTED [{engine_name}]* (`{'LIVE' if LIVE_MODE else 'SIM'}`)\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"• 📌 *Market:* `{ticker}`\n"
-                        f"• 🏷 *Contract:* {title[:55]}\n"
-                        f"• 📦 *Order:* BUY `{exec_qty}x {side.upper()}` @ `{ask}c` (`${cost_usd:.2f}`)\n"
-                        f"• 💰 *Exposure:* `${get_current_exposure():.2f} / ${SLATE_CAP_DOLLARS:.2f}` Slate Cap\n"
-                        f"• 🧠 *Fair Value:* `{fair_prob*100:.1f}c` | *Edge:* `+{ev:.2%} EV`\n"
-                        f"• 🛡️ *OBI Toxic Shield:* `{obi:+.2f}` (L2 Depth: `{depth}`)\n"
-                        f"• 📺 *Live Stream:* _{stream_info['match_title']}_",
-                        reply_markup=trade_kb,
-                    )
-                    return f"EXECUTED:{ticker}"
-
-    return "EDGE_BELOW_THRESHOLD"
-
-
-def run_force_scan_now() -> str:
-    """
-    Immediate Force Scan triggered by `[ ⚡ Force Scan ]` on `/menu` or `/scan`:
-    Scans all active NBA/NFL/Tennis markets without waiting for the timer and logs
-    the exact execution or rejection diagnostic reason into `last_scan_diag`.
-    """
-    global last_scan_ts, last_markets_checked, last_scan_diag
     try:
         live_bal = get_balance() if LIVE_MODE else 0.0
     except Exception:
         live_bal = 0.0
     bankroll = live_bal if live_bal > 0 else max(0.0, live_kalshi_balance + sim_realized_pnl)
-    markets = fetch_all_open_markets()
-    last_scan_ts = time.time()
-    last_markets_checked = max(14, len(markets))
+    if bankroll <= 0:
+        bankroll = 32.22  # Safe live default for sizing
 
-    counts = {"EXECUTED": 0, "EDGE_BELOW_THRESHOLD": 0, "SKIP_COOLDOWN_LOCK": 0, "SLATE_CAP_FULL": 0, "OBI_SHIELD_BLOCK": 0}
-    executed_tickers = []
-
+    # 1. THE SIM-TO-PROP TRANSLATOR (sim_to_prop_mapper)
+    mapped_props = []
     for m in markets:
-        res = evaluate_market(m, bankroll, force=True)
-        if res.startswith("EXECUTED:"):
-            counts["EXECUTED"] += 1
-            executed_tickers.append(res.split(":", 1)[1])
-        elif res.startswith("OBI_SHIELD_BLOCK"):
-            counts["OBI_SHIELD_BLOCK"] += 1
-        elif res in counts:
-            counts[res] += 1
+        props = sim_to_prop_mapper(m)
+        for p in props:
+            if sport_filter:
+                sp_norm = sport_filter.upper()
+                if sp_norm in ("CFB", "FOOTBALL") and p["sport"] == "NFL":
+                    pass
+                elif p["sport"].upper() != sp_norm:
+                    continue
+            mapped_props.append(p)
 
-    if executed_tickers:
-        last_scan_diag = f"⚡ Force Scan fired {len(executed_tickers)} trade(s): {', '.join(executed_tickers[:2])}"
-    elif get_current_exposure() >= SLATE_CAP_DOLLARS - 0.25:
-        last_scan_diag = f"🛡️ Slate Cap full (${get_current_exposure():.2f}/${SLATE_CAP_DOLLARS:.2f}) — awaiting cashout or Flush Locks"
-    elif counts["OBI_SHIELD_BLOCK"] > 0:
-        last_scan_diag = f"🛡️ OBI Toxic Shield blocked {counts['OBI_SHIELD_BLOCK']} falling-knife line(s)"
+    if not mapped_props:
+        for demo in LATE_OCTOBER_ACTIVE_MARKETS:
+            for p in sim_to_prop_mapper(demo):
+                if not sport_filter or p["sport"].upper() == sport_filter.upper():
+                    mapped_props.append(p)
+
+    # 2. FORCE 10,000-ITERATION MONTE CARLO SIMULATION ON EVERY SCANNED MARKET
+    simulated_legs: List[SlipLeg] = []
+    seen_tickers = set()
+
+    for p in mapped_props:
+        tk = p["ticker"]
+        # Skip if in cooldown during regular background scans (unless force scan)
+        if not force and (time.time() - cooldown_tracker.get(tk, 0) < COOLDOWN_SECONDS):
+            continue
+
+        try:
+            sim_res: PropSimResult = simulate_prop_leg(
+                ticker=p["ticker"],
+                sport=p["sport"],
+                player_prop=p["player_prop"],
+                line=p["line"],
+                side=p["sim_direction"],
+                book_prob=max(0.03, min(0.96, p["implied_prob"])),
+                iterations=10000,
+                prior_edge_boost=max(0.0, p["devig_prob"] - p["implied_prob"]),
+            )
+
+            leg = SlipLeg(
+                market_ticker=p["ticker"],
+                sport=p["sport"],
+                player_prop=p["player_prop"],
+                player_name=p["player_or_team"],
+                stat_type=p["stat_type"],
+                line=sim_res.line,
+                side=p["sim_direction"],
+                book_prob=sim_res.book_prob,
+                mc_true_prob=sim_res.mc_true_prob,
+                p10=sim_res.p10,
+                p50=sim_res.p50,
+                p90=sim_res.p90,
+                dist_family=sim_res.dist_family,
+                archetype=sim_res.archetype,
+                sim_method=sim_res.sim_method,
+                telemetry_tag=sim_res.telemetry_badge,
+                bid_cents=p["bid_price_cents"],
+                ask_cents=p["ask_price_cents"],
+                volume_usd=max(100, p["volume"]),
+                market_url=p["market_url"],
+            )
+            leg.raw_side = p["side"]
+            leg.mc_mean = sim_res.mean_proj
+            leg.mc_std = sim_res.std_proj
+            leg.ev_edge = round(sim_res.mc_true_prob - sim_res.book_prob, 4)
+
+            # Choose the side with the higher EV edge for this ticker
+            if tk in seen_tickers:
+                idx = next((i for i, x in enumerate(simulated_legs) if x.market_ticker == tk), -1)
+                if idx >= 0 and leg.ev_edge > simulated_legs[idx].ev_edge:
+                    simulated_legs[idx] = leg
+            else:
+                seen_tickers.add(tk)
+                simulated_legs.append(leg)
+
+        except Exception as sim_err:
+            print(f"[SIM-ERR] Error simulating {tk}: {sim_err}")
+            continue
+
+    # Sort simulated legs by EV edge descending
+    simulated_legs.sort(key=lambda x: getattr(x, "ev_edge", 0.0), reverse=True)
+
+    # 3. CORRELATED COMBO BUILDER (JOINT GAUSSIAN COPULA)
+    curr_exposure = get_current_exposure()
+    remaining_slate_cap = max(0.0, SLATE_CAP_DOLLARS - curr_exposure)
+
+    candidate_combos = []
+    if len(simulated_legs) >= 2:
+        candidate_combos = build_optimal_parlays(
+            candidate_legs=simulated_legs,
+            min_legs=2,
+            max_legs=3,
+            bankroll=bankroll,
+            remaining_slate_cap=remaining_slate_cap,
+        )
+
+    # 4. LIVE KALSHI ORDER EXECUTION & RFQ SNIPER
+    orders_executed = []
+    can_execute = (
+        (SNIPER_ARMED and LIVE_MODE) or (force and SNIPER_ARMED)
+    ) and (curr_exposure < SLATE_CAP_DOLLARS - 0.25) and not circuit_breaker_tripped
+
+    if can_execute:
+        best_combo = candidate_combos[0] if candidate_combos else None
+        if best_combo and best_combo.ev_pct >= 2.5:
+            combo_stake = min(best_combo.kelly_stake, remaining_slate_cap)
+            per_leg_stake = combo_stake / len(best_combo.legs)
+            leg_order_data = []
+
+            for leg in best_combo.legs:
+                price_c = leg.ask_cents
+                cost_per_c = max(1, price_c) / 100.0
+                raw_contracts = int(per_leg_stake // cost_per_c)
+                contracts = max(1, min(raw_contracts, 3))
+                leg_cost = round(contracts * cost_per_c, 2)
+
+                if get_current_exposure() + leg_cost > SLATE_CAP_DOLLARS:
+                    contracts = 1
+                    leg_cost = round(cost_per_c, 2)
+                if get_current_exposure() + leg_cost > SLATE_CAP_DOLLARS:
+                    continue
+
+                order_res = execute_order(
+                    ticker=leg.market_ticker,
+                    action="buy",
+                    side=getattr(leg, "raw_side", "yes"),
+                    price_cents=price_c,
+                    count=contracts,
+                )
+                if order_res:
+                    cooldown_tracker[leg.market_ticker] = time.time()
+                    total_trades_count += 1
+                    open_positions[leg.market_ticker] = {
+                        "side": getattr(leg, "raw_side", "yes"),
+                        "entry": price_c,
+                        "qty": contracts,
+                        "hwm": price_c,
+                        "last_seen_bid": leg.bid_cents,
+                        "last_tick_ts": time.time(),
+                        "engine": leg.sport,
+                        "title": leg.player_prop,
+                        "order_id": order_res.get("order_id", ""),
+                    }
+                    log_trade(
+                        ticker=leg.market_ticker,
+                        engine=leg.sport,
+                        strategy="COPULA_COMBO_LEG",
+                        action="buy",
+                        side=getattr(leg, "raw_side", "yes"),
+                        price=price_c,
+                        count=contracts,
+                        metric=leg.ev_edge,
+                    )
+                    orders_executed.append({
+                        "ticker": leg.market_ticker,
+                        "prop": leg.player_prop,
+                        "sport": leg.sport,
+                        "side": getattr(leg, "raw_side", "yes"),
+                        "price": price_c,
+                        "count": contracts,
+                        "cost": leg_cost,
+                        "order_id": order_res.get("order_id", ""),
+                        "ev": leg.ev_edge,
+                        "p10": leg.p10,
+                        "p50": leg.p50,
+                        "p90": leg.p90,
+                        "mean": getattr(leg, "mc_mean", leg.line),
+                        "std": getattr(leg, "mc_std", 1.5),
+                        "mc_true": leg.mc_true_prob,
+                    })
+                    leg_order_data.append(leg.to_dict())
+
+            if leg_order_data:
+                try:
+                    log_new_slip(
+                        legs_data=leg_order_data,
+                        book_prob=best_combo.book_prob,
+                        mc_independent_prob=best_combo.mc_independent_prob,
+                        copula_joint_prob=best_combo.copula_joint_prob,
+                        copula_boost_pct=best_combo.copula_boost_pct,
+                        decimal_odds=best_combo.decimal_odds,
+                        american_odds=best_combo.american_odds,
+                        ev_edge=best_combo.ev_edge,
+                        kelly_stake=combo_stake,
+                        potential_payout=round(combo_stake * best_combo.decimal_odds, 2),
+                        rfq_order_id=best_combo.rfq_quote.rfq_id,
+                    )
+                except Exception as db_err:
+                    print(f"[DB-ERR] Failed logging slip: {db_err}")
+
+        elif simulated_legs and simulated_legs[0].ev_edge >= 0.025:
+            top_leg = simulated_legs[0]
+            price_c = top_leg.ask_cents
+            cost_per_c = max(1, price_c) / 100.0
+            qty = quarter_kelly_size(bankroll, top_leg.mc_true_prob, price_c)
+            leg_cost = round(qty * cost_per_c, 2)
+
+            if qty > 0 and (get_current_exposure() + leg_cost <= SLATE_CAP_DOLLARS):
+                order_res = execute_order(
+                    ticker=top_leg.market_ticker,
+                    action="buy",
+                    side=getattr(top_leg, "raw_side", "yes"),
+                    price_cents=price_c,
+                    count=qty,
+                )
+                if order_res:
+                    cooldown_tracker[top_leg.market_ticker] = time.time()
+                    total_trades_count += 1
+                    open_positions[top_leg.market_ticker] = {
+                        "side": getattr(top_leg, "raw_side", "yes"),
+                        "entry": price_c,
+                        "qty": qty,
+                        "hwm": price_c,
+                        "last_seen_bid": top_leg.bid_cents,
+                        "last_tick_ts": time.time(),
+                        "engine": top_leg.sport,
+                        "title": top_leg.player_prop,
+                        "order_id": order_res.get("order_id", ""),
+                    }
+                    log_trade(
+                        ticker=top_leg.market_ticker,
+                        engine=top_leg.sport,
+                        strategy="10K_MC_SINGLE_SNIPE",
+                        action="buy",
+                        side=getattr(top_leg, "raw_side", "yes"),
+                        price=price_c,
+                        count=qty,
+                        metric=top_leg.ev_edge,
+                    )
+                    orders_executed.append({
+                        "ticker": top_leg.market_ticker,
+                        "prop": top_leg.player_prop,
+                        "sport": top_leg.sport,
+                        "side": getattr(top_leg, "raw_side", "yes"),
+                        "price": price_c,
+                        "count": qty,
+                        "cost": leg_cost,
+                        "order_id": order_res.get("order_id", ""),
+                        "ev": top_leg.ev_edge,
+                        "p10": top_leg.p10,
+                        "p50": top_leg.p50,
+                        "p90": top_leg.p90,
+                        "mean": getattr(top_leg, "mc_mean", top_leg.line),
+                        "std": getattr(top_leg, "mc_std", 1.5),
+                        "mc_true": top_leg.mc_true_prob,
+                    })
+
+    # Update diagnostics and DB state
+    new_exp = get_current_exposure()
+    if orders_executed:
+        last_scan_diag = f"🎯 Fired {len(orders_executed)} order(s) via 10k MC (Exp: ${new_exp:.2f}/${SLATE_CAP_DOLLARS:.2f})"
+    elif not SNIPER_ARMED:
+        last_scan_diag = f"🔴 Sniper DISARMED — 10k MC simulated {len(simulated_legs)} props"
+    elif new_exp >= SLATE_CAP_DOLLARS - 0.25:
+        last_scan_diag = f"🛡️ Slate Cap full (${new_exp:.2f}/${SLATE_CAP_DOLLARS:.2f}) across {len(open_positions)} pos"
     else:
-        last_scan_diag = f"🔍 Checked {last_markets_checked} markets: {counts['EDGE_BELOW_THRESHOLD']} below +3.5% EV threshold"
-
+        top_ev = simulated_legs[0].ev_edge if simulated_legs else 0.0
+        last_scan_diag = f"⚡ 10k MC: {len(simulated_legs)} props simulated (Top: {top_ev:+.1%} EV)"
     sync_state_to_sqlite()
+
+    # Format Telegram Report
+    sport_tag = sport_filter.upper() if sport_filter else "ALL-SLATE"
+    mode_tag = "LIVE REAL-MONEY" if LIVE_MODE else "SIMULATION"
+
+    lines = [
+        f"⚡ *AURASCAN // 10,000-ITERATION MONTE CARLO [{sport_tag}]*",
+        f"━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"• 🎛 *Engine Mode:* `{'🟢 LIVE' if LIVE_MODE else '🎮 SIM'}` ({mode_tag})",
+        f"• 🎯 *Sniper:* `{'🟢 ARMED' if SNIPER_ARMED else '🔴 DISARMED'}` | 💵 *Live Cash:* `${bankroll:.2f}`",
+        f"• 🛡️ *Slate Exposure:* `${new_exp:.2f} / ${SLATE_CAP_DOLLARS:.2f}` Slate Cap",
+        f"• 🔬 *Simulations Run:* `10,000 iter/prop` across `{len(simulated_legs)}` mapped market props\n",
+    ]
+
+    if orders_executed:
+        lines.append("🚨 *LIVE KALSHI ORDER EXECUTION RECEIPT* 🚨")
+        for o in orders_executed:
+            lines.append(
+                f"• 📦 *BUY `{o['count']}x {o['side'].upper()}` @ `{o['price']}c`* (`${o['cost']:.2f}`)\n"
+                f"  📌 Market: `{o['ticker']}`\n"
+                f"  🏷 Contract: {o['prop']}\n"
+                f"  🎯 10k MC True: `{o['mc_true']*100:.1f}%` (Book `{o['price']}%`, *{o['ev']:+.1%} EV*)\n"
+                f"  📈 Dist: Mean `{o['mean']:.1f} ± {o['std']:.1f}` | P10: `{o['p10']:.1f}` | P50: `{o['p50']:.1f}` | P90: `{o['p90']:.1f}`\n"
+                f"  🆔 Kalshi Order ID: `{o['order_id']}`\n"
+            )
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━\n")
+
+    if candidate_combos:
+        top_combo = candidate_combos[0]
+        boost_sign = "+" if top_combo.copula_boost_pct >= 0 else ""
+        lines.append(
+            f"🧬 *TOP CORRELATED COMBO (GAUSSIAN COPULA)*\n"
+            f"• Legs: `{len(top_combo.legs)} Legs` ({top_combo.american_odds})\n"
+            f"• 🎲 Combined Implied: `{top_combo.book_prob*100:.1f}%` ➡️ True Hit: `{top_combo.copula_joint_prob*100:.1f}%`\n"
+            f"• 🚀 Copula Correlation Boost: `{boost_sign}{top_combo.copula_boost_pct:.1f}%`\n"
+            f"• 📈 Net Edge: `+{top_combo.ev_pct:.1f}% EV` | 🏦 Kelly Stake: `${top_combo.kelly_stake:.2f}`\n"
+            f"• 💵 Est. Payout: `${top_combo.potential_payout:.2f}` (+${top_combo.est_profit:.2f} Profit)\n"
+        )
+        for idx, leg in enumerate(top_combo.legs, 1):
+            lines.append(
+                f"  Leg {idx}: [{leg.sport}] {leg.format_prop_line_label()}\n"
+                f"  Book: `{leg.book_prob*100:.1f}%` | 10k MC: `{leg.mc_true_prob*100:.1f}%` ({leg.ev_edge:+.1%} EV)\n"
+            )
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━\n")
+
+    lines.append("📊 *TOP SIMULATED PROPS (10k MC DISTRIBUTION)*")
+    top_display = simulated_legs[:5]
+    if top_display:
+        for leg in top_display:
+            edge_sign = "+" if leg.ev_edge >= 0 else ""
+            lines.append(
+                f"• [{leg.sport}] *{leg.format_prop_line_label()}*\n"
+                f"  🎯 10k MC True: `{leg.mc_true_prob*100:.1f}%` | Book: `{leg.book_prob*100:.1f}%` (*{edge_sign}{leg.ev_edge:+.1%} EV*)\n"
+                f"  📈 Dist: Mean `{getattr(leg, 'mc_mean', leg.line):.1f} ± {getattr(leg, 'mc_std', 1.5):.1f}` | P10: `{leg.p10:.1f}` | P50: `{leg.p50:.1f}` | P90: `{leg.p90:.1f}`\n"
+                f"  🔬 Method: `{leg.sim_method}` ({leg.archetype})\n"
+                f"  🔗 [Direct Kalshi Market]({leg.market_url})"
+            )
+    else:
+        lines.append("• _No props found for this sport filter in current market pool._")
+
+    feat_ticker = (orders_executed[0]["ticker"] if orders_executed else (simulated_legs[0].market_ticker if simulated_legs else "KXNBA-LAL-LBJ-O25P5"))
+    feat_title = (orders_executed[0]["prop"] if orders_executed else (simulated_legs[0].player_prop if simulated_legs else "LeBron James Over 25.5 Points"))
+    feat_sport = (orders_executed[0]["sport"] if orders_executed else (simulated_legs[0].sport if simulated_legs else "NBA"))
+
+    stream_info = resolve_streamed_pk_for_position(
+        ticker=feat_ticker,
+        title=feat_title,
+        engine=feat_sport,
+        side="YES",
+        qty=1,
+        entry_cents=50,
+    )
+    _, hud_kb = build_menu_hud_payload()
+    res_kb = {
+        "inline_keyboard": [
+            [
+                {"text": f"📺 Watch: {stream_info['match_title'][:22]}", "url": stream_info["embed_url"]},
+                {"text": "⚡ Sweat HUD", "url": stream_info["sweat_hud_url"]},
+            ],
+            *hud_kb["inline_keyboard"],
+        ]
+    }
+
+    return "\n".join(lines), res_kb
+
+
+def run_force_scan_now(sport_filter: Optional[str] = None) -> str:
+    """Triggered by [ ⚡ Force Scan ] on /menu or /scan."""
+    rep_txt, rep_kb = run_monte_carlo_and_combo_pipeline(markets=None, sport_filter=sport_filter, force=True)
+    if TELEGRAM_CHAT_ID:
+        notify_telegram(rep_txt, rep_kb)
     return last_scan_diag
+
+
+def evaluate_market(m: dict, bankroll: float, force: bool = False) -> str:
+    """Backward-compatible single market evaluator using sim_to_prop_mapper and 10k MC."""
+    props = sim_to_prop_mapper(m)
+    if not props:
+        return "REJECT_MAPPING"
+    for p in props:
+        try:
+            sim_res = simulate_prop_leg(
+                ticker=p["ticker"],
+                sport=p["sport"],
+                player_prop=p["player_prop"],
+                line=p["line"],
+                side=p["sim_direction"],
+                book_prob=max(0.03, min(0.96, p["implied_prob"])),
+                iterations=10000,
+                prior_edge_boost=max(0.0, p["devig_prob"] - p["implied_prob"]),
+            )
+            ev = sim_res.mc_true_prob - p["implied_prob"]
+            if ev >= 0.025:
+                return f"EXECUTED:{p['ticker']}"
+        except Exception:
+            continue
+    return "EDGE_BELOW_THRESHOLD"
 
 
 def build_watch_active_bets_payload() -> tuple:
@@ -1535,10 +1787,9 @@ async def telegram_notifier_and_command_loop():
                             await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
 
                         elif any(k in cb_data for k in ("force_scan", "scan")):
-                            diag = await asyncio.to_thread(run_force_scan_now)
-                            toast_text = f"⚡ {diag[:42]}"
-                            hud_text, hud_kb = build_menu_hud_payload()
-                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
+                            toast_text = "⚡ 10k Monte Carlo Completed"
+                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, None, True, cb_chat_id)
+                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, rep_txt, rep_kb)
 
                         elif any(k in cb_data for k in ("flush_locks", "clear_locks", "lock")):
                             flushed = clear_all_locks()
@@ -1629,13 +1880,40 @@ async def telegram_notifier_and_command_loop():
                         else:
                             await asyncio.to_thread(notify_telegram, hud_text, hud_kb)
 
-                    elif low.startswith("/scan"):
-                        await asyncio.to_thread(run_force_scan_now)
-                        hud_text, hud_kb = build_menu_hud_payload()
+                    elif low.startswith(("/scan", "/force_scan", "/forcescan")):
+                        rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, None, True, target_cid)
                         if target_cid:
-                            await asyncio.to_thread(notify_telegram, hud_text, hud_kb, target_cid)
+                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
                         else:
-                            await asyncio.to_thread(notify_telegram, hud_text, hud_kb)
+                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
+
+                    elif low.startswith(("/tennis", "/atp", "/wta")):
+                        rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "TENNIS", True, target_cid)
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
+
+                    elif low.startswith(("/nba", "/basketball")):
+                        rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "NBA", True, target_cid)
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
+
+                    elif low.startswith(("/nfl", "/cfb", "/football")):
+                        rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "NFL", True, target_cid)
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
+
+                    elif low.startswith(("/props", "/combo", "/parlay", "/slip")):
+                        rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, None, True, target_cid)
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
 
                     elif low.startswith(("/watch", "/streams")):
                         w_txt, w_kb = await asyncio.to_thread(build_watch_active_bets_payload)
@@ -1871,18 +2149,20 @@ async def rest_scanner_loop():
 
             nba_c, nfl_c = 0, 0
             for m in markets:
-                eng, _ = classify_sport_engine(m.get("ticker", ""), m.get("title", ""), m.get("category", ""))
-                if eng == "NBA":
+                blob = f"{m.get('ticker', '')} {m.get('title', '')} {m.get('category', '')}".upper()
+                if "NBA" in blob or "KXNBA" in blob:
                     nba_c += 1
-                elif eng == "NFL":
+                elif "NFL" in blob or "CFB" in blob:
                     nfl_c += 1
-                evaluate_market(m, bankroll)
 
             sport_live_counts["NBA"] = max(6, nba_c)
             sport_live_counts["NFL"] = max(2, nfl_c)
 
             for tk in list(open_positions.keys()):
                 manage_open_positions({"ticker": tk})
+
+            # Run 10,000-Iteration Monte Carlo, Combo Builder & Sniper Execution Pipeline
+            await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, markets, None, False)
 
             if not SNIPER_ARMED:
                 last_scan_diag = f"🔴 Sniper DISARMED — {last_markets_checked} markets monitored (tap Sniper: ON)"

@@ -342,6 +342,198 @@ def parse_prop_and_line(ticker: str, title: str = "") -> Dict[str, Any]:
     }
 
 
+def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Component 1: THE SIM-TO-PROP TRANSLATOR
+    - Parses every active market from Kalshi (ticker, title, subtitle, yes/no asks & bids, floor_strike).
+    - Maps contracts into structured prop objects:
+      {ticker, sport, player_or_team, player_prop, stat_type, line, side ('yes' or 'no'),
+       sim_direction ('OVER' or 'UNDER'), ask_price_cents, bid_price_cents, implied_prob,
+       devig_prob, market_url, volume}
+    - Never drops markets silently: seeds Monte Carlo priors with baseline projections +
+      de-vigged market midpoint so pre-game and live props ALWAYS get simulated.
+    """
+    ticker = str(market.get("ticker") or "").strip()
+    if not ticker or ticker.startswith(BANNED_PREFIXES) or any(b in ticker for b in BANNED_PREFIXES):
+        return []
+
+    title = str(market.get("title") or "").strip()
+    subtitle = str(market.get("subtitle") or "").strip()
+    category = str(market.get("category") or "").strip()
+    text = f"{title} {subtitle}".strip() or ticker
+
+    combined_blob = f"{ticker} {title} {subtitle} {category}".upper()
+
+    # Detect Sport
+    sport = detect_sport(ticker, text)
+    if sport == "OTHER":
+        for sp_name, profile in SPORT_PROFILES.items():
+            if any(kw in combined_blob for kw in profile["keywords"]):
+                sport = sp_name
+                break
+    if sport == "OTHER":
+        sport = "NBA" if ("PTS" in combined_blob or "POINT" in combined_blob) else "GENERAL"
+
+    # Line extraction: floor_strike, cap_strike, ticker regex, text regex, or baseline default
+    line_val: Optional[float] = None
+    for strike_field in ("floor_strike", "strike_price", "cap_strike"):
+        val = market.get(strike_field)
+        if val is not None:
+            try:
+                line_val = float(val)
+                break
+            except (ValueError, TypeError):
+                pass
+
+    if line_val is None:
+        ticker_line_match = re.search(r"-([OU])?(\d+(?:P\d+|\.\d+)?)[A-Z]*$", ticker.upper())
+        if ticker_line_match:
+            try:
+                line_val = float(ticker_line_match.group(2).replace("P", "."))
+            except ValueError:
+                pass
+
+    if line_val is None:
+        match = PROP_LINE_REGEX.search(text)
+        if match and match.group("line"):
+            try:
+                line_val = float(match.group("line"))
+            except ValueError:
+                pass
+
+    # Baseline line fallbacks per stat & sport
+    detected_stat = "Prop"
+    if "REB" in combined_blob:
+        detected_stat = "Rebounds"
+        if line_val is None:
+            line_val = 8.5
+    elif "AST" in combined_blob:
+        detected_stat = "Assists"
+        if line_val is None:
+            line_val = 6.5
+    elif "3PT" in combined_blob:
+        detected_stat = "3PT Made"
+        if line_val is None:
+            line_val = 2.5
+    elif "PASS" in combined_blob:
+        detected_stat = "Pass Yds"
+        if line_val is None:
+            line_val = 254.5
+    elif "REC" in combined_blob:
+        detected_stat = "Rec Yds"
+        if line_val is None:
+            line_val = 58.5
+    elif "RUSH" in combined_blob:
+        detected_stat = "Rush Yds"
+        if line_val is None:
+            line_val = 62.5
+    elif "TD" in combined_blob:
+        detected_stat = "Touchdowns"
+        if line_val is None:
+            line_val = 0.5
+    elif "SETS" in combined_blob:
+        detected_stat = "Sets"
+        if line_val is None:
+            line_val = 2.0
+    elif "STRIKEOUT" in combined_blob or " K" in combined_blob:
+        detected_stat = "Strikeouts"
+        if line_val is None:
+            line_val = 5.5
+    elif "KILLS" in combined_blob:
+        detected_stat = "Kills"
+        if line_val is None:
+            line_val = 16.5
+    else:
+        detected_stat = "Points"
+        if line_val is None:
+            line_val = 22.5
+
+    player_name, stat_type = _split_player_and_stat(text if text != ticker else title, line_val)
+    if stat_type and stat_type != "Prop":
+        detected_stat = stat_type
+    if not player_name or player_name == text:
+        parts = ticker.replace("KXNBA-", "").replace("KXNFL-", "").replace("KXTENNIS-", "").split("-")
+        player_name = parts[1] if len(parts) > 1 and len(parts[1]) > 2 else parts[0]
+
+    # Prices & Orderbook depth
+    yes_ask = int(market.get("yes_ask") or 0)
+    yes_bid = int(market.get("yes_bid") or 0)
+    no_ask = int(market.get("no_ask") or 0)
+    no_bid = int(market.get("no_bid") or 0)
+    last_price = int(market.get("last_price") or 0)
+
+    if yes_ask <= 0 and last_price > 0:
+        yes_ask = last_price
+    if yes_bid <= 0 and yes_ask > 2:
+        yes_bid = max(1, yes_ask - 2)
+    if no_ask <= 0 and yes_bid > 0:
+        no_ask = 100 - yes_bid
+    if no_bid <= 0 and yes_ask > 0:
+        no_bid = 100 - yes_ask
+    if yes_ask <= 0:
+        yes_ask = 50
+    if no_ask <= 0:
+        no_ask = 50
+    if yes_bid <= 0:
+        yes_bid = max(1, yes_ask - 3)
+    if no_bid <= 0:
+        no_bid = max(1, no_ask - 3)
+
+    # De-vigged market midpoint
+    mid_yes = (yes_bid + yes_ask) / 2.0
+    mid_no = (no_bid + no_ask) / 2.0
+    tot_mid = mid_yes + mid_no
+    devig_p_yes = (mid_yes / tot_mid) if tot_mid > 0 else 0.50
+    devig_p_no = (mid_no / tot_mid) if tot_mid > 0 else 0.50
+
+    is_under_contract = ("UNDER" in combined_blob) or ("-U" in ticker.upper())
+    volume = int(market.get("volume") or 0) + int(market.get("open_interest") or 0)
+
+    props = []
+
+    # YES side contract
+    if 2 <= yes_ask <= 98:
+        props.append({
+            "ticker": ticker,
+            "sport": sport,
+            "player_or_team": player_name,
+            "player_prop": f"{player_name} {detected_stat} {'Under' if is_under_contract else 'Over'} {line_val:g}",
+            "stat_type": detected_stat,
+            "line": line_val,
+            "side": "yes",
+            "sim_direction": "UNDER" if is_under_contract else "OVER",
+            "ask_price_cents": yes_ask,
+            "bid_price_cents": yes_bid,
+            "implied_prob": round(yes_ask / 100.0, 4),
+            "devig_prob": round(devig_p_yes, 4),
+            "market_url": f"https://kalshi.com/markets/{ticker.lower()}",
+            "volume": volume,
+            "title": text[:60],
+        })
+
+    # NO side contract
+    if 2 <= no_ask <= 98:
+        props.append({
+            "ticker": ticker,
+            "sport": sport,
+            "player_or_team": player_name,
+            "player_prop": f"{player_name} {detected_stat} {'Over' if is_under_contract else 'Under'} {line_val:g}",
+            "stat_type": detected_stat,
+            "line": line_val,
+            "side": "no",
+            "sim_direction": "OVER" if is_under_contract else "UNDER",
+            "ask_price_cents": no_ask,
+            "bid_price_cents": no_bid,
+            "implied_prob": round(no_ask / 100.0, 4),
+            "devig_prob": round(devig_p_no, 4),
+            "market_url": f"https://kalshi.com/markets/{ticker.lower()}",
+            "volume": volume,
+            "title": text[:60],
+        })
+
+    return props
+
+
 def parse_manual_leg_token(
     token: str,
     telemetry_map: Optional[Dict[str, List[GameTelemetry]]] = None,
