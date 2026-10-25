@@ -894,10 +894,13 @@ async def build_sim_text(query: str) -> str:
             bankroll_usd=bal,
             sniper_on=bool(rt.get("sniper", True)),
             live_mode=(rt.get("mode") == "LIVE"),
-            existing_ticker=leg.market_ticker if not leg.market_ticker.startswith("MANUAL-") else None,
+            existing_ticker=leg.market_ticker if (leg.market_ticker.startswith("KX") and len(leg.market_ticker) >= 10) else None,
         )
         if smart_exec_res:
             st = smart_exec_res.get("status")
+            tk = smart_exec_res.get("ticker", leg.market_ticker)
+            if tk and tk.startswith("KX"):
+                leg.market_ticker = tk
             tk = smart_exec_res.get("ticker", leg.market_ticker)
             if st in ("PLACED", "SIM_QUEUED"):
                 _COOLDOWN_TRACKER[tk] = time.time()

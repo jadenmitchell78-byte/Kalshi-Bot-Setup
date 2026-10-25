@@ -1590,30 +1590,6 @@ def execute_order(ticker: str, action: str, side: str, price_cents: int, count: 
 
     attempts = [
         (
-            "/trade-api/v2/portfolio/orders",
-            {
-                "ticker": ticker,
-                "action": "buy" if norm_action == "buy" else "sell",
-                "type": "limit",
-                "side": "yes" if is_yes else "no",
-                "count": max(1, int(count)),
-                "yes_price": price_cents if is_yes else (100 - price_cents),
-                "client_order_id": client_oid,
-            },
-        ),
-        (
-            "/trade-api/v2/portfolio/orders",
-            {
-                "ticker": ticker,
-                "action": "buy" if norm_action == "buy" else "sell",
-                "type": "limit",
-                "side": "yes" if is_yes else "no",
-                "count": max(1, int(count)),
-                "price": price_cents if is_yes else (100 - price_cents),
-                "client_order_id": client_oid,
-            },
-        ),
-        (
             "/trade-api/v2/portfolio/events/orders",
             {
                 "ticker": ticker,
@@ -1624,6 +1600,18 @@ def execute_order(ticker: str, action: str, side: str, price_cents: int, count: 
                 "time_in_force": "good_till_canceled",
                 "client_order_id": client_oid,
                 "self_trade_prevention_type": "taker_at_cross",
+            },
+        ),
+        (
+            "/trade-api/v2/portfolio/orders",
+            {
+                "ticker": ticker,
+                "action": "buy" if norm_action == "buy" else "sell",
+                "type": "limit",
+                "side": "yes" if is_yes else "no",
+                "count": max(1, int(count)),
+                "yes_price": price_cents if is_yes else (100 - price_cents),
+                "client_order_id": client_oid,
             },
         ),
     ]
@@ -2396,11 +2384,14 @@ def build_sim_text(query: str = "") -> str:
             bankroll_usd=live_kalshi_balance if LIVE_MODE else 12.52,
             sniper_on=SNIPER_ARMED,
             live_mode=LIVE_MODE,
-            existing_ticker=leg.market_ticker if not leg.market_ticker.startswith("MANUAL-") else None,
+            existing_ticker=leg.market_ticker if (leg.market_ticker.startswith("KX") and len(leg.market_ticker) >= 10) else None,
         )
         if smart_exec_res:
             st = smart_exec_res.get("status")
             tk = smart_exec_res.get("ticker", leg.market_ticker)
+            if tk and tk.startswith("KX"):
+                leg.market_ticker = tk
+                leg.market_url = f"https://kalshi.com/markets/{tk.lower()}"
             if st in ("PLACED", "SIM_QUEUED"):
                 cooldown_tracker[tk] = time.time()
                 if st == "PLACED":
