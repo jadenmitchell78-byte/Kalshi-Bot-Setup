@@ -2515,8 +2515,6 @@ def build_sim_text(query: str = "") -> str:
         f"• 🔗 [Direct Kalshi Market]({leg.market_url})"
         + smart_status_block
     )
-        + smart_status_block
-    )
 
 
 def build_audit_report() -> str:

@@ -34,7 +34,11 @@ _WEB_CACHE: Dict[str, Any] = {
     "streams_cache": {},
 }
 
-STREAMED_PK_BASE = "https://streamed.pk/api"
+STREAMED_MIRRORS = [
+    "https://streamed.su/api",
+    "https://streamed.st/api",
+    "https://streamed.pk/api",
+]
 SPORT_TO_STREAMED_CAT = {
     "NBA": "basketball",
     "WNBA": "basketball",
@@ -47,7 +51,7 @@ SPORT_TO_STREAMED_CAT = {
 
 async def fetch_on_demand_stream(sport: str, query: str = "") -> Dict[str, Any]:
     """
-    Phase 3 On-Demand Stream Resolver (streamed.pk API):
+    Phase 3 On-Demand Stream Resolver (streamed.su / streamed.st / streamed.pk):
     Fetches live match streams ONLY when a user clicks 'Watch Live' on a specific match/slip,
     preventing global page lag and keeping video state isolated from live-wire odds polling.
     """
@@ -57,14 +61,17 @@ async def fetch_on_demand_stream(sport: str, query: str = "") -> Dict[str, Any]:
     if cached:
         return cached
 
-    matches_url = f"{STREAMED_PK_BASE}/matches/{cat}"
     q_tokens = [t.lower() for t in query.replace("—", " ").split() if len(t) >= 3]
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                matches_url, timeout=aiohttp.ClientTimeout(total=4)
-            ) as resp:
-                if resp.status == 200:
+
+    for base_url in STREAMED_MIRRORS:
+        matches_url = f"{base_url}/matches/{cat}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    matches_url, timeout=aiohttp.ClientTimeout(total=4)
+                ) as resp:
+                    if resp.status != 200:
+                        continue
                     matches = await resp.json()
                     chosen = None
                     for m in matches or []:
@@ -80,7 +87,7 @@ async def fetch_on_demand_stream(sport: str, query: str = "") -> Dict[str, Any]:
                         if sources:
                             src_name = sources[0].get("source")
                             src_id = sources[0].get("id")
-                            stream_url = f"{STREAMED_PK_BASE}/stream/{src_name}/{src_id}"
+                            stream_url = f"{base_url}/stream/{src_name}/{src_id}"
                             async with session.get(
                                 stream_url, timeout=aiohttp.ClientTimeout(total=4)
                             ) as s_resp:
@@ -97,7 +104,6 @@ async def fetch_on_demand_stream(sport: str, query: str = "") -> Dict[str, Any]:
                                             for st in streams
                                             if st.get("embedUrl")
                                         ]
-                                        # Prefer stream 2/3 for delta as stream 1 is frequently an uninitialized manifest
                                         chosen_st = valid_streams[0] if valid_streams else None
                                         if src_name == "delta" and len(valid_streams) > 1:
                                             chosen_st = valid_streams[1]
@@ -113,11 +119,11 @@ async def fetch_on_demand_stream(sport: str, query: str = "") -> Dict[str, Any]:
                                             }
                                             _WEB_CACHE["streams_cache"][cache_key] = result
                                             return result
-    except Exception as exc:
-        logger.debug("streamed.pk lookup fallback for %s (%s): %s", sport, query, exc)
+        except Exception as exc:
+            logger.debug("Mirror %s lookup fallback for %s (%s): %s", base_url, sport, query, exc)
+            continue
 
-    # Resilient fallback embed url from streamed.pk category directory
-    fallback_embed = f"https://streamed.pk/watch/{cat}"
+    fallback_embed = f"https://streamed.su/watch/{cat}"
     return {
         "ok": True,
         "title": f"{sport} Live Feed • {query or 'Main Broadcast'}",
