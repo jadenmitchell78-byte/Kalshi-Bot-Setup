@@ -9,13 +9,227 @@ Smart Placing Engine for Kalshi V2:
 """
 
 import os
+import re
 import time
 import uuid
 import json
 import base64
 import requests
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+# Clean Stat Alias Mapping (Strips stat words out of player names!)
+STAT_ALIASES = {
+    "3PTS": "3PM", "3PT": "3PM", "3PM": "3PM", "THREES": "3PM", "3S": "3PM",
+    "PTS": "PTS", "POINTS": "PTS", "POINT": "PTS",
+    "REB": "REB", "REBS": "REB", "REBOUNDS": "REB",
+    "AST": "AST", "ASTS": "AST", "ASSISTS": "AST",
+    "PRA": "PRA", "PR": "PR", "PA": "PA", "RA": "RA",
+    "K": "K", "STRIKEOUTS": "K", "SOG": "SOG",
+    "REC_YDS": "REC_YDS", "RUSH_YDS": "RUSH_YDS", "PASS_YDS": "PASS_YDS",
+    "TD": "TD", "TDS": "TD", "TOUCHDOWNS": "TD", "TOUCHDOWN": "TD",
+}
+
+# Real Active Teams for Sunday Oct 25, 2026 Slate
+TODAY_ACTIVE_NBA_TEAMS = {"LAL", "UTA", "IND", "BKN", "ORL", "NYK", "LAC", "OKC", "TOR", "MIN", "DET", "PHI", "MEM", "SAC"}
+
+TEAM_SCHEDULE_NOTES = {
+    "MIA": "Miami Heat are off today (Next game: Mon Oct 26 vs DAL)",
+    "BOS": "Boston Celtics are off today (Next game: Mon Oct 26 vs MIL)",
+    "GSW": "Golden State Warriors are off today (Next game: Mon Oct 26 vs PHX)",
+    "DEN": "Denver Nuggets are off today (Next game: Mon Oct 26 @ NOP)",
+    "HOU": "Houston Rockets are off today (Next game: Mon Oct 26 vs ATL)",
+    "SAS": "San Antonio Spurs are off today (Next game: Mon Oct 26 vs CHI)",
+    "WAS": "Washington Wizards are off today (Next game: Mon Oct 26 @ CHA)",
+    "CHI": "Chicago Bulls are off today (Next game: Mon Oct 26 @ SAS)",
+    "ATL": "Atlanta Hawks are off today (Next game: Mon Oct 26 @ HOU)",
+    "NOP": "New Orleans Pelicans are off today (Next game: Mon Oct 26 vs DEN)",
+    "CLE": "Cleveland Cavaliers are off today (Next game: Mon Oct 26 @ NYK)",
+    "MIL": "Milwaukee Bucks are off today (Next game: Mon Oct 26 @ BOS)",
+    "PHX": "Phoenix Suns are off today (Next game: Mon Oct 26 @ GSW)",
+    "DAL": "Dallas Mavericks are off today (Next game: Mon Oct 26 @ MIA)",
+}
+
+PLAYER_CANONICAL_MAP = {
+    "TYLER HERO": ("Tyler Herro", "MIA", "MOVEMENT_OFF_SCREEN_SHOOTER"),
+    "TYLER HERRO": ("Tyler Herro", "MIA", "MOVEMENT_OFF_SCREEN_SHOOTER"),
+    "HERO": ("Tyler Herro", "MIA", "MOVEMENT_OFF_SCREEN_SHOOTER"),
+    "HERRO": ("Tyler Herro", "MIA", "MOVEMENT_OFF_SCREEN_SHOOTER"),
+    "J RANDLE": ("Julius Randle", "MIN", "VOLUME_SCORER"),
+    "JULIUS RANDLE": ("Julius Randle", "MIN", "VOLUME_SCORER"),
+    "RANDLE": ("Julius Randle", "MIN", "VOLUME_SCORER"),
+    "A EDWARDS": ("Anthony Edwards", "MIN", "SLASHING_RIM_PRESSURE"),
+    "ANTHONY EDWARDS": ("Anthony Edwards", "MIN", "SLASHING_RIM_PRESSURE"),
+    "EDWARDS": ("Anthony Edwards", "MIN", "SLASHING_RIM_PRESSURE"),
+    "ANT": ("Anthony Edwards", "MIN", "SLASHING_RIM_PRESSURE"),
+    "L DONCIC": ("Luka Doncic", "DAL", "HELIOCENTRIC_PNR_HANDLER"),
+    "LUKA DONCIC": ("Luka Doncic", "DAL", "HELIOCENTRIC_PNR_HANDLER"),
+    "DONCIC": ("Luka Doncic", "DAL", "HELIOCENTRIC_PNR_HANDLER"),
+    "S GILGEOUS-ALEXANDER": ("Shai Gilgeous-Alexander", "OKC", "SLASHING_RIM_PRESSURE"),
+    "SHAI GILGEOUS-ALEXANDER": ("Shai Gilgeous-Alexander", "OKC", "SLASHING_RIM_PRESSURE"),
+    "SGA": ("Shai Gilgeous-Alexander", "OKC", "SLASHING_RIM_PRESSURE"),
+    "SHAI": ("Shai Gilgeous-Alexander", "OKC", "SLASHING_RIM_PRESSURE"),
+    "J BRUNSON": ("Jalen Brunson", "NYK", "HELIOCENTRIC_PNR_HANDLER"),
+    "JALEN BRUNSON": ("Jalen Brunson", "NYK", "HELIOCENTRIC_PNR_HANDLER"),
+    "BRUNSON": ("Jalen Brunson", "NYK", "HELIOCENTRIC_PNR_HANDLER"),
+    "C CUNNINGHAM": ("Cade Cunningham", "DET", "HELIOCENTRIC_PNR_HANDLER"),
+    "CADE CUNNINGHAM": ("Cade Cunningham", "DET", "HELIOCENTRIC_PNR_HANDLER"),
+    "CADE": ("Cade Cunningham", "DET", "HELIOCENTRIC_PNR_HANDLER"),
+    "T MAXEY": ("Tyrese Maxey", "PHI", "MOVEMENT_OFF_SCREEN_SHOOTER"),
+    "TYRESE MAXEY": ("Tyrese Maxey", "PHI", "MOVEMENT_OFF_SCREEN_SHOOTER"),
+    "MAXEY": ("Tyrese Maxey", "PHI", "MOVEMENT_OFF_SCREEN_SHOOTER"),
+    "LEBRON JAMES": ("LeBron James", "LAL", "HELIOCENTRIC_PNR_HANDLER"),
+    "LEBRON": ("LeBron James", "LAL", "HELIOCENTRIC_PNR_HANDLER"),
+    "LBJ": ("LeBron James", "LAL", "HELIOCENTRIC_PNR_HANDLER"),
+    "ANTHONY DAVIS": ("Anthony Davis", "LAL", "GLASS_CLEANER"),
+    "AD": ("Anthony Davis", "LAL", "GLASS_CLEANER"),
+    "STEPHEN CURRY": ("Stephen Curry", "GSW", "MOVEMENT_OFF_SCREEN_SHOOTER"),
+    "STEPH CURRY": ("Stephen Curry", "GSW", "MOVEMENT_OFF_SCREEN_SHOOTER"),
+    "CURRY": ("Stephen Curry", "GSW", "MOVEMENT_OFF_SCREEN_SHOOTER"),
+    "NIKOLA JOKIC": ("Nikola Jokic", "DEN", "HELIOCENTRIC_PNR_HANDLER"),
+    "JOKIC": ("Nikola Jokic", "DEN", "HELIOCENTRIC_PNR_HANDLER"),
+    "VICTOR WEMBANYAMA": ("Victor Wembanyama", "SAS", "GLASS_CLEANER"),
+    "WEMBY": ("Victor Wembanyama", "SAS", "GLASS_CLEANER"),
+    "GIANNIS": ("Giannis Antetokounmpo", "MIL", "VOLUME_SCORER"),
+    "GIANNIS ANTETOKOUNMPO": ("Giannis Antetokounmpo", "MIL", "VOLUME_SCORER"),
+    "PATRICK MAHOMES": ("Patrick Mahomes", "KC", "DUAL_THREAT_QB"),
+    "MAHOMES": ("Patrick Mahomes", "KC", "DUAL_THREAT_QB"),
+    "RASHEE RICE": ("Rashee Rice", "KC", "ALPHA_TARGET_WR"),
+    "RICE": ("Rashee Rice", "KC", "ALPHA_TARGET_WR"),
+}
+
+
+def parse_prop_command(raw_text: str, default_sport: str = "NBA") -> Dict[str, Any]:
+    text = raw_text.strip()
+    if ":" in text:
+        left, right = text.split(":", 1)
+        if left.upper() in ("NBA", "NFL", "MLB", "NHL", "TENNIS", "WNBA", "ESPORTS"):
+            default_sport = left.upper()
+            text = right.strip()
+
+    tokens = text.split()
+    if not tokens:
+        return {
+            "sport": default_sport.upper(),
+            "player": "LeBron James",
+            "team": "LAL",
+            "stat": "PTS",
+            "line": 25.5,
+            "side": "OVER",
+            "archetype": "HELIOCENTRIC_PNR_HANDLER",
+        }
+
+    cmd = tokens[0].lstrip("/").upper()
+    sport = default_sport.upper()
+    idx = 0
+    if cmd in ("NBA", "NFL", "MLB", "NHL", "TENNIS", "WNBA", "ESPORTS"):
+        sport = cmd
+        idx = 1
+    elif len(tokens) > 1 and tokens[0].lstrip("/").upper() in ("SIM", "PROPS", "PROP", "CHECK", "BET") and tokens[1].upper() in ("NBA", "NFL", "MLB", "NHL", "TENNIS", "WNBA", "ESPORTS"):
+        sport = tokens[1].upper()
+        idx = 2
+    elif cmd in ("SIM", "PROPS", "PROP"):
+        idx = 1
+
+    remaining = tokens[idx:]
+    if not remaining:
+        return {
+            "sport": sport,
+            "player": "LeBron James",
+            "team": "LAL",
+            "stat": "PTS",
+            "line": 25.5,
+            "side": "OVER",
+            "archetype": "HELIOCENTRIC_PNR_HANDLER",
+        }
+
+    # Side check at start
+    side = "OVER"
+    if remaining[0].upper() in ("OVER", "UNDER", "O", "U"):
+        side = "UNDER" if remaining[0].upper() in ("UNDER", "U") else "OVER"
+        remaining.pop(0)
+
+    # Line check at end (e.g. 3.5 or 21.5)
+    line = None
+    if remaining and re.match(r"^\d+(\.\d+)?$", remaining[-1]):
+        line = float(remaining.pop(-1))
+
+    # Stat check at end
+    stat = "PTS"
+    if remaining:
+        last_tok = remaining[-1].upper()
+        if last_tok in STAT_ALIASES:
+            stat = STAT_ALIASES[remaining.pop(-1).upper()]
+        elif any(last_tok.endswith(s) for s in ("3PTS", "3PT", "3PM", "PTS", "REB", "AST")):
+            for s in ("3PTS", "3PT", "3PM", "PTS", "REB", "AST"):
+                if last_tok.endswith(s):
+                    stat = STAT_ALIASES.get(s, "PTS")
+                    pfx = last_tok[:-len(s)]
+                    if pfx.isdigit() and line is None:
+                        line = float(pfx)
+                    remaining.pop(-1)
+                    break
+
+    # If line was right before the stat token
+    if remaining and re.match(r"^[OU]?\d+(\.\d+)?$", remaining[-1].upper()):
+        tok = remaining.pop(-1).upper()
+        if tok.startswith("U"):
+            side = "UNDER"
+            tok = tok[1:]
+        elif tok.startswith("O"):
+            side = "OVER"
+            tok = tok[1:]
+        try:
+            if line is None:
+                line = float(tok)
+        except Exception:
+            pass
+
+    # Side check at end
+    if remaining and remaining[-1].upper() in ("OVER", "UNDER", "O", "U"):
+        side = "UNDER" if remaining[-1].upper() in ("UNDER", "U") else "OVER"
+        remaining.pop(-1)
+
+    raw_player = " ".join(remaining).strip().upper()
+
+    # Fuzzy match player name
+    if raw_player in PLAYER_CANONICAL_MAP:
+        canonical_name, team, archetype = PLAYER_CANONICAL_MAP[raw_player]
+    else:
+        best_key, best_ratio = None, 0.0
+        for k in PLAYER_CANONICAL_MAP:
+            r = SequenceMatcher(None, raw_player, k).ratio()
+            if r > best_ratio:
+                best_key, best_ratio = k, r
+        if best_key and best_ratio >= 0.78:
+            canonical_name, team, archetype = PLAYER_CANONICAL_MAP[best_key]
+        else:
+            canonical_name = raw_player.title()
+            team = "UNK"
+            archetype = "MOVEMENT_OFF_SCREEN_SHOOTER" if stat in ("3PM", "3PT", "3PTS") else "VOLUME_SCORER"
+
+    if line is None:
+        if stat in ("3PM", "3PT", "3PTS"):
+            line = 3.5 if canonical_name in ("Tyler Herro", "Stephen Curry") else 2.5
+        elif stat in ("REB", "REBOUNDS"):
+            line = 10.5 if archetype == "GLASS_CLEANER" else 5.5
+        elif stat in ("AST", "ASSISTS"):
+            line = 8.5 if "HELIOCENTRIC" in archetype else 4.5
+        elif stat == "PRA":
+            line = 34.5
+        else:
+            line = 21.5
+
+    return {
+        "sport": sport,
+        "player": canonical_name,
+        "team": team,
+        "stat": stat,
+        "line": line,
+        "side": side,
+        "archetype": archetype,
+    }
 
 try:
     from cryptography.hazmat.primitives import hashes, serialization
@@ -240,10 +454,9 @@ class KalshiSmartPlacer:
         if not candidates:
             candidates = CURATED_FALLBACK_MARKETS
 
-        # Clean tokens from player name (e.g. "Julius Randle" -> "RANDLE", "JULIUS")
-        clean_name = player_name.upper().replace("-", " ").replace(".", " ")
-        tokens = [t for t in clean_name.split() if len(t) >= 3 and t not in ("OVER", "UNDER", "PTS", "REB", "AST", "NBA")]
-        last_name = tokens[-1] if tokens else player_name.strip().split()[-1].upper()
+        # Clean stat words out of player_name so 3pts/pts/reb never pollute last name!
+        clean_words = [w for w in player_name.upper().replace("-", " ").replace(".", " ").split() if w not in STAT_ALIASES and w not in ("OVER", "UNDER", "O", "U", "PTS", "REB", "AST", "PRA", "3PT", "3PTS", "3PM")]
+        last_name = clean_words[-1] if clean_words else player_name.upper().split()[-1]
 
         best_match = None
         smallest_line_diff = 999.0
@@ -255,13 +468,16 @@ class KalshiSmartPlacer:
         elif last_name in ("LBJ", "LEBRON", "JAMES"):
             lookup_names = ["LEBRON", "LBJ", "JAMES"]
         elif last_name in ("AD", "DAVIS"):
-            lookup_names = ["DAVIS", " AD "]
+            lookup_names = ["DAVIS", "AD"]
         elif last_name in ("WEMBY", "WEMBANYAMA"):
             lookup_names = ["WEMBANYAMA", "WEMBY"]
 
         for m in candidates:
             searchable = f"{m.get('ticker', '')} {m.get('title', '')} {m.get('subtitle', '')}".upper()
-            if not any(n in searchable for n in lookup_names):
+            words_in_market = re.findall(r"[A-Z]+", searchable)
+            exact_hit = any(n in searchable for n in lookup_names)
+            fuzzy_hit = any(SequenceMatcher(None, n, w).ratio() >= 0.80 for n in lookup_names for w in words_in_market)
+            if not exact_hit and not fuzzy_hit:
                 continue
 
             # Extract threshold number if present in floor_strike, strike_price, cap_strike, or ticker
@@ -381,6 +597,31 @@ class KalshiSmartPlacer:
         stake_usd = max(1.00, min(eff_bankroll * 0.40, round(eff_bankroll * max(0.08, raw_kelly) * kelly_fraction, 2)))
         contracts = max(1, min(10, int((stake_usd * 100) // max(1, limit_cents))))
         cost_usd = round((contracts * limit_cents) / 100.0, 2)
+
+        # Check Live Slate Schedule Gate for NBA
+        sched_alert = None
+        if sport.upper() == "NBA":
+            player_clean = player_name.upper().strip()
+            team_detected = None
+            for k, (c_name, t, _arch) in PLAYER_CANONICAL_MAP.items():
+                if k == player_clean or SequenceMatcher(None, player_clean, k).ratio() >= 0.80 or k in player_clean:
+                    team_detected = t
+                    break
+            if team_detected and team_detected in TEAM_SCHEDULE_NOTES and team_detected not in TODAY_ACTIVE_NBA_TEAMS:
+                sched_alert = TEAM_SCHEDULE_NOTES[team_detected]
+
+        if sched_alert:
+            return {
+                "status": "SIM_QUEUED",
+                "ticker": ticker,
+                "side": kalshi_side.upper(),
+                "contracts": contracts,
+                "limit_cents": limit_cents,
+                "cost_usd": cost_usd,
+                "style": "OFF_SLATE_PAPER",
+                "sched_alert": sched_alert,
+                "note": f"⚠️ {sched_alert} — live Kalshi order suppressed, paper simulated.",
+            }
 
         if not (sniper_on and live_mode):
             return {

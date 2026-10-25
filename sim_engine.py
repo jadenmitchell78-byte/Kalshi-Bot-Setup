@@ -68,6 +68,18 @@ SPORT_ARCHETYPES: Dict[str, Dict[str, Dict[str, Any]]] = {
             "blowout_sensitivity": 0.65,
             "clutch_boost": 1.05,
         },
+        "MOVEMENT_OFF_SCREEN_SHOOTER": {
+            "keywords": (
+                "HERRO", "TYLER HERRO", "HERO", "TYLER HERO", "CURRY", "STEPHEN CURRY", "STEPH CURRY",
+                "KLAY", "THOMPSON", "BEASLEY", "HEILD", "BOGDANOVIC", "ROBINSON", "DUNCAN ROBINSON",
+                "3PT", "3-PT", "THREES", "3PM", "3PTS", "3PT MADE"
+            ),
+            "sim_method": "NBA Movement-Shooter Overdispersed NB Sim",
+            "dist_family": "NEG_BINOMIAL",
+            "usage_cv": 0.28,
+            "blowout_sensitivity": 0.55,
+            "clutch_boost": 1.05,
+        },
         "STRETCH_BIG": {
             "keywords": (
                 "TOWNS", "KAT", "CHET", "HOLMGREN", "PORZINGIS", "MARKKANEN", "BROOK LOPEZ",
@@ -382,7 +394,7 @@ NBA_PLAYER_REGISTRY: Dict[str, Dict[str, Any]] = {
     "TYLER HERRO": {
         "aliases": ("HERRO", "TYLER HERRO", "T. HERRO", "HERO", "TYLER HERO"),
         "team": "MIA",
-        "archetype": "VOLUME_SCORER",
+        "archetype": "MOVEMENT_OFF_SCREEN_SHOOTER",
         "proj_mins": 34.5,
         "baselines": {"PTS": 22.8, "REB": 5.4, "AST": 4.5, "PRA": 32.7, "3PT": 3.3, "3PM": 3.3},
     },
@@ -844,6 +856,8 @@ def classify_player_archetype(sport: str, prop_text: str, line: float) -> Tuple[
         reg_player = lookup_nba_player_baseline(prop_text)
         if reg_player and reg_player.get("archetype"):
             arch_name = reg_player["archetype"]
+            if any(k in blob for k in ("3PT", "3-PT", "3PM", "3PTS", "THREES")):
+                arch_name = "MOVEMENT_OFF_SCREEN_SHOOTER"
             cfg = SPORT_ARCHETYPES["NBA"].get(arch_name)
             if cfg:
                 return arch_name, cfg
@@ -941,7 +955,10 @@ def classify_stat_distribution(sport: str, prop_text: str, line: float) -> str:
         return "MARKOV_SET_CHAIN"
     if sp == "MLB" and ("STRIKEOUT" in upper or " K" in upper or line >= 4.5):
         return "BETA_BINOMIAL_PITCH"
-    if any(k in upper for k in ("TD", "TOUCHDOWN", "HR", "HOME RUN", "3PT", "HITS", "RBIS")):
+    # 3PT props require overdispersed Negative Binomial (variance > mean)
+    if any(k in upper for k in ("3PT", "3-PT", "3PM", "3PTS", "THREES", "THREE POINTERS")):
+        return "NEG_BINOMIAL"
+    if any(k in upper for k in ("TD", "TOUCHDOWN", "HR", "HOME RUN", "HITS", "RBIS")):
         return "POISSON"
     if line <= 15.5 or any(k in upper for k in ("REB", "AST", "ASSIST", "STRIKEOUT", "K", "ACE", "KILLS")):
         return "NEG_BINOMIAL"

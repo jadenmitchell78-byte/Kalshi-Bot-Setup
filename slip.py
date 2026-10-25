@@ -153,7 +153,7 @@ PROP_LINE_REGEX = re.compile(
     r"(?P<stat>PRA|PTS\s*\+\s*REB\s*\+\s*AST|POINTS\s*\+\s*REBOUNDS\s*\+\s*ASSISTS|"
     r"PR|PTS\s*\+\s*REB|POINTS\s*\+\s*REBOUNDS|PA|PTS\s*\+\s*AST|POINTS\s*\+\s*ASSISTS|"
     r"RA|REB\s*\+\s*AST|REBOUNDS\s*\+\s*ASSISTS|STOCKS|BLK\s*\+\s*STL|STL\s*\+\s*BLK|"
-    r"PTS|POINTS|REB|REBOUNDS|AST|ASSISTS|3PT|3-PT|THREE\s*POINTERS|THREES|3PM|"
+    r"PTS|POINTS|REB|REBOUNDS|AST|ASSISTS|3PT[S]?|3-PT|THREE\s*POINTERS|THREES|3PM|3S|"
     r"PASS\s*YDS|PASSING\s*YARDS|PASS\s*YARDS|REC\s*YDS|RECEIVING\s*YARDS|REC\s*YARDS|"
     r"RUSH\s*YDS|RUSHING\s*YARDS|RUSH\s*YARDS|YDS|YARDS|TOUCHDOWNS|TD|TDS|"
     r"BLK|BLOCKS|STL|STEALS|TURNOVERS|TO|"
@@ -264,7 +264,7 @@ def _split_player_and_stat(prop_text: str, line: Optional[float] = None) -> tupl
     )
     stat_match = re.search(
         r"\b(Pass\s*Yds|Passing\s*Yards|Pass\s*Yards|Rec\s*Yds|Receiving\s*Yards|Rush\s*Yds|Rushing\s*Yards|"
-        r"Points|Pts|Rebounds|Reb|Assists|Ast|3PT\s*Made|3PT|Threes|Three\s*Pointers|PRA|Blocks|Blk|Steals|Stl|Turnovers|"
+        r"Points|Pts|Rebounds|Reb|Assists|Ast|3PT\s*Made|3PT[S]?|3PM|3S|Threes|Three\s*Pointers|PRA|Blocks|Blk|Steals|Stl|Turnovers|"
         r"Strikeouts|K|Hits|Home\s*Runs|HR|Straight\s*Sets|Sets|Games|Goals|Saves|Touchdowns|TD|Kills|Headshots|Maps|Rounds)\b",
         prop_text,
         flags=re.IGNORECASE,
@@ -274,6 +274,13 @@ def _split_player_and_stat(prop_text: str, line: Optional[float] = None) -> tupl
         name_part = cleaned[: stat_match.start()].strip(" -—:")
     else:
         name_part = cleaned.strip(" -—:")
+
+    # Clean any trailing stat words from name_part
+    name_tokens = name_part.split()
+    while name_tokens and name_tokens[-1].upper() in ("3PTS", "3PT", "3PM", "3S", "PTS", "POINTS", "REB", "REBOUNDS", "AST", "ASSISTS", "PRA"):
+        name_tokens.pop()
+    name_part = " ".join(name_tokens)
+
     name_part = re.sub(r"\s+", " ", name_part).strip()
     if not name_part or name_part.upper() in ("OVER", "UNDER", "YES", "NO", "WILL"):
         name_part = prop_text.split("—")[0].split(":")[0].replace("Will ", "").strip()

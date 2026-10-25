@@ -77,7 +77,12 @@ from db import (
     fetch_settled_slips,
     reset_sim_account,
 )
-from smart_placer import KalshiSmartPlacer
+from smart_placer import (
+    KalshiSmartPlacer,
+    parse_prop_command,
+    TODAY_ACTIVE_NBA_TEAMS,
+    TEAM_SCHEDULE_NOTES,
+)
 
 # ==========================================
 # CORE CREDENTIALS & ENDPOINTS
@@ -2310,26 +2315,35 @@ def build_sim_text(query: str = "") -> str:
         query = "NBA:LeBron James O25.5 PTS@51"
 
     clean_q = query.strip()
+    p_info = parse_prop_command(clean_q)
+    sp = p_info["sport"]
+    p_player = p_info["player"]
+    p_team = p_info["team"]
+    p_stat = p_info["stat"]
+    p_line = p_info["line"]
+    p_side = p_info["side"]
+    p_arch = p_info["archetype"]
+
+    sched_banner = ""
+    if sp == "NBA" and p_team in TEAM_SCHEDULE_NOTES and p_team not in TODAY_ACTIVE_NBA_TEAMS:
+        sched_banner = f"⚠️ *{TEAM_SCHEDULE_NOTES[p_team]} — no live today-slate Kalshi prop exists.*\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+
     try:
-        leg = parse_manual_leg_token(clean_q, iterations=10000)
-    except Exception:
-        sp = detect_sport(clean_q, clean_q)
-        parsed = parse_prop_and_line(clean_q, clean_q, sport=sp)
         s_res = simulate_prop_leg(
             ticker="MANUAL-SIM",
             sport=sp,
-            player_prop=parsed["player_prop"],
-            line=parsed["line"],
-            side=parsed["side"],
+            player_prop=f"{p_player} {p_stat} {p_line}",
+            line=p_line,
+            side=p_side,
             book_prob=0.50,
             iterations=10000,
         )
         leg = SlipLeg(
-            market_ticker="MANUAL-SIM",
+            market_ticker=f"{p_player.upper().replace(' ', '-')}-{p_stat.upper()}",
             sport=sp,
-            player_prop=parsed["player_prop"],
-            player_name=parsed["player_name"],
-            stat_type=parsed["stat_type"],
+            player_prop=f"{p_player} {p_stat} ({p_side} {p_line})",
+            player_name=p_player,
+            stat_type=p_stat,
             line=s_res.line,
             side=s_res.side,
             book_prob=s_res.book_prob,
@@ -2340,12 +2354,14 @@ def build_sim_text(query: str = "") -> str:
             mc_mean=s_res.mean_proj,
             mc_std=s_res.std_proj,
             dist_family=s_res.dist_family,
-            archetype=s_res.archetype,
+            archetype=p_arch or s_res.archetype,
             sim_method=s_res.sim_method,
             telemetry_tag=s_res.telemetry_badge,
             bid_cents=49,
             ask_cents=51,
         )
+    except Exception:
+        leg = parse_manual_leg_token(clean_q, iterations=10000)
 
     try:
         log_sim_audit(
@@ -2429,15 +2445,28 @@ def build_sim_text(query: str = "") -> str:
                     f"• 🧠 *Execution Strategy:* _{smart_exec_res.get('note', '')}_"
                 )
             elif st == "SIM_QUEUED":
-                smart_status_block = (
-                    f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🎮 *SMART SNIPER SIMULATION* 🟡\n"
-                    f"• ⚡ *Status:* `PAPER ORDER TRACKED`\n"
-                    f"• 📌 *Resolved Ticker:* `{tk}`\n"
-                    f"• 💵 *Smart Limit Price:* `{smart_exec_res.get('limit_cents')}¢` ({smart_exec_res.get('style')})\n"
-                    f"• 📦 *Contracts:* `{smart_exec_res.get('contracts')}` (Value: `${smart_exec_res.get('cost_usd', 0.0):.2f}`)\n"
-                    f"• 🧠 *Strategy:* _{smart_exec_res.get('note', '')}_"
-                )
+                sched_notice = smart_exec_res.get("sched_alert")
+                if sched_notice or smart_exec_res.get("style") == "OFF_SLATE_PAPER":
+                    smart_status_block = (
+                        f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"ℹ️ *LIVE SLATE GATE // PAPER SIMULATION* 🟡\n"
+                        f"• 📅 *Schedule Reality Check:* `{sched_notice or 'Team is off today'}`\n"
+                        f"• ⚡ *Status:* `PAPER ORDER TRACKED (OFF-SLATE)`\n"
+                        f"• 📌 *Resolved Ticker:* `{tk}`\n"
+                        f"• 💵 *Smart Limit Price:* `{smart_exec_res.get('limit_cents')}¢`\n"
+                        f"• 📦 *Contracts:* `{smart_exec_res.get('contracts')}` (Value: `${smart_exec_res.get('cost_usd', 0.0):.2f}`)\n"
+                        f"• 🧠 *Strategy:* _{smart_exec_res.get('note', '')}_"
+                    )
+                else:
+                    smart_status_block = (
+                        f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🎮 *SMART SNIPER SIMULATION* 🟡\n"
+                        f"• ⚡ *Status:* `PAPER ORDER TRACKED`\n"
+                        f"• 📌 *Resolved Ticker:* `{tk}`\n"
+                        f"• 💵 *Smart Limit Price:* `{smart_exec_res.get('limit_cents')}¢` ({smart_exec_res.get('style')})\n"
+                        f"• 📦 *Contracts:* `{smart_exec_res.get('contracts')}` (Value: `${smart_exec_res.get('cost_usd', 0.0):.2f}`)\n"
+                        f"• 🧠 *Strategy:* _{smart_exec_res.get('note', '')}_"
+                    )
             elif st == "BALANCE_HELD":
                 smart_status_block = (
                     f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2465,7 +2494,8 @@ def build_sim_text(query: str = "") -> str:
         )
 
     return (
-        f"🎲 *10,000-ITERATION MONTE CARLO PROP SIM* 🎲\n"
+        sched_banner
+        + f"🎲 *10,000-ITERATION MONTE CARLO PROP SIM* 🎲\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"• 🏷 *Prop:* `{leg.market_ticker}`\n"
         f"• 📌 *Contract:* {leg.player_prop} (*{leg.side} {leg.line}*)\n"
@@ -2483,6 +2513,8 @@ def build_sim_text(query: str = "") -> str:
         f"• 🧠 *10k Monte Carlo True Prob:* `{round(leg.mc_true_prob * 100.0, 1)}%`\n"
         f"• 🔥 *True EV Edge:* `{edge_sign}{leg.edge_pct}%`\n"
         f"• 🔗 [Direct Kalshi Market]({leg.market_url})"
+        + smart_status_block
+    )
         + smart_status_block
     )
 
