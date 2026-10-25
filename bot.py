@@ -357,7 +357,7 @@ def kill_stale_bot_processes() -> int:
             continue
         try:
             cmdline = (entry / "cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="ignore")
-            if "python" in cmdline and any(k in cmdline for k in ("peezy", "bot", "slip", "kalshi", "main.py", "aurascan")):
+            if "python" in cmdline and any(k in cmdline for k in ("peezy", "bot", "slip", "kalshi", "main", "aurascan", "app", "deploy")):
                 os.kill(pid, signal.SIGKILL)
                 killed += 1
         except Exception:
@@ -1818,11 +1818,23 @@ def run_monte_carlo_and_combo_pipeline(
         real_sport_props = [p for p in sport_props if not p.get("is_synthetic")]
         synthetic_sport_props = [p for p in sport_props if p.get("is_synthetic")]
 
-        if len(real_sport_props) < 4:
-            existing_tkrs = {p["ticker"] for p in real_sport_props}
-            mapped_props = real_sport_props + [p for p in synthetic_sport_props if p["ticker"] not in existing_tkrs]
-        else:
-            mapped_props = real_sport_props
+        real_player_props = [
+            p for p in real_sport_props
+            if p.get("stat_type") in (
+                "Points", "Rebounds", "Assists", "3PT Made", "PRA",
+                "Points + Rebounds", "Points + Assists", "Rebounds + Assists", "Stocks",
+                "Pass Yds", "Rush Yds", "Rec Yds", "Touchdowns", "Strikeouts", "Hits", "Sets"
+            )
+        ]
+
+        if len(real_player_props) < 4:
+            existing_tkrs = {p["ticker"] for p in sport_props}
+            for demo in LATE_OCTOBER_ACTIVE_MARKETS:
+                for p in sim_to_prop_mapper(demo):
+                    if p.get("sport", "").upper() in target_sports and p["ticker"] not in existing_tkrs:
+                        existing_tkrs.add(p["ticker"])
+                        sport_props.append(p)
+        mapped_props = sport_props
 
         if not mapped_props:
             for demo in LATE_OCTOBER_ACTIVE_MARKETS:
@@ -1831,26 +1843,21 @@ def run_monte_carlo_and_combo_pipeline(
                         mapped_props.append(p)
     elif LIVE_MODE:
         real_props = [p for p in mapped_props if not p.get("is_synthetic")]
-        real_nba_player_props = [
+        real_player_props = [
             p for p in real_props
-            if p.get("sport") == "NBA" and p.get("stat_type") in (
+            if p.get("stat_type") in (
                 "Points", "Rebounds", "Assists", "3PT Made", "PRA",
                 "Points + Rebounds", "Points + Assists", "Rebounds + Assists", "Stocks",
-                "PTS", "REB", "AST", "3PT", "Steals", "Blocks"
+                "Pass Yds", "Rush Yds", "Rec Yds", "Touchdowns", "Strikeouts", "Hits", "Sets"
             )
         ]
-        nba_models = [p for p in mapped_props if p.get("is_synthetic") and p.get("sport") == "NBA"]
-
-        if real_props:
-            # If Kalshi only has general game lines or thin props (< 4 player props),
-            # merge the curated NBA player prop models so users always have active +EV NBA player props
-            if len(real_nba_player_props) < 4:
-                existing_tkrs = {p["ticker"] for p in real_props}
-                mapped_props = real_props + [p for p in nba_models if p["ticker"] not in existing_tkrs]
-            else:
-                mapped_props = real_props
-        else:
-            mapped_props = [p for p in mapped_props]
+        if len(real_player_props) < 6:
+            existing_tkrs = {p["ticker"] for p in mapped_props}
+            for demo in LATE_OCTOBER_ACTIVE_MARKETS:
+                for p in sim_to_prop_mapper(demo):
+                    if p["ticker"] not in existing_tkrs:
+                        existing_tkrs.add(p["ticker"])
+                        mapped_props.append(p)
 
     if not mapped_props:
         for demo in LATE_OCTOBER_ACTIVE_MARKETS:
@@ -2170,7 +2177,22 @@ def run_monte_carlo_and_combo_pipeline(
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
     lines.append("📊 *TOP SIMULATED PROPS (10k MC DISTRIBUTION)*")
-    top_display = simulated_legs[:5]
+    # Diversify top_display so it highlights distinct players/entities
+    seen_entities = set()
+    top_display = []
+    for leg in simulated_legs:
+        ent = getattr(leg, "player_name", None) or leg.player_prop.split()[0]
+        if ent not in seen_entities:
+            seen_entities.add(ent)
+            top_display.append(leg)
+        if len(top_display) >= 5:
+            break
+    if len(top_display) < 5:
+        for leg in simulated_legs:
+            if leg not in top_display:
+                top_display.append(leg)
+            if len(top_display) >= 5:
+                break
     if top_display:
         for leg in top_display:
             edge_sign = "+" if leg.ev_edge >= 0 else ""
@@ -3303,7 +3325,8 @@ async def telegram_notifier_and_command_loop():
                         _save_chat_id(str(cid))
                         print(f"[TELEGRAM] ✅ Linked Chat ID {cid} from incoming Telegram message!")
 
-                    low = text.lower()
+                    clean_text = re.sub(r"^/\s+", "/", text.strip()) if text else ""
+                    low = clean_text.lower()
                     if cid:
                         target_cid = str(cid)
                     else:
@@ -3364,44 +3387,62 @@ async def telegram_notifier_and_command_loop():
                         else:
                             await asyncio.to_thread(notify_telegram, hud_text, hud_kb)
 
-                    elif low.startswith(("/scan", "/force_scan", "/forcescan")):
-                        rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, None, True, target_cid)
+                    elif low.startswith(("/scan", "/force_scan", "/forcescan", "scan")):
+                        parts = clean_text.split()
+                        sport_arg = None
+                        if len(parts) > 1:
+                            c = parts[1].upper()
+                            if c in ("NBA", "BASKETBALL"):
+                                sport_arg = "NBA"
+                            elif c in ("NFL", "CFB", "FOOTBALL"):
+                                sport_arg = "NFL"
+                            elif c in ("TENNIS", "ATP", "WTA"):
+                                sport_arg = "TENNIS"
+                            elif c in ("MLB", "BASEBALL"):
+                                sport_arg = "MLB"
+                            elif c in ("WNBA",):
+                                sport_arg = "WNBA"
+                            elif c in ("ESPORTS", "GAMING"):
+                                sport_arg = "ESPORTS"
+                        rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, sport_arg, True, target_cid)
                         if target_cid:
                             await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
                         else:
                             await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
 
-                    elif low.startswith(("/tennis", "/atp", "/wta")):
-                        parts = text.split(maxsplit=1)
-                        if len(parts) > 1 and parts[1].strip():
+                    elif low.startswith(("/tennis", "/atp", "/wta", "tennis")):
+                        parts = clean_text.split(maxsplit=1)
+                        arg_str = parts[1].strip().lower() if len(parts) > 1 else ""
+                        if not arg_str or arg_str in ("props", "prop", "scan", "all", "slate", "live", "today", "board", "combos"):
+                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "TENNIS", True, target_cid)
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                            else:
+                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
+                        else:
                             rep_txt = await asyncio.to_thread(build_sim_text, f"TENNIS:{parts[1].strip()}")
                             _, hud_kb = build_menu_hud_payload()
                             if target_cid:
                                 await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
                             else:
                                 await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
-                        else:
-                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "TENNIS", True, target_cid)
+
+                    elif low.startswith(("/nba", "/basketball", "nba")):
+                        parts = clean_text.split(maxsplit=1)
+                        arg_str = parts[1].strip().lower() if len(parts) > 1 else ""
+                        if not arg_str or arg_str in ("props", "prop", "scan", "all", "slate", "live", "today", "board", "combos"):
+                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "NBA", True, target_cid)
                             if target_cid:
                                 await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
                             else:
                                 await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
-
-                    elif low.startswith(("/nba", "/basketball")):
-                        parts = text.split(maxsplit=1)
-                        if len(parts) > 1 and parts[1].strip():
+                        else:
                             rep_txt = await asyncio.to_thread(build_sim_text, f"NBA:{parts[1].strip()}")
                             _, hud_kb = build_menu_hud_payload()
                             if target_cid:
                                 await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
                             else:
                                 await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
-                        else:
-                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "NBA", True, target_cid)
-                            if target_cid:
-                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
-                            else:
-                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
 
                     elif low.startswith(("/livesim", "/combos", "/liveboard")):
                         rep_txt, rep_kb = await asyncio.to_thread(build_live_nba_diagnostic_board, target_cid)
@@ -3410,72 +3451,76 @@ async def telegram_notifier_and_command_loop():
                         else:
                             await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
 
-                    elif low.startswith(("/nfl", "/cfb", "/football")):
-                        parts = text.split(maxsplit=1)
-                        if len(parts) > 1 and parts[1].strip():
+                    elif low.startswith(("/nfl", "/cfb", "/football", "nfl")):
+                        parts = clean_text.split(maxsplit=1)
+                        arg_str = parts[1].strip().lower() if len(parts) > 1 else ""
+                        if not arg_str or arg_str in ("props", "prop", "scan", "all", "slate", "live", "today", "board", "combos"):
+                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "NFL", True, target_cid)
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                            else:
+                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
+                        else:
                             rep_txt = await asyncio.to_thread(build_sim_text, f"NFL:{parts[1].strip()}")
                             _, hud_kb = build_menu_hud_payload()
                             if target_cid:
                                 await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
                             else:
                                 await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
-                        else:
-                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "NFL", True, target_cid)
+
+                    elif low.startswith(("/mlb", "/baseball", "mlb")):
+                        parts = clean_text.split(maxsplit=1)
+                        arg_str = parts[1].strip().lower() if len(parts) > 1 else ""
+                        if not arg_str or arg_str in ("props", "prop", "scan", "all", "slate", "live", "today", "board", "combos"):
+                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "MLB", True, target_cid)
                             if target_cid:
                                 await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
                             else:
                                 await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
-
-                    elif low.startswith(("/mlb", "/baseball")):
-                        parts = text.split(maxsplit=1)
-                        if len(parts) > 1 and parts[1].strip():
+                        else:
                             rep_txt = await asyncio.to_thread(build_sim_text, f"MLB:{parts[1].strip()}")
                             _, hud_kb = build_menu_hud_payload()
                             if target_cid:
                                 await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
                             else:
                                 await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
-                        else:
-                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "MLB", True, target_cid)
+
+                    elif low.startswith(("/wnba", "wnba")):
+                        parts = clean_text.split(maxsplit=1)
+                        arg_str = parts[1].strip().lower() if len(parts) > 1 else ""
+                        if not arg_str or arg_str in ("props", "prop", "scan", "all", "slate", "live", "today", "board", "combos"):
+                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "WNBA", True, target_cid)
                             if target_cid:
                                 await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
                             else:
                                 await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
-
-                    elif low.startswith("/wnba"):
-                        parts = text.split(maxsplit=1)
-                        if len(parts) > 1 and parts[1].strip():
+                        else:
                             rep_txt = await asyncio.to_thread(build_sim_text, f"WNBA:{parts[1].strip()}")
                             _, hud_kb = build_menu_hud_payload()
                             if target_cid:
                                 await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
                             else:
                                 await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
-                        else:
-                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "WNBA", True, target_cid)
+
+                    elif low.startswith(("/esports", "/gaming", "esports")):
+                        parts = clean_text.split(maxsplit=1)
+                        arg_str = parts[1].strip().lower() if len(parts) > 1 else ""
+                        if not arg_str or arg_str in ("props", "prop", "scan", "all", "slate", "live", "today", "board", "combos"):
+                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "ESPORTS", True, target_cid)
                             if target_cid:
                                 await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
                             else:
                                 await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
-
-                    elif low.startswith(("/esports", "/gaming")):
-                        parts = text.split(maxsplit=1)
-                        if len(parts) > 1 and parts[1].strip():
+                        else:
                             rep_txt = await asyncio.to_thread(build_sim_text, f"ESPORTS:{parts[1].strip()}")
                             _, hud_kb = build_menu_hud_payload()
                             if target_cid:
                                 await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
                             else:
                                 await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
-                        else:
-                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "ESPORTS", True, target_cid)
-                            if target_cid:
-                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
-                            else:
-                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
 
                     elif low.startswith("/sim"):
-                        sim_query = text[4:].strip() if low.startswith("/sim") else ""
+                        sim_query = clean_text[4:].strip() if low.startswith("/sim") else ""
                         rep_txt = await asyncio.to_thread(build_sim_text, sim_query)
                         _, hud_kb = build_menu_hud_payload()
                         if target_cid:
@@ -3484,7 +3529,7 @@ async def telegram_notifier_and_command_loop():
                             await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
 
                     elif low.startswith(("/slip", "/parlay", "/combo")):
-                        parts = text.split(maxsplit=1)
+                        parts = clean_text.split(maxsplit=1)
                         if len(parts) > 1 and parts[1].strip():
                             rep_txt, rep_kb = await asyncio.to_thread(execute_manual_slip, parts[1].strip(), target_cid)
                         else:
@@ -3781,6 +3826,24 @@ async def telegram_notifier_and_command_loop():
                             await asyncio.to_thread(notify_telegram, st_txt, hud_kb, target_cid)
                         else:
                             await asyncio.to_thread(notify_telegram, st_txt, hud_kb)
+
+                    elif low.startswith("/"):
+                        unknown_cmd = clean_text.split()[0]
+                        rep_txt = (
+                            f"⚠️ *Unknown command* `{unknown_cmd}`\n\n"
+                            "💡 *Try one of these:*\n"
+                            "• `/menu` — Live AuraScan HUD & Controls\n"
+                            "• `/scan` or `/scan nba` · `/scan nfl` — Prop Scans\n"
+                            "• `/nba` · `/nfl` · `/tennis` — Single Sport\n"
+                            "• `/sim <player>` — 10k Monte Carlo Sim\n"
+                            "• `/slip <leg1> | <leg2>` — Correlated Slip\n"
+                            "• `/help` — Full Command Directory"
+                        )
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
 
             if TELEGRAM_CHAT_ID and not startup_notified:
                 startup_notified = True

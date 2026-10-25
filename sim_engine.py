@@ -467,15 +467,24 @@ NBA_PLAYER_REGISTRY: Dict[str, Dict[str, Any]] = {
 def lookup_nba_player_baseline(name_or_text: str) -> Optional[Dict[str, Any]]:
     clean = re.sub(r"[^A-Z0-9\s]", " ", name_or_text.upper())
     tokens = clean.split()
+    tokens_set = set(tokens)
+
+    # Team game lines, spreads, totals, and moneylines are NOT player props
+    if any(k in tokens_set for k in ("SPREAD", "TOTAL", "MONEYLINE", "HANDICAP", "OUTCOME", "WINNER", "WINS")):
+        return None
+
     for full_name, data in NBA_PLAYER_REGISTRY.items():
         if full_name in clean:
             return data
         for alias in data.get("aliases", ()):
             alias_u = alias.upper()
-            if alias_u in clean:
-                return data
-            if alias_u in tokens:
-                return data
+            if len(alias_u) <= 3:
+                # Short nicknames (AD, KD, KAT, LBJ, ANT) MUST be exact whole word matches!
+                if alias_u in tokens_set:
+                    return data
+            else:
+                if alias_u in clean:
+                    return data
     return None
 
 
@@ -850,6 +859,30 @@ def classify_player_archetype(sport: str, prop_text: str, line: float) -> Tuple[
     """Match a player/prop to its sport-specific archetype and simulation physics profile."""
     sp = sport.upper()
     blob = prop_text.upper()
+    blob_tokens = set(re.findall(r"\b[A-Z0-9']+\b", blob))
+
+    # Team game lines (Spreads, Totals, Moneylines) are NOT player props
+    if any(k in blob_tokens for k in ("SPREAD", "HANDICAP", "RUN LINE")):
+        return "GAME_SPREAD", {
+            "sim_method": "Normal Margin-of-Victory Model",
+            "usage_cv": 0.15,
+            "blowout_sensitivity": 0.0,
+            "clutch_boost": 1.0,
+        }
+    if any(k in blob_tokens for k in ("TOTAL", "OVER/UNDER", "O/U")):
+        return "GAME_TOTAL", {
+            "sim_method": "Game Total Poisson-Normal Model",
+            "usage_cv": 0.12,
+            "blowout_sensitivity": 0.0,
+            "clutch_boost": 1.0,
+        }
+    if any(k in blob_tokens for k in ("MONEYLINE", "MATCH WINNER", "WINNER", "OUTCOME")):
+        return "GAME_MONEYLINE", {
+            "sim_method": "Logistic Win Probability Model",
+            "usage_cv": 0.10,
+            "blowout_sensitivity": 0.0,
+            "clutch_boost": 1.0,
+        }
 
     # Exact registry lookup for NBA stars
     if sp == "NBA":
@@ -864,8 +897,13 @@ def classify_player_archetype(sport: str, prop_text: str, line: float) -> Tuple[
 
     sport_map = SPORT_ARCHETYPES.get(sp, {})
     for arch_name, cfg in sport_map.items():
-        if any(kw in blob for kw in cfg["keywords"]):
-            return arch_name, cfg
+        for kw in cfg.get("keywords", ()):
+            if len(kw) <= 3:
+                if kw in blob_tokens:
+                    return arch_name, cfg
+            else:
+                if kw in blob:
+                    return arch_name, cfg
 
     # Default sport fallback archetype
     if sp == "NBA":

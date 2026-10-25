@@ -110,7 +110,7 @@ def kill_stale_bot_processes() -> int:
             continue
         try:
             cmdline = (entry / "cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="ignore")
-            if "python" in cmdline and any(k in cmdline for k in ("peezy", "bot", "slip", "kalshi", "main.py")):
+            if "python" in cmdline and any(k in cmdline for k in ("peezy", "bot", "slip", "kalshi", "main", "aurascan", "app", "deploy")):
                 os.kill(pid, signal.SIGKILL)
                 killed += 1
         except Exception:
@@ -225,6 +225,33 @@ CURATED_QUANT_MARKETS: List[Dict[str, Any]] = [
         "yes_ask": 50,
         "volume": 3250,
         "open_interest": 4600,
+    },
+    {
+        "ticker": "KXNFL-PHI-SAQUON-O78P5",
+        "title": "Saquon Barkley Over 78.5 Rush Yds",
+        "category": "NFL",
+        "yes_bid": 49,
+        "yes_ask": 51,
+        "volume": 3800,
+        "open_interest": 5100,
+    },
+    {
+        "ticker": "KXNFL-BAL-HENRY-O0P5TD",
+        "title": "Derrick Henry Over 0.5 Touchdowns",
+        "category": "NFL",
+        "yes_bid": 52,
+        "yes_ask": 54,
+        "volume": 4100,
+        "open_interest": 5500,
+    },
+    {
+        "ticker": "KXNFL-BUF-ALLEN-O245P5",
+        "title": "Josh Allen Over 245.5 Pass Yds",
+        "category": "NFL",
+        "yes_bid": 48,
+        "yes_ask": 50,
+        "volume": 3600,
+        "open_interest": 4900,
     },
     {
         "ticker": "KXTENNIS-ATP-ALCARAZ-2SETS",

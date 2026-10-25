@@ -119,6 +119,17 @@ def evaluate_parlay(
     )
 
 
+def _leg_entity_key(leg: SlipLeg) -> str:
+    """Derive distinct entity identity (player or game) to prevent duplicate/laddered legs in combos."""
+    p_name = (getattr(leg, "player_name", "") or "").strip().upper()
+    s_type = (getattr(leg, "stat_type", "") or "").strip().upper()
+    if p_name and p_name not in ("SPREAD", "TOTAL", "MONEYLINE", "OUTCOME", "GAME") and s_type not in ("SPREAD", "TOTAL", "MONEYLINE", "OUTCOME"):
+        return f"PLAYER:{p_name}"
+    tkr = (getattr(leg, "market_ticker", "") or "").upper()
+    base_match = re.sub(r"-[A-Z0-9]+$", "", tkr)
+    return f"GAME:{base_match or tkr}"
+
+
 def build_optimal_parlays(
     candidate_legs: List[SlipLeg],
     min_legs: int = MIN_SLIP_LEGS,
@@ -128,21 +139,25 @@ def build_optimal_parlays(
 ) -> List[ParlaySlip]:
     """
     Search liquid, anti-snipe verified candidate legs for positively correlated
-    2-to-3 leg +EV parlay combinations.
+    2-to-3 leg +EV parlay combinations across distinct players and games.
     """
-    sorted_legs = sorted(candidate_legs, key=lambda x: x.ev_edge, reverse=True)
+    sorted_legs = sorted(candidate_legs, key=lambda x: getattr(x, "ev_edge", 0.0), reverse=True)
     deduped: List[SlipLeg] = []
-    seen = set()
+    seen_entities = set()
     for leg in sorted_legs:
-        if leg.market_ticker not in seen and leg.anti_snipe_ok:
-            seen.add(leg.market_ticker)
+        ent = _leg_entity_key(leg)
+        if ent not in seen_entities and getattr(leg, "anti_snipe_ok", True):
+            seen_entities.add(ent)
             deduped.append(leg)
-        if len(deduped) >= 7:
+        if len(deduped) >= 8:
             break
 
     valid_slips: List[ParlaySlip] = []
     for k in range(min_legs, min(max_legs, len(deduped)) + 1):
-        for combo in combinations(deduped[:6], k):
+        for combo in combinations(deduped[:8], k):
+            combo_entities = [_leg_entity_key(l) for l in combo]
+            if len(combo_entities) != len(set(combo_entities)):
+                continue
             slip = evaluate_parlay(
                 list(combo),
                 bankroll=bankroll,
