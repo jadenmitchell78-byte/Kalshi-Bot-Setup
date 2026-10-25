@@ -82,6 +82,9 @@ from slip import (
     recycle_stale_rfq_orders,
 )
 from telemetry import fetch_all_telemetry
+from smart_placer import KalshiSmartPlacer
+
+smart_placer = KalshiSmartPlacer(auth_header_fn=build_kalshi_auth_headers)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -231,6 +234,87 @@ CURATED_QUANT_MARKETS: List[Dict[str, Any]] = [
         "yes_ask": 54,
         "volume": 2400,
         "open_interest": 3500,
+    },
+    {
+        "ticker": "KXTENNIS-ATP-SINNER-2SETS",
+        "title": "Jannik Sinner Straight Sets Win",
+        "category": "TENNIS",
+        "yes_bid": 51,
+        "yes_ask": 53,
+        "volume": 2600,
+        "open_interest": 3700,
+    },
+    {
+        "ticker": "KXNBA-MIA-HERRO-O3P53PT",
+        "title": "Tyler Herro Over 3.5 3PT Made",
+        "category": "NBA",
+        "yes_bid": 48,
+        "yes_ask": 50,
+        "volume": 3200,
+        "open_interest": 4500,
+    },
+    {
+        "ticker": "KXNBA-MIA-HERRO-O22P5PTS",
+        "title": "Tyler Herro Over 22.5 Points",
+        "category": "NBA",
+        "yes_bid": 48,
+        "yes_ask": 50,
+        "volume": 3400,
+        "open_interest": 4700,
+    },
+    {
+        "ticker": "KXMLB-LAD-OHTANI-O1P5HITS",
+        "title": "Shohei Ohtani Over 1.5 Hits",
+        "category": "MLB",
+        "yes_bid": 48,
+        "yes_ask": 50,
+        "volume": 3900,
+        "open_interest": 5200,
+    },
+    {
+        "ticker": "KXMLB-NYY-JUDGE-O0P5HR",
+        "title": "Aaron Judge Over 0.5 Home Runs",
+        "category": "MLB",
+        "yes_bid": 36,
+        "yes_ask": 38,
+        "volume": 4300,
+        "open_interest": 5800,
+    },
+    {
+        "ticker": "KXMLB-DET-SKUBAL-O7P5K",
+        "title": "Tarik Skubal Over 7.5 Strikeouts",
+        "category": "MLB",
+        "yes_bid": 49,
+        "yes_ask": 51,
+        "volume": 3500,
+        "open_interest": 4800,
+    },
+    {
+        "ticker": "KXWNBA-IND-CLARK-O3P53PT",
+        "title": "Caitlin Clark Over 3.5 3PT Made",
+        "category": "WNBA",
+        "yes_bid": 48,
+        "yes_ask": 50,
+        "volume": 3400,
+        "open_interest": 4700,
+    },
+    {
+        "ticker": "KXWNBA-LVA-WILSON-O24P5PTS",
+        "title": "A'ja Wilson Over 24.5 Points",
+        "category": "WNBA",
+        "yes_bid": 50,
+        "yes_ask": 52,
+        "volume": 3100,
+        "open_interest": 4300,
+    },
+    {
+        "ticker": "KXESPORTS-CS2-ZYWOO-O18P5KILLS",
+        "title": "Mathieu 'ZywOo' Herbaut Over 18.5 Map Kills",
+        "category": "ESPORTS",
+        "yes_bid": 48,
+        "yes_ask": 50,
+        "volume": 2900,
+        "open_interest": 4100,
     },
 ]
 
@@ -596,21 +680,36 @@ async def execute_and_persist_slip(slip: ParlaySlip) -> List[str]:
         _COOLDOWN_TRACKER[leg.market_ticker] = now_ts
 
     if rt["mode"] == "LIVE":
-        per_leg_budget = max(1.0, slip.kelly_stake / max(1, len(slip.legs)))
-        for leg in slip.legs:
-            raw_contracts = max(1, int(round((per_leg_budget * 100.0) / max(1, leg.ask_cents))))
-            depth, obi = await inspect_l2_and_obi(leg.market_ticker, leg.side, leg.ask_cents)
-            if obi < OBI_TOXIC_THRESHOLD:
-                exec_notes.append(f"🛡️ [OBI-SHIELD] Blocked toxic fill on {leg.market_ticker} (OBI: {obi:+.2f})")
-                continue
-            contracts = max(1, min(raw_contracts, max(1, depth)))
-            res = await place_kalshi_order(
-                ticker=leg.market_ticker,
-                side=leg.side,
-                count=contracts,
-                price_cents=leg.ask_cents,
-            )
-            exec_notes.append(f"{'✅' if res['ok'] else '⚠️'} {res['msg']} (Depth: {depth} | OBI: {obi:+.2f})")
+        combo_legs_input = [
+            {
+                "sport": l.sport,
+                "player_name": l.player_name,
+                "stat_type": l.stat_type,
+                "line": l.line,
+                "side": l.side,
+                "mc_true_prob": l.mc_true_prob,
+                "ev_edge": l.ev_edge,
+                "market_ticker": l.market_ticker,
+            }
+            for l in slip.legs
+        ]
+        receipts = smart_placer.smart_place_copula_combo(
+            legs=combo_legs_input,
+            copula_boost_pct=slip.copula_boost_pct,
+            bankroll_usd=slip.kelly_stake,
+            sniper_on=bool(rt.get("sniper", True)),
+            live_mode=True,
+        )
+        for idx, rcp in enumerate(receipts):
+            leg = slip.legs[idx]
+            st = rcp.get("status")
+            tk = rcp.get("ticker", leg.market_ticker)
+            if st == "PLACED":
+                exec_notes.append(f"✅ [SMART-SNIPER] {tk} {rcp.get('contracts')}x @ {rcp.get('limit_cents')}¢ ({rcp.get('style')}) | OID: {rcp.get('order_id')}")
+            elif st == "BALANCE_HELD":
+                exec_notes.append(f"⚠️ [BALANCE-HELD] {tk}: Resting orders holding balance on Kalshi")
+            else:
+                exec_notes.append(f"⚠️ [{st}] {tk}: {rcp.get('reason', 'Order skipped')}")
 
     if not slip.ai_insight:
         summary_lines = [
@@ -777,6 +876,78 @@ async def build_sim_text(query: str) -> str:
     emoji = SPORT_EMOJIS.get(leg.sport, "🎯")
     edge_sign = "+" if leg.edge_pct >= 0 else ""
     shield_badge = "🛡️ SAFE" if leg.anti_snipe_ok else "🚨 BLOCKED"
+
+    rt = get_runtime_state()
+    smart_status_block = ""
+    if leg.ev_edge >= MIN_EV_EDGE:
+        p_name = leg.player_name or getattr(leg, 'player_prop', '')
+        s_type = leg.stat_type or "Points"
+        bal = await get_effective_bankroll()
+        smart_exec_res = smart_placer.smart_place_leg(
+            sport=leg.sport,
+            player_name=p_name,
+            stat=s_type,
+            line=float(leg.line),
+            pick_dir=leg.side,
+            true_prob_pct=float(leg.mc_true_prob * 100.0),
+            ev_edge_pct=float(leg.edge_pct),
+            bankroll_usd=bal,
+            sniper_on=bool(rt.get("sniper", True)),
+            live_mode=(rt.get("mode") == "LIVE"),
+            existing_ticker=leg.market_ticker if not leg.market_ticker.startswith("MANUAL-") else None,
+        )
+        if smart_exec_res:
+            st = smart_exec_res.get("status")
+            tk = smart_exec_res.get("ticker", leg.market_ticker)
+            if st in ("PLACED", "SIM_QUEUED"):
+                _COOLDOWN_TRACKER[tk] = time.time()
+            if st == "PLACED":
+                smart_status_block = (
+                    f"\n━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎯 *SMART SNIPER ORDER EXECUTED* 🟢\n"
+                    f"• ⚡ *Status:* `LIVE ORDER PLACED`\n"
+                    f"• 📌 *Exchange Ticker:* `{tk}`\n"
+                    f"• 💵 *Smart Limit Price:* `{smart_exec_res.get('limit_cents')}¢` ({smart_exec_res.get('style')})\n"
+                    f"• 📦 *Contracts:* `{smart_exec_res.get('contracts')}` (Cost: `${smart_exec_res.get('cost_usd', 0.0):.2f}`)\n"
+                    f"• 🆔 *Order ID:* `{smart_exec_res.get('order_id')}`\n"
+                    f"• 🧠 *Execution Strategy:* _{smart_exec_res.get('note', '')}_"
+                )
+            elif st == "SIM_QUEUED":
+                smart_status_block = (
+                    f"\n━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎮 *SMART SNIPER SIMULATION* 🟡\n"
+                    f"• ⚡ *Status:* `PAPER ORDER TRACKED`\n"
+                    f"• 📌 *Resolved Ticker:* `{tk}`\n"
+                    f"• 💵 *Smart Limit Price:* `{smart_exec_res.get('limit_cents')}¢` ({smart_exec_res.get('style')})\n"
+                    f"• 📦 *Contracts:* `{smart_exec_res.get('contracts')}` (Value: `${smart_exec_res.get('cost_usd', 0.0):.2f}`)\n"
+                    f"• 🧠 *Strategy:* _{smart_exec_res.get('note', '')}_"
+                )
+            elif st == "BALANCE_HELD":
+                smart_status_block = (
+                    f"\n━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⚠️ *SMART SNIPER PAUSED* 🟠\n"
+                    f"• ⚡ *Status:* `RESTING ORDERS HOLDING BALANCE`\n"
+                    f"• 📌 *Resolved Ticker:* `{tk}`\n"
+                    f"• ℹ️ Resting orders on Kalshi are currently locking funds in escrow."
+                )
+            elif st == "NO_TICKER":
+                smart_status_block = (
+                    f"\n━━━━━━━━━━━━━━━━━━━━\n"
+                    f"ℹ️ *KALSHI CONTRACT RESOLVER*\n"
+                    f"• 🔍 *Note:* `{smart_exec_res.get('reason')}`"
+                )
+            elif st in ("API_REJECTED", "ERROR"):
+                smart_status_block = (
+                    f"\n━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⚠️ *SMART SNIPER REJECTED*\n"
+                    f"• ❌ *Reason:* `{smart_exec_res.get('reason', '')}`"
+                )
+    elif not rt.get("sniper", True):
+        smart_status_block = (
+            f"\n━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 *Smart Sniper:* `DISARMED` (Send /sniper on to auto-route orders)"
+        )
+
     return (
         f"🎲 *10,000-ITERATION MONTE CARLO PROP SIM* 🎲\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -795,6 +966,7 @@ async def build_sim_text(query: str) -> str:
         f"📊 *De-Vigged Book Prob:* `{round(leg.book_prob * 100.0, 2)}%` ({leg.american_odds})\n"
         f"🧠 *10k Monte Carlo True Prob:* `{round(leg.mc_true_prob * 100.0, 2)}%`\n"
         f"🔥 *True EV Edge:* `{edge_sign}{leg.edge_pct}%` (Min Threshold: `+{round(MIN_EV_EDGE*100, 2)}%`)"
+        + smart_status_block
     )
 
 
@@ -1211,6 +1383,30 @@ async def cmd_slip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as exc:
         logger.exception("Error in /slip")
         await update.message.reply_text(f"❌ Error building Copula slip: `{exc}`", parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_nba(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _ensure_chat_id(update)
+    if not update.message:
+        return
+    if context.args:
+        q = f"NBA:{' '.join(context.args)}"
+        report = await build_sim_text(q)
+        await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN)
+    else:
+        await cmd_scan(update, context)
+
+
+async def cmd_nfl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _ensure_chat_id(update)
+    if not update.message:
+        return
+    if context.args:
+        q = f"NFL:{' '.join(context.args)}"
+        report = await build_sim_text(q)
+        await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN)
+    else:
+        await cmd_scan(update, context)
 
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1805,6 +2001,8 @@ def main() -> None:
     app.add_handler(CommandHandler("flush_locks", cmd_clear_locks))
     app.add_handler(CommandHandler("watch", cmd_watch))
     app.add_handler(CommandHandler("sim", cmd_sim))
+    app.add_handler(CommandHandler("nba", cmd_nba))
+    app.add_handler(CommandHandler("nfl", cmd_nfl))
     app.add_handler(CommandHandler("slip", cmd_slip))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("audit", cmd_audit))

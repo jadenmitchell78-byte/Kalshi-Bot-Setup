@@ -379,6 +379,13 @@ NBA_PLAYER_REGISTRY: Dict[str, Dict[str, Any]] = {
         "proj_mins": 34.0,
         "baselines": {"PTS": 19.3, "REB": 10.4, "AST": 3.9, "PRA": 33.6, "PR": 29.7},
     },
+    "TYLER HERRO": {
+        "aliases": ("HERRO", "TYLER HERRO", "T. HERRO", "HERO", "TYLER HERO"),
+        "team": "MIA",
+        "archetype": "VOLUME_SCORER",
+        "proj_mins": 34.5,
+        "baselines": {"PTS": 22.8, "REB": 5.4, "AST": 4.5, "PRA": 32.7, "3PT": 3.3, "3PM": 3.3},
+    },
     "DOMANTAS SABONIS": {
         "aliases": ("SABONIS", "DOMANTAS SABONIS", "D. SABONIS"),
         "team": "SAC",
@@ -799,6 +806,9 @@ def resolve_sport_stat_line(
                 base_val = p_bases[stat_key]
                 if current_line is None or current_line <= 1.0 or (current_line == 21.5 and stat_key != "PTS"):
                     default_for_stat = round(base_val - 0.5) + 0.5
+
+    if norm_stat == "3PT Made" and current_line is not None and current_line in (1.0, 2.0, 3.0, 4.0, 5.0):
+        current_line = current_line + 0.5
 
     # Guard against invalid lines (e.g. 0.0, 0.5 on volume stats, or 20.5 assigned to passing/tennis)
     if current_line is not None and current_line > 0:

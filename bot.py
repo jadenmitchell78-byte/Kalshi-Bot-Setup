@@ -77,6 +77,7 @@ from db import (
     fetch_settled_slips,
     reset_sim_account,
 )
+from smart_placer import KalshiSmartPlacer
 
 # ==========================================
 # CORE CREDENTIALS & ENDPOINTS
@@ -201,23 +202,23 @@ SPORT_PROFILES = {
     },
     "MLB": {
         "keywords": ("MLB", "BASEBALL", "STRIKEOUT", "HITS", "HR", "RUNS"),
-        "max_spread": 8,
-        "min_ev": 0.030,
+        "max_spread": 10,
+        "min_ev": 0.025,
         "swing_trigger": 5,
-        "loop": "Standby",
-        "active": False,
+        "loop": "5m loop",
+        "active": True,
     },
     "WNBA": {
         "keywords": ("WNBA", "KXWNBA", "ACES", "LIBERTY", "FEVER", "LYNX"),
-        "max_spread": 8,
-        "min_ev": 0.030,
+        "max_spread": 10,
+        "min_ev": 0.025,
         "swing_trigger": 5,
-        "loop": "Standby",
-        "active": False,
+        "loop": "5m loop",
+        "active": True,
     },
     "ESPORTS": {
         "keywords": ("ESPORTS", "CS2", "VALORANT", "LOL", "DOTA", "COD", "NAVI", "FAZE", "VITALITY", "SPIRIT", "T1", "GENG", "KILLS", "MAP"),
-        "max_spread": 9,
+        "max_spread": 10,
         "min_ev": 0.025,
         "swing_trigger": 5,
         "loop": "5m loop",
@@ -226,7 +227,7 @@ SPORT_PROFILES = {
 }
 
 LATE_OCTOBER_ACTIVE_MARKETS = [
-    # Live Active Slate: Nets vs Cavs, Rockets vs Hawks, Pelicans vs Nuggets, Warriors vs Suns, Bucks vs 76ers, Wizards vs Bulls, Spurs vs Mavs
+    # NBA Slate: Nets vs Cavs, Rockets vs Hawks, Pelicans vs Nuggets, Warriors vs Suns, Bucks vs 76ers, Wizards vs Bulls, Spurs vs Mavs
     {"ticker": "KXNBA-CHI-LAVINE-O23P5PTS", "title": "Zach LaVine Over 23.5 Points", "category": "NBA", "yes_bid": 48, "yes_ask": 50, "last_price": 54, "volume": 3200, "open_interest": 4500},
     {"ticker": "KXNBA-WAS-POOLE-O21P5PTS", "title": "Jordan Poole Over 21.5 Points", "category": "NBA", "yes_bid": 47, "yes_ask": 49, "last_price": 53, "volume": 2900, "open_interest": 4100},
     {"ticker": "KXNBA-DAL-LUKA-O31P5PTS", "title": "Luka Doncic Over 31.5 Points", "category": "NBA", "yes_bid": 49, "yes_ask": 51, "last_price": 57, "volume": 4400, "open_interest": 6200},
@@ -244,8 +245,35 @@ LATE_OCTOBER_ACTIVE_MARKETS = [
     {"ticker": "KXNBA-MIN-RANDLE-O23P5PTS", "title": "Julius Randle Over 23.5 Points", "category": "NBA", "yes_bid": 48, "yes_ask": 50, "last_price": 55, "volume": 3400, "open_interest": 4700},
     {"ticker": "KXNBA-MIN-EDWARDS-O26P5PTS", "title": "Anthony Edwards Over 26.5 Points", "category": "NBA", "yes_bid": 49, "yes_ask": 51, "last_price": 56, "volume": 3900, "open_interest": 5200},
     {"ticker": "KXNBA-LAL-LBJ-O25P5PTS", "title": "LeBron James Over 25.5 Points", "category": "NBA", "yes_bid": 49, "yes_ask": 51, "last_price": 56, "volume": 4100, "open_interest": 5600},
-    {"ticker": "KXNFL-KC-MAHOMES-O274P5", "title": "Patrick Mahomes Over 274.5 Pass Yds", "category": "NFL", "yes_bid": 48, "yes_ask": 50, "last_price": 56, "volume": 4200, "open_interest": 5800},
+    {"ticker": "KXNBA-MIA-HERRO-O3P53PT", "title": "Tyler Herro Over 3.5 3PT Made", "category": "NBA", "yes_bid": 48, "yes_ask": 50, "last_price": 55, "volume": 3200, "open_interest": 4500},
+    {"ticker": "KXNBA-MIA-HERRO-O22P5PTS", "title": "Tyler Herro Over 22.5 Points", "category": "NBA", "yes_bid": 48, "yes_ask": 50, "last_price": 55, "volume": 3400, "open_interest": 4700},
+
+    # NFL Slate (Passing, Rushing, Receiving, Touchdowns)
+    {"ticker": "KXNFL-KC-MAHOMES-O274P5PASS", "title": "Patrick Mahomes Over 274.5 Pass Yds", "category": "NFL", "yes_bid": 48, "yes_ask": 50, "last_price": 56, "volume": 4200, "open_interest": 5800},
+    {"ticker": "KXNFL-KC-RICE-O68P5REC", "title": "Rashee Rice Over 68.5 Rec Yds", "category": "NFL", "yes_bid": 48, "yes_ask": 50, "last_price": 55, "volume": 3400, "open_interest": 4600},
+    {"ticker": "KXNFL-PHI-SAQUON-O78P5RUSH", "title": "Saquon Barkley Over 78.5 Rush Yds", "category": "NFL", "yes_bid": 49, "yes_ask": 51, "last_price": 57, "volume": 3800, "open_interest": 5100},
+    {"ticker": "KXNFL-BAL-HENRY-O0P5TD", "title": "Derrick Henry Over 0.5 Touchdowns", "category": "NFL", "yes_bid": 52, "yes_ask": 54, "last_price": 60, "volume": 4100, "open_interest": 5500},
+    {"ticker": "KXNFL-BUF-ALLEN-O245P5PASS", "title": "Josh Allen Over 245.5 Pass Yds", "category": "NFL", "yes_bid": 48, "yes_ask": 50, "last_price": 55, "volume": 3600, "open_interest": 4900},
+
+    # Tennis (ATP / WTA Sets & Total Games)
     {"ticker": "KXTENNIS-ATP-ALCARAZ-2SETS", "title": "Carlos Alcaraz Straight Sets Win", "category": "TENNIS", "yes_bid": 50, "yes_ask": 52, "last_price": 58, "volume": 2400, "open_interest": 3500},
+    {"ticker": "KXTENNIS-ATP-SINNER-2SETS", "title": "Jannik Sinner Straight Sets Win", "category": "TENNIS", "yes_bid": 51, "yes_ask": 53, "last_price": 59, "volume": 2600, "open_interest": 3700},
+    {"ticker": "KXTENNIS-ATP-FRITZ-O22P5GAMES", "title": "Taylor Fritz Over 22.5 Games", "category": "TENNIS", "yes_bid": 48, "yes_ask": 50, "last_price": 54, "volume": 2100, "open_interest": 3100},
+
+    # MLB Daily Game Props (Strikeouts, Hits, HR — Zero futures/awards)
+    {"ticker": "KXMLB-LAD-OHTANI-O1P5HITS", "title": "Shohei Ohtani Over 1.5 Hits", "category": "MLB", "yes_bid": 48, "yes_ask": 50, "last_price": 55, "volume": 3900, "open_interest": 5200},
+    {"ticker": "KXMLB-NYY-JUDGE-O0P5HR", "title": "Aaron Judge Over 0.5 Home Runs", "category": "MLB", "yes_bid": 36, "yes_ask": 38, "last_price": 42, "volume": 4300, "open_interest": 5800},
+    {"ticker": "KXMLB-DET-SKUBAL-O7P5K", "title": "Tarik Skubal Over 7.5 Strikeouts", "category": "MLB", "yes_bid": 49, "yes_ask": 51, "last_price": 56, "volume": 3500, "open_interest": 4800},
+    {"ticker": "KXMLB-PHI-WHEELER-O6P5K", "title": "Zack Wheeler Over 6.5 Strikeouts", "category": "MLB", "yes_bid": 48, "yes_ask": 50, "last_price": 55, "volume": 3200, "open_interest": 4400},
+
+    # WNBA
+    {"ticker": "KXWNBA-IND-CLARK-O3P53PT", "title": "Caitlin Clark Over 3.5 3PT Made", "category": "WNBA", "yes_bid": 48, "yes_ask": 50, "last_price": 55, "volume": 3400, "open_interest": 4700},
+    {"ticker": "KXWNBA-LVA-WILSON-O24P5PTS", "title": "A'ja Wilson Over 24.5 Points", "category": "WNBA", "yes_bid": 50, "yes_ask": 52, "last_price": 58, "volume": 3100, "open_interest": 4300},
+
+    # Esports (CS2 & LoL Map Kills & Assists)
+    {"ticker": "KXESPORTS-CS2-ZYWOO-O18P5KILLS", "title": "Mathieu 'ZywOo' Herbaut Over 18.5 Map Kills", "category": "ESPORTS", "yes_bid": 48, "yes_ask": 50, "last_price": 55, "volume": 2900, "open_interest": 4100},
+    {"ticker": "KXESPORTS-CS2-M0NESY-O17P5KILLS", "title": "Ilya 'm0NESY' Osipov Over 17.5 Map Kills", "category": "ESPORTS", "yes_bid": 48, "yes_ask": 50, "last_price": 55, "volume": 2800, "open_interest": 3900},
+    {"ticker": "KXESPORTS-LOL-FAKER-O7P5AST", "title": "Lee 'Faker' Sang-hyeok Over 7.5 Map Assists", "category": "ESPORTS", "yes_bid": 49, "yes_ask": 51, "last_price": 56, "volume": 2700, "open_interest": 3800},
 ]
 
 TEAM_FUZZY_MAP = {
@@ -569,6 +597,15 @@ def get_auth_headers(method: str, path: str) -> dict:
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
+
+# ==========================================
+# SMART PLACING ENGINE (V2 OBI & MAKER LIMIT)
+# ==========================================
+smart_placer = KalshiSmartPlacer(
+    key_id=KALSHI_KEY_ID,
+    base_url=BASE_URL,
+    auth_header_fn=get_auth_headers,
+)
 
 # ==========================================
 # SQLITE TELEMETRY & SHARED BOT_STATE SYNC
@@ -1904,63 +1941,70 @@ def run_monte_carlo_and_combo_pipeline(
         best_combo = candidate_combos[0] if candidate_combos else None
         if best_combo and best_combo.ev_pct >= 2.5:
             combo_stake = min(best_combo.kelly_stake, remaining_slate_cap)
-            per_leg_stake = combo_stake / len(best_combo.legs)
+            combo_legs_input = [
+                {
+                    "sport": l.sport,
+                    "player_name": l.player_name,
+                    "stat_type": l.stat_type,
+                    "line": l.line,
+                    "side": l.side,
+                    "mc_true_prob": l.mc_true_prob,
+                    "ev_edge": l.ev_edge,
+                    "market_ticker": l.market_ticker,
+                }
+                for l in best_combo.legs
+            ]
+            receipts = smart_placer.smart_place_copula_combo(
+                legs=combo_legs_input,
+                copula_boost_pct=best_combo.copula_boost_pct,
+                bankroll_usd=combo_stake,
+                sniper_on=SNIPER_ARMED,
+                live_mode=LIVE_MODE,
+            )
             leg_order_data = []
+            for idx, rcp in enumerate(receipts):
+                leg = best_combo.legs[idx]
+                st = rcp.get("status")
+                tk = rcp.get("ticker") or leg.market_ticker
+                price_c = rcp.get("limit_cents") or leg.ask_cents
+                contracts = rcp.get("contracts", 1)
+                cost = rcp.get("cost_usd", round(contracts * price_c / 100.0, 2))
+                oid = rcp.get("order_id", "")
 
-            for leg in best_combo.legs:
-                price_c = leg.ask_cents
-                cost_per_c = max(1, price_c) / 100.0
-                raw_contracts = int(per_leg_stake // cost_per_c)
-                max_safe_contracts = 2 if bankroll <= 25.0 else min(10, max(1, int(bankroll // 5)))
-                contracts = max(1, min(raw_contracts, max_safe_contracts))
-                leg_cost = round(contracts * cost_per_c, 2)
-
-                if get_current_exposure() + leg_cost > slate_cap:
-                    contracts = 1
-                    leg_cost = round(cost_per_c, 2)
-                if get_current_exposure() + leg_cost > slate_cap:
-                    continue
-
-                order_res = execute_order(
-                    ticker=leg.market_ticker,
-                    action="buy",
-                    side=getattr(leg, "raw_side", "yes"),
-                    price_cents=price_c,
-                    count=contracts,
-                )
-                if order_res:
-                    cooldown_tracker[leg.market_ticker] = time.time()
-                    total_trades_count += 1
-                    open_positions[leg.market_ticker] = {
-                        "side": getattr(leg, "raw_side", "yes"),
-                        "entry": price_c,
-                        "qty": contracts,
-                        "hwm": price_c,
-                        "last_seen_bid": leg.bid_cents,
-                        "last_tick_ts": time.time(),
-                        "engine": leg.sport,
-                        "title": leg.player_prop,
-                        "order_id": order_res.get("order_id", ""),
-                    }
-                    log_trade(
-                        ticker=leg.market_ticker,
-                        engine=leg.sport,
-                        strategy="COPULA_COMBO_LEG",
-                        action="buy",
-                        side=getattr(leg, "raw_side", "yes"),
-                        price=price_c,
-                        count=contracts,
-                        metric=leg.ev_edge,
-                    )
+                if st in ("PLACED", "SIM_QUEUED"):
+                    cooldown_tracker[tk] = time.time()
+                    if st == "PLACED":
+                        total_trades_count += 1
+                        open_positions[tk] = {
+                            "side": getattr(leg, "raw_side", "yes"),
+                            "entry": price_c,
+                            "qty": contracts,
+                            "hwm": price_c,
+                            "last_seen_bid": leg.bid_cents,
+                            "last_tick_ts": time.time(),
+                            "engine": leg.sport,
+                            "title": leg.player_prop,
+                            "order_id": oid,
+                        }
+                        log_trade(
+                            ticker=tk,
+                            engine=leg.sport,
+                            strategy="COPULA_COMBO_LEG",
+                            action="buy",
+                            side=getattr(leg, "raw_side", "yes"),
+                            price=price_c,
+                            count=contracts,
+                            metric=leg.ev_edge,
+                        )
                     orders_executed.append({
-                        "ticker": leg.market_ticker,
+                        "ticker": tk,
                         "prop": leg.player_prop,
                         "sport": leg.sport,
                         "side": getattr(leg, "raw_side", "yes"),
                         "price": price_c,
                         "count": contracts,
-                        "cost": leg_cost,
-                        "order_id": order_res.get("order_id", ""),
+                        "cost": cost,
+                        "order_id": oid,
                         "ev": leg.ev_edge,
                         "p10": leg.p10,
                         "p50": leg.p50,
@@ -1991,25 +2035,30 @@ def run_monte_carlo_and_combo_pipeline(
 
         elif simulated_legs and simulated_legs[0].ev_edge >= 0.025:
             top_leg = simulated_legs[0]
-            price_c = top_leg.ask_cents
-            cost_per_c = max(1, price_c) / 100.0
-            qty = quarter_kelly_size(bankroll, top_leg.mc_true_prob, price_c)
-            max_single_qty = 2 if bankroll <= 25.0 else 5
-            qty = max(1, min(qty, max_single_qty))
-            leg_cost = round(qty * cost_per_c, 2)
+            top_res = smart_placer.smart_place_leg(
+                sport=top_leg.sport,
+                player_name=top_leg.player_name,
+                stat=top_leg.stat_type,
+                line=float(top_leg.line),
+                pick_dir=top_leg.side,
+                true_prob_pct=float(top_leg.mc_true_prob * 100.0),
+                ev_edge_pct=float(top_leg.edge_pct),
+                bankroll_usd=bankroll,
+                sniper_on=SNIPER_ARMED,
+                live_mode=LIVE_MODE,
+                existing_ticker=top_leg.market_ticker,
+            )
+            tk = top_res.get("ticker", top_leg.market_ticker)
+            price_c = top_res.get("limit_cents", top_leg.ask_cents)
+            qty = top_res.get("contracts", 1)
+            leg_cost = top_res.get("cost_usd", round(qty * price_c / 100.0, 2))
+            oid = top_res.get("order_id", "")
 
-            if qty > 0 and (get_current_exposure() + leg_cost <= slate_cap):
-                order_res = execute_order(
-                    ticker=top_leg.market_ticker,
-                    action="buy",
-                    side=getattr(top_leg, "raw_side", "yes"),
-                    price_cents=price_c,
-                    count=qty,
-                )
-                if order_res:
-                    cooldown_tracker[top_leg.market_ticker] = time.time()
+            if top_res.get("status") in ("PLACED", "SIM_QUEUED"):
+                cooldown_tracker[tk] = time.time()
+                if top_res.get("status") == "PLACED":
                     total_trades_count += 1
-                    open_positions[top_leg.market_ticker] = {
+                    open_positions[tk] = {
                         "side": getattr(top_leg, "raw_side", "yes"),
                         "entry": price_c,
                         "qty": qty,
@@ -2018,35 +2067,35 @@ def run_monte_carlo_and_combo_pipeline(
                         "last_tick_ts": time.time(),
                         "engine": top_leg.sport,
                         "title": top_leg.player_prop,
-                        "order_id": order_res.get("order_id", ""),
+                        "order_id": oid,
                     }
                     log_trade(
-                        ticker=top_leg.market_ticker,
+                        ticker=tk,
                         engine=top_leg.sport,
-                        strategy="10K_MC_SINGLE_SNIPE",
+                        strategy="SINGLE_SMART_LEG",
                         action="buy",
                         side=getattr(top_leg, "raw_side", "yes"),
                         price=price_c,
                         count=qty,
                         metric=top_leg.ev_edge,
                     )
-                    orders_executed.append({
-                        "ticker": top_leg.market_ticker,
-                        "prop": top_leg.player_prop,
-                        "sport": top_leg.sport,
-                        "side": getattr(top_leg, "raw_side", "yes"),
-                        "price": price_c,
-                        "count": qty,
-                        "cost": leg_cost,
-                        "order_id": order_res.get("order_id", ""),
-                        "ev": top_leg.ev_edge,
-                        "p10": top_leg.p10,
-                        "p50": top_leg.p50,
-                        "p90": top_leg.p90,
-                        "mean": getattr(top_leg, "mc_mean", top_leg.line),
-                        "std": getattr(top_leg, "mc_std", 1.5),
-                        "mc_true": top_leg.mc_true_prob,
-                    })
+                orders_executed.append({
+                    "ticker": tk,
+                    "prop": top_leg.player_prop,
+                    "sport": top_leg.sport,
+                    "side": getattr(top_leg, "raw_side", "yes"),
+                    "price": price_c,
+                    "count": qty,
+                    "cost": leg_cost,
+                    "order_id": oid,
+                    "ev": top_leg.ev_edge,
+                    "p10": top_leg.p10,
+                    "p50": top_leg.p50,
+                    "p90": top_leg.p90,
+                    "mean": getattr(top_leg, "mc_mean", top_leg.line),
+                    "std": getattr(top_leg, "mc_std", 1.5),
+                    "mc_true": top_leg.mc_true_prob,
+                })
 
     # Update diagnostics and DB state
     new_exp = get_current_exposure()
@@ -2329,6 +2378,101 @@ def build_sim_text(query: str = "") -> str:
     edge_sign = "+" if leg.edge_pct >= 0 else ""
     proj_mean = getattr(leg, 'mc_mean', 0.0) or leg.line or 20.0
     proj_std = getattr(leg, 'mc_std', 0.0) or (proj_mean * 0.24)
+
+    # SMART SNIPER EXECUTION HOOK
+    global total_trades_count
+    smart_status_block = ""
+    if leg.ev_edge >= 0.025:
+        p_name = leg.player_name or getattr(leg, 'player_prop', '')
+        s_type = leg.stat_type or "Points"
+        smart_exec_res = smart_placer.smart_place_leg(
+            sport=leg.sport,
+            player_name=p_name,
+            stat=s_type,
+            line=float(leg.line),
+            pick_dir=leg.side,
+            true_prob_pct=float(leg.mc_true_prob * 100.0),
+            ev_edge_pct=float(leg.edge_pct),
+            bankroll_usd=live_kalshi_balance if LIVE_MODE else 12.52,
+            sniper_on=SNIPER_ARMED,
+            live_mode=LIVE_MODE,
+            existing_ticker=leg.market_ticker if not leg.market_ticker.startswith("MANUAL-") else None,
+        )
+        if smart_exec_res:
+            st = smart_exec_res.get("status")
+            tk = smart_exec_res.get("ticker", leg.market_ticker)
+            if st in ("PLACED", "SIM_QUEUED"):
+                cooldown_tracker[tk] = time.time()
+                if st == "PLACED":
+                    total_trades_count += 1
+                    open_positions[tk] = {
+                        "side": smart_exec_res.get("side", leg.side).lower(),
+                        "entry": smart_exec_res.get("limit_cents", 50),
+                        "qty": smart_exec_res.get("contracts", 1),
+                        "hwm": smart_exec_res.get("limit_cents", 50),
+                        "last_seen_bid": smart_exec_res.get("limit_cents", 50),
+                        "last_tick_ts": time.time(),
+                        "engine": leg.sport,
+                        "title": leg.player_prop,
+                        "order_id": smart_exec_res.get("order_id", ""),
+                    }
+                    log_trade(
+                        ticker=tk,
+                        engine=leg.sport,
+                        strategy="SMART_SNIPER_SIM",
+                        action="buy",
+                        side=smart_exec_res.get("side", leg.side).lower(),
+                        price=smart_exec_res.get("limit_cents", 50),
+                        count=smart_exec_res.get("contracts", 1),
+                        metric=leg.ev_edge,
+                    )
+            if st == "PLACED":
+                smart_status_block = (
+                    f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎯 *SMART SNIPER ORDER EXECUTED* 🟢\n"
+                    f"• ⚡ *Status:* `LIVE ORDER PLACED`\n"
+                    f"• 📌 *Exchange Ticker:* `{tk}`\n"
+                    f"• 💵 *Smart Limit Price:* `{smart_exec_res.get('limit_cents')}¢` ({smart_exec_res.get('style')})\n"
+                    f"• 📦 *Contracts:* `{smart_exec_res.get('contracts')}` (Cost: `${smart_exec_res.get('cost_usd', 0.0):.2f}`)\n"
+                    f"• 🆔 *Order ID:* `{smart_exec_res.get('order_id')}`\n"
+                    f"• 🧠 *Execution Strategy:* _{smart_exec_res.get('note', '')}_"
+                )
+            elif st == "SIM_QUEUED":
+                smart_status_block = (
+                    f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎮 *SMART SNIPER SIMULATION* 🟡\n"
+                    f"• ⚡ *Status:* `PAPER ORDER TRACKED`\n"
+                    f"• 📌 *Resolved Ticker:* `{tk}`\n"
+                    f"• 💵 *Smart Limit Price:* `{smart_exec_res.get('limit_cents')}¢` ({smart_exec_res.get('style')})\n"
+                    f"• 📦 *Contracts:* `{smart_exec_res.get('contracts')}` (Value: `${smart_exec_res.get('cost_usd', 0.0):.2f}`)\n"
+                    f"• 🧠 *Strategy:* _{smart_exec_res.get('note', '')}_"
+                )
+            elif st == "BALANCE_HELD":
+                smart_status_block = (
+                    f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⚠️ *SMART SNIPER PAUSED* 🟠\n"
+                    f"• ⚡ *Status:* `RESTING ORDERS HOLDING BALANCE`\n"
+                    f"• 📌 *Resolved Ticker:* `{tk}`\n"
+                    f"• ℹ️ Resting orders on Kalshi are currently locking funds in escrow."
+                )
+            elif st == "NO_TICKER":
+                smart_status_block = (
+                    f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"ℹ️ *KALSHI CONTRACT RESOLVER*\n"
+                    f"• 🔍 *Note:* `{smart_exec_res.get('reason')}`"
+                )
+            elif st in ("API_REJECTED", "ERROR"):
+                smart_status_block = (
+                    f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⚠️ *SMART SNIPER REJECTED*\n"
+                    f"• ❌ *Reason:* `{smart_exec_res.get('reason', '')}`"
+                )
+    elif not SNIPER_ARMED:
+        smart_status_block = (
+            f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 *Smart Sniper:* `DISARMED` (Send /sniper on to auto-route orders)"
+        )
+
     return (
         f"🎲 *10,000-ITERATION MONTE CARLO PROP SIM* 🎲\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2348,6 +2492,7 @@ def build_sim_text(query: str = "") -> str:
         f"• 🧠 *10k Monte Carlo True Prob:* `{round(leg.mc_true_prob * 100.0, 1)}%`\n"
         f"• 🔥 *True EV Edge:* `{edge_sign}{leg.edge_pct}%`\n"
         f"• 🔗 [Direct Kalshi Market]({leg.market_url})"
+        + smart_status_block
     )
 
 
@@ -2606,40 +2751,76 @@ def execute_manual_slip(raw_query: str, target_cid: str = None) -> tuple:
     per_leg = custom_stake / max(1, len(custom_slip.legs))
 
     exec_summary = []
-    if LIVE_MODE and SNIPER_ARMED:
-        for cl in custom_slip.legs:
-            cost_c = max(1, cl.ask_cents)
-            c_qty = max(1, min(int(per_leg // (cost_c / 100.0)), 5))
-            res = execute_order(cl.market_ticker, "buy", getattr(cl, "raw_side", "yes"), cost_c, c_qty)
-            if res:
-                open_positions[cl.market_ticker] = {
+    combo_legs_input = [
+        {
+            "sport": cl.sport,
+            "player_name": cl.player_name,
+            "stat_type": cl.stat_type,
+            "line": cl.line,
+            "side": cl.side,
+            "mc_true_prob": cl.mc_true_prob,
+            "ev_edge": cl.ev_edge,
+            "market_ticker": cl.market_ticker,
+        }
+        for cl in custom_slip.legs
+    ]
+    receipts = smart_placer.smart_place_copula_combo(
+        legs=combo_legs_input,
+        copula_boost_pct=custom_slip.copula_boost_pct,
+        bankroll_usd=custom_stake,
+        sniper_on=SNIPER_ARMED,
+        live_mode=LIVE_MODE,
+    )
+    for idx, rcp in enumerate(receipts):
+        cl = custom_slip.legs[idx]
+        st = rcp.get("status")
+        tk = rcp.get("ticker", cl.market_ticker)
+        price_c = rcp.get("limit_cents", cl.ask_cents)
+        c_qty = rcp.get("contracts", 1)
+        oid = rcp.get("order_id", f"sim-{uuid.uuid4().hex[:8]}")
+        style = rcp.get("style", "SMART_LIMIT")
+
+        if st in ("PLACED", "SIM_QUEUED"):
+            cooldown_tracker[tk] = time.time()
+            if st == "PLACED":
+                total_trades_count += 1
+                open_positions[tk] = {
                     "side": getattr(cl, "raw_side", "yes"),
-                    "entry": cost_c,
+                    "entry": price_c,
                     "qty": c_qty,
-                    "hwm": cost_c,
+                    "hwm": price_c,
                     "last_seen_bid": cl.bid_cents,
                     "last_tick_ts": time.time(),
                     "engine": cl.sport,
                     "title": cl.player_prop,
-                    "order_id": res.get("order_id", ""),
+                    "order_id": oid,
                 }
-                exec_summary.append(f"• `[LIVE FILL]` `{cl.market_ticker}` ({c_qty}x @ {cost_c}c)")
-    else:
-        for cl in custom_slip.legs:
-            cost_c = max(1, cl.ask_cents)
-            c_qty = max(1, min(int(per_leg // (cost_c / 100.0)), 5))
-            open_positions[cl.market_ticker] = {
-                "side": getattr(cl, "raw_side", "yes"),
-                "entry": cost_c,
-                "qty": c_qty,
-                "hwm": cost_c,
-                "last_seen_bid": cl.bid_cents,
-                "last_tick_ts": time.time(),
-                "engine": cl.sport,
-                "title": cl.player_prop,
-                "order_id": f"sim-{uuid.uuid4().hex[:8]}",
-            }
-            exec_summary.append(f"• `[SIM RECORD]` `{cl.market_ticker}` ({c_qty}x @ {cost_c}c)")
+                log_trade(
+                    ticker=tk,
+                    engine=cl.sport,
+                    strategy="MANUAL_COMBO_LEG",
+                    action="buy",
+                    side=getattr(cl, "raw_side", "yes"),
+                    price=price_c,
+                    count=c_qty,
+                    metric=cl.ev_edge,
+                )
+                exec_summary.append(f"• `[LIVE FILL]` `{tk}` ({c_qty}x @ {price_c}¢ - {style})")
+            else:
+                open_positions[tk] = {
+                    "side": getattr(cl, "raw_side", "yes"),
+                    "entry": price_c,
+                    "qty": c_qty,
+                    "hwm": price_c,
+                    "last_seen_bid": cl.bid_cents,
+                    "last_tick_ts": time.time(),
+                    "engine": cl.sport,
+                    "title": cl.player_prop,
+                    "order_id": oid,
+                }
+                exec_summary.append(f"• `[SIM RECORD]` `{tk}` ({c_qty}x @ {price_c}¢ - {style})")
+        else:
+            exec_summary.append(f"• `[QUEUED/ALERT]` `{tk}`: {rcp.get('reason', st)}")
 
     try:
         log_new_slip(
@@ -3148,18 +3329,36 @@ async def telegram_notifier_and_command_loop():
                             await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
 
                     elif low.startswith(("/tennis", "/atp", "/wta")):
-                        rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "TENNIS", True, target_cid)
-                        if target_cid:
-                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                        parts = text.split(maxsplit=1)
+                        if len(parts) > 1 and parts[1].strip():
+                            rep_txt = await asyncio.to_thread(build_sim_text, f"TENNIS:{parts[1].strip()}")
+                            _, hud_kb = build_menu_hud_payload()
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
+                            else:
+                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
                         else:
-                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
+                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "TENNIS", True, target_cid)
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                            else:
+                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
 
                     elif low.startswith(("/nba", "/basketball")):
-                        rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "NBA", True, target_cid)
-                        if target_cid:
-                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                        parts = text.split(maxsplit=1)
+                        if len(parts) > 1 and parts[1].strip():
+                            rep_txt = await asyncio.to_thread(build_sim_text, f"NBA:{parts[1].strip()}")
+                            _, hud_kb = build_menu_hud_payload()
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
+                            else:
+                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
                         else:
-                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
+                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "NBA", True, target_cid)
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                            else:
+                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
 
                     elif low.startswith(("/livesim", "/combos", "/liveboard")):
                         rep_txt, rep_kb = await asyncio.to_thread(build_live_nba_diagnostic_board, target_cid)
@@ -3169,32 +3368,68 @@ async def telegram_notifier_and_command_loop():
                             await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
 
                     elif low.startswith(("/nfl", "/cfb", "/football")):
-                        rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "NFL", True, target_cid)
-                        if target_cid:
-                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                        parts = text.split(maxsplit=1)
+                        if len(parts) > 1 and parts[1].strip():
+                            rep_txt = await asyncio.to_thread(build_sim_text, f"NFL:{parts[1].strip()}")
+                            _, hud_kb = build_menu_hud_payload()
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
+                            else:
+                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
                         else:
-                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
+                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "NFL", True, target_cid)
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                            else:
+                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
 
                     elif low.startswith(("/mlb", "/baseball")):
-                        rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "MLB", True, target_cid)
-                        if target_cid:
-                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                        parts = text.split(maxsplit=1)
+                        if len(parts) > 1 and parts[1].strip():
+                            rep_txt = await asyncio.to_thread(build_sim_text, f"MLB:{parts[1].strip()}")
+                            _, hud_kb = build_menu_hud_payload()
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
+                            else:
+                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
                         else:
-                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
+                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "MLB", True, target_cid)
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                            else:
+                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
 
                     elif low.startswith("/wnba"):
-                        rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "WNBA", True, target_cid)
-                        if target_cid:
-                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                        parts = text.split(maxsplit=1)
+                        if len(parts) > 1 and parts[1].strip():
+                            rep_txt = await asyncio.to_thread(build_sim_text, f"WNBA:{parts[1].strip()}")
+                            _, hud_kb = build_menu_hud_payload()
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
+                            else:
+                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
                         else:
-                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
+                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "WNBA", True, target_cid)
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                            else:
+                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
 
                     elif low.startswith(("/esports", "/gaming")):
-                        rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "ESPORTS", True, target_cid)
-                        if target_cid:
-                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                        parts = text.split(maxsplit=1)
+                        if len(parts) > 1 and parts[1].strip():
+                            rep_txt = await asyncio.to_thread(build_sim_text, f"ESPORTS:{parts[1].strip()}")
+                            _, hud_kb = build_menu_hud_payload()
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
+                            else:
+                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
                         else:
-                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
+                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "ESPORTS", True, target_cid)
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                            else:
+                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
 
                     elif low.startswith("/sim"):
                         sim_query = text[4:].strip() if low.startswith("/sim") else ""
