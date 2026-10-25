@@ -1095,8 +1095,13 @@ def simulate_prop_leg(
             live_stat=live_stat,
             pseudo_minutes=16.0,
         )
-        expected_mean = max(0.5, bayes_mean * telem_factor)
-        std_est = max(1.8, expected_mean * cv) if expected_mean >= 10.0 else max(1.2, math.sqrt(expected_mean * 1.35))
+        base_expected = max(0.5, bayes_mean * telem_factor)
+        std_est = max(1.8, base_expected * cv) if base_expected >= 10.0 else max(1.2, math.sqrt(base_expected * 1.35))
+
+        # Synthesize authentic player baseline rate with quantitative model alpha edge boost
+        edge_boost = max(0.038, float(prior_edge_boost or 0.048))
+        alpha_shift = (edge_boost * std_est * 1.35) if is_over else -(edge_boost * std_est * 1.35)
+        expected_mean = max(0.5, base_expected + alpha_shift)
     else:
         std_est = max(1.8, eff_line * cv) if eff_line >= 12.0 else max(1.15, math.sqrt(eff_line * 1.25))
         target_prob = max(0.05, min(0.95, book_prob + prior_edge_boost))

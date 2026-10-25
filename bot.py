@@ -240,6 +240,9 @@ LATE_OCTOBER_ACTIVE_MARKETS = [
     {"ticker": "KXNBA-PHX-KD-O26P5PTS", "title": "Kevin Durant Over 26.5 Points", "category": "NBA", "yes_bid": 49, "yes_ask": 51, "last_price": 57, "volume": 3750, "open_interest": 4950},
     {"ticker": "KXNBA-CLE-MITCHELL-O25P5PTS", "title": "Donovan Mitchell Over 25.5 Points", "category": "NBA", "yes_bid": 48, "yes_ask": 50, "last_price": 55, "volume": 3600, "open_interest": 4900},
     {"ticker": "KXNBA-BKN-THOMAS-O24P5PTS", "title": "Cam Thomas Over 24.5 Points", "category": "NBA", "yes_bid": 47, "yes_ask": 49, "last_price": 54, "volume": 2700, "open_interest": 3800},
+    {"ticker": "KXNBA-MIN-RANDLE-O23P5PTS", "title": "Julius Randle Over 23.5 Points", "category": "NBA", "yes_bid": 48, "yes_ask": 50, "last_price": 55, "volume": 3400, "open_interest": 4700},
+    {"ticker": "KXNBA-MIN-EDWARDS-O26P5PTS", "title": "Anthony Edwards Over 26.5 Points", "category": "NBA", "yes_bid": 49, "yes_ask": 51, "last_price": 56, "volume": 3900, "open_interest": 5200},
+    {"ticker": "KXNBA-LAL-LBJ-O25P5PTS", "title": "LeBron James Over 25.5 Points", "category": "NBA", "yes_bid": 49, "yes_ask": 51, "last_price": 56, "volume": 4100, "open_interest": 5600},
     {"ticker": "KXNFL-KC-MAHOMES-O274P5", "title": "Patrick Mahomes Over 274.5 Pass Yds", "category": "NFL", "yes_bid": 48, "yes_ask": 50, "last_price": 56, "volume": 4200, "open_interest": 5800},
     {"ticker": "KXTENNIS-ATP-ALCARAZ-2SETS", "title": "Carlos Alcaraz Straight Sets Win", "category": "TENNIS", "yes_bid": 50, "yes_ask": 52, "last_price": 58, "volume": 2400, "open_interest": 3500},
 ]
@@ -1771,17 +1774,30 @@ def run_monte_carlo_and_combo_pipeline(
                     continue
             mapped_props.append(p)
 
-    # In LIVE_MODE, prioritize real live Kalshi markets over synthetic demo templates,
-    # while ensuring NBA models are retained for 10k MC simulation and EV calculation.
+    # In LIVE_MODE, prioritize real live Kalshi markets,
+    # while ensuring active NBA player props are always retained for 10k MC simulation and EV calculation.
     if LIVE_MODE:
         real_props = [p for p in mapped_props if not p.get("is_synthetic")]
+        real_nba_player_props = [
+            p for p in real_props
+            if p.get("sport") == "NBA" and p.get("stat_type") in (
+                "Points", "Rebounds", "Assists", "3PT Made", "PRA",
+                "Points + Rebounds", "Points + Assists", "Rebounds + Assists", "Stocks",
+                "PTS", "REB", "AST", "3PT", "Steals", "Blocks"
+            )
+        ]
+        nba_models = [p for p in mapped_props if p.get("is_synthetic") and p.get("sport") == "NBA"]
+
         if real_props:
-            has_real_nba = any(p.get("sport") == "NBA" for p in real_props)
-            if not has_real_nba:
-                nba_models = [p for p in mapped_props if p.get("is_synthetic") and p.get("sport") == "NBA"]
-                mapped_props = real_props + nba_models
+            # If Kalshi only has general game lines or thin props (< 4 player props),
+            # merge the curated NBA player prop models so users always have active +EV NBA player props
+            if len(real_nba_player_props) < 4:
+                existing_tkrs = {p["ticker"] for p in real_props}
+                mapped_props = real_props + [p for p in nba_models if p["ticker"] not in existing_tkrs]
             else:
                 mapped_props = real_props
+        else:
+            mapped_props = [p for p in mapped_props if not sport_filter or p.get("sport", "").upper() == sport_filter.upper()]
 
     if not mapped_props:
         for demo in LATE_OCTOBER_ACTIVE_MARKETS:

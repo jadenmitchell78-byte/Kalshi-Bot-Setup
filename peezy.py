@@ -116,6 +116,42 @@ def kill_stale_bot_processes() -> int:
 
 CURATED_QUANT_MARKETS: List[Dict[str, Any]] = [
     {
+        "ticker": "KXNBA-MIN-RANDLE-O23P5PTS",
+        "title": "Julius Randle Over 23.5 Points",
+        "category": "NBA",
+        "yes_bid": 48,
+        "yes_ask": 50,
+        "volume": 3400,
+        "open_interest": 4700,
+    },
+    {
+        "ticker": "KXNBA-MIN-EDWARDS-O26P5PTS",
+        "title": "Anthony Edwards Over 26.5 Points",
+        "category": "NBA",
+        "yes_bid": 49,
+        "yes_ask": 51,
+        "volume": 3900,
+        "open_interest": 5200,
+    },
+    {
+        "ticker": "KXNBA-DAL-LUKA-O31P5PTS",
+        "title": "Luka Doncic Over 31.5 Points",
+        "category": "NBA",
+        "yes_bid": 49,
+        "yes_ask": 51,
+        "volume": 4400,
+        "open_interest": 6200,
+    },
+    {
+        "ticker": "KXNBA-SAS-WEMBY-O22P5PTS",
+        "title": "Victor Wembanyama Over 22.5 Points",
+        "category": "NBA",
+        "yes_bid": 48,
+        "yes_ask": 50,
+        "volume": 4100,
+        "open_interest": 5800,
+    },
+    {
         "ticker": "KXNBA-LAL-LBJ-O25P5",
         "title": "LeBron James Over 25.5 Points",
         "category": "NBA",
