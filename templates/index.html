@@ -453,12 +453,13 @@
   <div id="persistent-video-dock" class="video-dock">
     <div class="video-dock-header">
       <span id="video-dock-title">📺 LIVE STREAM (Decoupled from Live-Wire Polling)</span>
-      <div>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <button id="btn-dock-next" class="btn" style="padding:3px 8px;font-size:10px;display:none" onclick="cycleDockStream()">🔄 Next Feed</button>
         <button class="btn" style="padding:3px 8px;font-size:10px" onclick="closeStreamDock()">✕ Close Player</button>
       </div>
     </div>
     <div class="video-frame-wrap">
-      <iframe id="video-dock-iframe" src="about:blank" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen></iframe>
+      <iframe id="video-dock-iframe" src="about:blank" referrerpolicy="no-referrer-when-downgrade" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen></iframe>
     </div>
   </div>
 
@@ -560,17 +561,43 @@
       renderProps();
     }
 
+    let dockStreamsList = [];
+    let currentDockStreamIdx = 0;
+    let currentDockTitle = '';
+
+    function cycleDockStream() {
+      if (!dockStreamsList || dockStreamsList.length <= 1) return;
+      currentDockStreamIdx = (currentDockStreamIdx + 1) % dockStreamsList.length;
+      const st = dockStreamsList[currentDockStreamIdx];
+      const iframeEl = document.getElementById('video-dock-iframe');
+      const titleEl = document.getElementById('video-dock-title');
+      const nextBtn = document.getElementById('btn-dock-next');
+      if (st && st.embed_url) {
+        iframeEl.src = st.embed_url;
+        titleEl.innerText = `📺 LIVE: ${currentDockTitle} [Feed ${currentDockStreamIdx + 1}/${dockStreamsList.length}]`;
+        if (nextBtn) nextBtn.innerText = `🔄 Next (${currentDockStreamIdx + 1}/${dockStreamsList.length})`;
+      }
+    }
+
     async function watchMatchStream(sport, label) {
       const dock = document.getElementById('persistent-video-dock');
       const titleEl = document.getElementById('video-dock-title');
       const iframeEl = document.getElementById('video-dock-iframe');
+      const nextBtn = document.getElementById('btn-dock-next');
       dock.style.display = 'block';
       titleEl.innerText = `📺 Resolving streamed.pk HD Feed: [${sport}] ${label}...`;
       try {
         const resp = await fetch(`/api/stream?sport=${encodeURIComponent(sport)}&q=${encodeURIComponent(label)}`);
         const data = await resp.json();
         if (data && data.embed_url) {
-          titleEl.innerText = `📺 LIVE: ${data.title} (${data.source.toUpperCase()})`;
+          dockStreamsList = (data.streams && data.streams.length > 0) ? data.streams : [{ embed_url: data.embed_url, source: data.source }];
+          currentDockStreamIdx = 0;
+          currentDockTitle = data.title || `${sport} Live`;
+          if (nextBtn) {
+            nextBtn.style.display = dockStreamsList.length > 1 ? 'inline-block' : 'none';
+            nextBtn.innerText = `🔄 Next (1/${dockStreamsList.length})`;
+          }
+          titleEl.innerText = `📺 LIVE: ${currentDockTitle} (${(data.source || 'HD').toUpperCase()})`;
           if (iframeEl.src !== data.embed_url) {
             iframeEl.src = data.embed_url;
           }
@@ -583,6 +610,9 @@
       const cat = catMap[sport] || 'basketball';
       const fallbackUrl = `https://streamed.pk/watch/${cat}`;
       titleEl.innerText = `📺 LIVE: [${sport}] ${label}`;
+      dockStreamsList = [{ embed_url: fallbackUrl, source: 'streamed.pk' }];
+      currentDockStreamIdx = 0;
+      if (nextBtn) nextBtn.style.display = 'none';
       if (iframeEl.src !== fallbackUrl) {
         iframeEl.src = fallbackUrl;
       }
@@ -591,6 +621,9 @@
     function closeStreamDock() {
       const dock = document.getElementById('persistent-video-dock');
       const iframeEl = document.getElementById('video-dock-iframe');
+      const nextBtn = document.getElementById('btn-dock-next');
+      if (nextBtn) nextBtn.style.display = 'none';
+      dockStreamsList = [];
       iframeEl.src = 'about:blank';
       dock.style.display = 'none';
     }

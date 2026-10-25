@@ -87,24 +87,29 @@ async def fetch_on_demand_stream(sport: str, query: str = "") -> Dict[str, Any]:
                                 if s_resp.status == 200:
                                     streams = await s_resp.json()
                                     if streams and isinstance(streams, list):
-                                        embed_url = streams[0].get("embedUrl") or ""
-                                        if embed_url:
+                                        valid_streams = [
+                                            {
+                                                "source": src_name,
+                                                "hd": bool(st.get("hd", True)),
+                                                "language": st.get("language", "EN"),
+                                                "embed_url": st.get("embedUrl"),
+                                            }
+                                            for st in streams
+                                            if st.get("embedUrl")
+                                        ]
+                                        # Prefer stream 2/3 for delta as stream 1 is frequently an uninitialized manifest
+                                        chosen_st = valid_streams[0] if valid_streams else None
+                                        if src_name == "delta" and len(valid_streams) > 1:
+                                            chosen_st = valid_streams[1]
+
+                                        if chosen_st and chosen_st.get("embed_url"):
                                             result = {
                                                 "ok": True,
                                                 "title": chosen.get("title", query or sport),
                                                 "sport": sport,
                                                 "source": src_name,
-                                                "embed_url": embed_url,
-                                                "streams": [
-                                                    {
-                                                        "source": src_name,
-                                                        "hd": bool(st.get("hd", True)),
-                                                        "language": st.get("language", "EN"),
-                                                        "embed_url": st.get("embedUrl"),
-                                                    }
-                                                    for st in streams[:4]
-                                                    if st.get("embedUrl")
-                                                ],
+                                                "embed_url": chosen_st["embed_url"],
+                                                "streams": valid_streams[:6],
                                             }
                                             _WEB_CACHE["streams_cache"][cache_key] = result
                                             return result

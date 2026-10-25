@@ -13,17 +13,44 @@ from config import (
     SPORT_EMOJIS,
     STALE_ORDER_TTL_SEC,
 )
-from sim_engine import PropSimResult, simulate_prop_leg
+from sim_engine import (
+    SPORT_STAT_DEFAULT_LINES,
+    PropSimResult,
+    resolve_sport_stat_line,
+    simulate_prop_leg,
+)
 from telemetry import GameTelemetry, match_telemetry_for_prop
 
-BANNED_PREFIXES = ("KXMVE", "COMBO", "PARLAY", "MULTIGAME", "CROSS")
+BANNED_PREFIXES = (
+    "KXMVE", "COMBO", "PARLAY", "MULTIGAME", "CROSS",
+    "KXNBACUP", "KXNBACHAMP", "KXNBAMVP", "KXNBAAWARDS", "KXNBADRAFT",
+    "KXNBAEAST", "KXNBAWEST", "KXNBAPLAYOFFS", "KXNBAFINALS", "KXNBATOURNAMENT",
+    "KXMLBAWARDS", "KXMLBCY", "KXMLBMVP", "KXMLBROY", "KXMLBWS", "KXMLBCHAMP",
+    "KXMLBDEBUT", "KXMLBDEBUTS", "KXMLBDRAFT", "KXMLBSEASON", "KXMLBHOF",
+    "KXMLBPENNANT", "KXMLBHRKING", "KXMLBWIN"
+)
+FUTURES_OR_CUP_TOKENS = (
+    "CUP", "IN-SEASON", "INSEASON", "IN SEASON", "MID-SEASON", "MIDSEASON", "MID SEASON", "MID SZN",
+    "CHAMPION", "CHAMPIONSHIP", "TITLE", "MVP", "ROOKIE", "ROY", "DPOY", "AWARDS", "DRAFT",
+    "EAST CONF", "WEST CONF", "CONFERENCE", "WIN TOTAL", "SEASON WIN", "MAKE PLAYOFFS", "MISS PLAYOFFS",
+    "FINALS", "BRACKET", "TOURNAMENT", "TOURNEY", "EMIRATES", "ALL-STAR", "ALL STAR", "DIVISION", "STANDINGS",
+    "SEASON-LONG", "SEASON LONG", "FUTURES", "FUTURE", "SEED",
+    "DEBUT", "DEBUTS", "CY YOUNG", "CY", "ROOKIE OF THE YEAR", "MANAGER OF THE YEAR",
+    "WORLD SERIES", "PENNANT", "SEASON REWARD", "SEASON REWARDS", "SZN REWARD", "SZN REWARDS",
+    "HOME RUN LEADER", "HR LEADER", "BATTING TITLE", "TRIPLE CROWN", "GOLD GLOVE", "SILVER SLUGGER", "HALL OF FAME"
+)
 COOLDOWN_SECONDS = 45
 
 SPORT_PROFILES: Dict[str, Dict[str, Any]] = {
     "NBA": {
-        "keywords": ("NBA", "KXNBA", "BASKETBALL", "LAKERS", "CELTICS", "WARRIORS", "BUCKS", "NUGGETS", "SUNS", "KNICKS", "PTS", "REB", "AST", "3PT"),
-        "max_spread": 6,
-        "min_ev": 0.035,
+        "keywords": (
+            "NBA", "KXNBA", "BASKETBALL", "LAKERS", "CELTICS", "WARRIORS", "BUCKS", "NUGGETS", "SUNS", "KNICKS",
+            "NETS", "CAVS", "CAVALIERS", "ROCKETS", "HAWKS", "PELICANS", "76ERS", "SIXERS", "WIZARDS", "BULLS", "SPURS", "MAVS", "MAVERICKS",
+            "HEAT", "PACERS", "PISTONS", "RAPTORS", "HORNETS", "GRIZZLIES", "MAGIC", "TIMBERWOLVES", "THUNDER", "BLAZERS", "JAZZ", "KINGS", "CLIPPERS",
+            "PTS", "REB", "AST", "3PT", "PRA"
+        ),
+        "max_spread": 12,
+        "min_ev": 0.025,
         "swing_trigger": 6,
         "loop_label": "5m loop",
         "active_october": True,
@@ -99,7 +126,7 @@ SPORT_PATTERNS = {
         re.IGNORECASE,
     ),
     "NBA": re.compile(
-        r"(NBA|KXNBA|BASKETBALL|LAKERS|CELTICS|WARRIORS|BUCKS|NUGGETS|SUNS|KNICKS|CLIPPERS|HEAT|MAVS|MAVERICKS|TIMBERWOLVES|LEBRON|CURRY|JOKIC|TATUM|AD|DAVIS|PTS|REB|AST|3PT|PRA)",
+        r"(NBA|KXNBA|BASKETBALL|LAKERS|CELTICS|WARRIORS|BUCKS|NUGGETS|SUNS|KNICKS|CLIPPERS|HEAT|MAVS|MAVERICKS|TIMBERWOLVES|WOLVES|LEBRON|CURRY|JOKIC|TATUM|AD|DAVIS|NETS|BROOKLYN|CAVS|CAVALIERS|CLEVELAND|ROCKETS|HOUSTON|HAWKS|ATLANTA|PELICANS|76ERS|SIXERS|PHILADELPHIA|WIZARDS|WASHINGTON|BULLS|CHICAGO|SPURS|SAN\s*ANTONIO|GRIZZLIES|MAGIC|ORLANDO|PACERS|INDIANA|PISTONS|DETROIT|RAPTORS|TORONTO|HORNETS|CHARLOTTE|THUNDER|OKC|BLAZERS|PORTLAND|JAZZ|UTAH|KINGS|SACRAMENTO|PTS|POINTS|REB|REBOUNDS|AST|ASSISTS|3PT|PRA)",
         re.IGNORECASE,
     ),
     "NFL": re.compile(
@@ -121,7 +148,22 @@ SPORT_PATTERNS = {
 }
 
 PROP_LINE_REGEX = re.compile(
-    r"(?P<side>OVER|UNDER|YES|NO|O|U)?\s*(?P<line>\d+(?:\.\d+)?)\+?\s*(?P<stat>PTS|POINTS|REB|REBOUNDS|AST|ASSISTS|PRA|3PT|PASS\s*YDS|REC\s*YDS|RUSH\s*YDS|YDS|YARDS|TD|K|STRIKEOUTS|HITS|HR|SETS|GAMES|KILLS|HEADSHOTS|HS|MAPS|ROUNDS)?",
+    r"(?P<side>OVER|UNDER|MORE\s*THAN|LESS\s*THAN|AT\s*LEAST|YES|NO|O|U)?\s*"
+    r"(?P<line>\d+(?:\.\d+)?)\+?\s*"
+    r"(?P<stat>PRA|PTS\s*\+\s*REB\s*\+\s*AST|POINTS\s*\+\s*REBOUNDS\s*\+\s*ASSISTS|"
+    r"PR|PTS\s*\+\s*REB|POINTS\s*\+\s*REBOUNDS|PA|PTS\s*\+\s*AST|POINTS\s*\+\s*ASSISTS|"
+    r"RA|REB\s*\+\s*AST|REBOUNDS\s*\+\s*ASSISTS|STOCKS|BLK\s*\+\s*STL|STL\s*\+\s*BLK|"
+    r"PTS|POINTS|REB|REBOUNDS|AST|ASSISTS|3PT|3-PT|THREE\s*POINTERS|THREES|3PM|"
+    r"PASS\s*YDS|PASSING\s*YARDS|PASS\s*YARDS|REC\s*YDS|RECEIVING\s*YARDS|REC\s*YARDS|"
+    r"RUSH\s*YDS|RUSHING\s*YARDS|RUSH\s*YARDS|YDS|YARDS|TOUCHDOWNS|TD|TDS|"
+    r"BLK|BLOCKS|STL|STEALS|TURNOVERS|TO|"
+    r"K|STRIKEOUTS|HITS|HOME\s*RUNS|HR|SETS|STRAIGHT\s*SETS|GAMES|GOALS|SAVES|SOG|"
+    r"KILLS|HEADSHOTS|HS|MAPS|ROUNDS)?",
+    re.IGNORECASE,
+)
+
+TICKER_LINE_REGEX = re.compile(
+    r"[-_](?P<side>[OU])?(?P<num>\d+(?:P\d+)?|\d+\.\d+)(?P<stat>3PT|PTS|AST|REB|PRA|PR|PA|RA|PASS|RUSH|REC|YDS|TD|K|SETS|GAMES)?(?:-[A-Z0-9]+)?$",
     re.IGNORECASE,
 )
 
@@ -138,6 +180,8 @@ class SlipLeg:
     p10: float = 0.0
     p50: float = 0.0
     p90: float = 0.0
+    mc_mean: float = 0.0
+    mc_std: float = 0.0
     dist_family: str = "STUDENT_T"
     archetype: str = "QUANT_HYBRID"
     sim_method: str = "Parametric Monte Carlo"
@@ -210,28 +254,30 @@ class SlipLeg:
         return d
 
 
-def _split_player_and_stat(prop_text: str, line: Optional[float]) -> tuple[str, str]:
+def _split_player_and_stat(prop_text: str, line: Optional[float] = None) -> tuple[str, str]:
     """Extract clean `Player Name` and `Stat Type` (e.g., `LeBron James`, `Pts`) from a prop title."""
     cleaned = re.sub(
-        r"\b(OVER|UNDER|YES|NO)\b\s*\d*(?:\.\d+)?\+?\s*",
+        r"\b(OVER|UNDER|YES|NO|MORE\s*THAN|LESS\s*THAN|AT\s*LEAST)\b\s*\d*(?:\.\d+)?\+?\s*",
         " ",
         prop_text,
         flags=re.IGNORECASE,
     )
     stat_match = re.search(
-        r"\b(Pass\s*Yds|Rec\s*Yds|Rush\s*Yds|Points|Pts|Rebounds|Reb|Assists|Ast|Strikeouts|K|Hits|HR|Straight\s*Sets|Sets|Yds|TD|Map\s*\d\s*Kills|Kills|Headshots|HS|Maps|Rounds)\b",
+        r"\b(Pass\s*Yds|Passing\s*Yards|Pass\s*Yards|Rec\s*Yds|Receiving\s*Yards|Rush\s*Yds|Rushing\s*Yards|"
+        r"Points|Pts|Rebounds|Reb|Assists|Ast|3PT\s*Made|3PT|Threes|Three\s*Pointers|PRA|Blocks|Blk|Steals|Stl|Turnovers|"
+        r"Strikeouts|K|Hits|Home\s*Runs|HR|Straight\s*Sets|Sets|Games|Goals|Saves|Touchdowns|TD|Kills|Headshots|Maps|Rounds)\b",
         prop_text,
         flags=re.IGNORECASE,
     )
-    stat_label = stat_match.group(1) if stat_match else "Prop"
+    stat_label = stat_match.group(1).title() if stat_match else "Prop"
     if stat_match:
         name_part = cleaned[: stat_match.start()].strip(" -—:")
     else:
         name_part = cleaned.strip(" -—:")
     name_part = re.sub(r"\s+", " ", name_part).strip()
-    if not name_part:
-        name_part = prop_text[:32].strip()
-    return name_part, stat_label
+    if not name_part or name_part.upper() in ("OVER", "UNDER", "YES", "NO", "WILL"):
+        name_part = prop_text.split("—")[0].split(":")[0].replace("Will ", "").strip()
+    return name_part[:36], stat_label
 
 
 @dataclass
@@ -316,7 +362,12 @@ def detect_sport(ticker: str, title: str = "") -> str:
         if SPORT_PATTERNS[sport].search(combined):
             return sport
 
-    if any(k in combined for k in ("PTS", "POINTS", "REB", "AST", "3PT", "PRA", "LAKERS", "CELTICS", "WARRIORS", "BASKETBALL")):
+    if any(k in combined for k in (
+        "PTS", "POINTS", "REB", "REBOUNDS", "AST", "ASSISTS", "3PT", "PRA",
+        "LAKERS", "CELTICS", "WARRIORS", "BUCKS", "NUGGETS", "SUNS", "KNICKS", "BASKETBALL",
+        "NETS", "CAVS", "CAVALIERS", "ROCKETS", "HAWKS", "PELICANS", "76ERS", "SIXERS", "WIZARDS", "BULLS", "SPURS", "MAVS",
+        "GRIZZLIES", "MAGIC", "HEAT", "PACERS", "PISTONS", "RAPTORS", "HORNETS", "THUNDER", "BLAZERS", "JAZZ", "KINGS"
+    )):
         return "NBA"
     if any(k in combined for k in ("PASS", "RUSH", "REC", "TD", "TOUCHDOWN", "YDS", "YARDS", "FOOTBALL", "QUARTERBACK")):
         return "NFL"
@@ -341,15 +392,20 @@ def _clean_price_cents(val: Any) -> int:
         return 0
 
 
-def parse_prop_and_line(ticker: str, title: str = "") -> Dict[str, Any]:
+def parse_prop_and_line(ticker: str, title: str = "", sport: Optional[str] = None) -> Dict[str, Any]:
     text = title.strip() if title else ticker.strip()
+    sp = sport or detect_sport(ticker, text)
     line_val: Optional[float] = None
     side = "OVER"
+    detected_stat = ""
 
-    ticker_line_match = re.search(r"-([OU])?(\d+(?:P\d+|\.\d+)?)[A-Z]*$", ticker.upper())
+    ticker_line_match = TICKER_LINE_REGEX.search(ticker.upper())
     if ticker_line_match:
-        prefix = ticker_line_match.group(1)
-        raw_num = ticker_line_match.group(2).replace("P", ".")
+        prefix = ticker_line_match.group("side")
+        raw_num = ticker_line_match.group("num").replace("P", ".")
+        st = ticker_line_match.group("stat")
+        if st:
+            detected_stat = st
         try:
             line_val = float(raw_num)
             if prefix == "U":
@@ -362,25 +418,30 @@ def parse_prop_and_line(ticker: str, title: str = "") -> Dict[str, Any]:
     match = PROP_LINE_REGEX.search(text)
     if match and match.group("line"):
         try:
-            if line_val is None:
-                line_val = float(match.group("line"))
+            extracted_num = float(match.group("line"))
+            if line_val is None or (line_val <= 1.0 and extracted_num > 1.0):
+                line_val = extracted_num
+            if match.group("stat") and not detected_stat:
+                detected_stat = match.group("stat")
             raw_side = (match.group("side") or "").upper()
-            if raw_side in ("U", "UNDER", "NO"):
+            if any(u in raw_side for u in ("U", "UNDER", "NO", "LESS")):
                 side = "UNDER"
-            elif raw_side in ("O", "OVER", "YES"):
+            elif any(o in raw_side for o in ("O", "OVER", "YES", "MORE", "AT LEAST")):
                 side = "OVER"
         except ValueError:
             pass
 
-    if line_val is None:
-        line_val = 22.5
+    player_name, stat_label = _split_player_and_stat(text, line_val)
+    if not detected_stat or detected_stat == "Prop":
+        detected_stat = stat_label
 
-    player_name, stat_type = _split_player_and_stat(text, line_val)
+    resolved_stat, final_line = resolve_sport_stat_line(sp, detected_stat, text, line_val)
+
     return {
         "player_prop": text[:70],
         "player_name": player_name,
-        "stat_type": stat_type,
-        "line": line_val,
+        "stat_type": resolved_stat,
+        "line": final_line,
         "side": side,
     }
 
@@ -408,6 +469,10 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     combined_blob = f"{ticker} {title} {subtitle} {category}".upper()
 
+    # User priority: Strictly daily/live game lines & player props (filter out cups, mid-season tourneys & futures)
+    if any(tok in combined_blob for tok in FUTURES_OR_CUP_TOKENS):
+        return []
+
     # 1. Sport Detection
     sport = detect_sport(ticker, text)
     if sport == "GENERAL":
@@ -428,94 +493,53 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
         else:
             sport = "NBA"  # Default to primary active October engine for simulation physics
 
-    # 2. Line extraction: floor_strike, strike_price, cap_strike, ticker regex, text regex, or 0.5 binary fallback
+    # 2. Line extraction: floor_strike, strike_price, cap_strike, ticker regex, text regex
     line_val: Optional[float] = None
+    extracted_stat = ""
+
     for strike_field in ("floor_strike", "strike_price", "cap_strike"):
         val = market.get(strike_field)
         if val is not None:
             try:
-                line_val = float(val)
-                break
+                fv = float(val)
+                if fv > 0:
+                    line_val = fv
+                    break
             except (ValueError, TypeError):
                 pass
 
-    if line_val is None:
-        ticker_line_match = re.search(r"-([OU])?(\d+(?:P\d+|\.\d+)?)[A-Z]*$", ticker.upper())
-        if ticker_line_match:
-            try:
-                line_val = float(ticker_line_match.group(2).replace("P", "."))
-            except ValueError:
-                pass
+    ticker_line_match = TICKER_LINE_REGEX.search(ticker.upper())
+    if ticker_line_match:
+        raw_num = ticker_line_match.group("num").replace("P", ".")
+        st = ticker_line_match.group("stat")
+        if st:
+            extracted_stat = st
+        try:
+            fv = float(raw_num)
+            if line_val is None or (line_val <= 1.0 and fv > 1.0):
+                line_val = fv
+        except ValueError:
+            pass
 
-    if line_val is None:
-        match = PROP_LINE_REGEX.search(text)
-        if match and match.group("line"):
-            try:
-                line_val = float(match.group("line"))
-            except ValueError:
-                pass
+    match = PROP_LINE_REGEX.search(text)
+    if match and match.group("line"):
+        try:
+            fv = float(match.group("line"))
+            if line_val is None or (line_val <= 1.0 and fv > 1.0):
+                line_val = fv
+            if match.group("stat") and not extracted_stat:
+                extracted_stat = match.group("stat")
+        except ValueError:
+            pass
 
-    # 3. Stat type & Player / Team name extraction
-    detected_stat = "Prop"
-    if "REB" in combined_blob:
-        detected_stat = "Rebounds"
-        if line_val is None:
-            line_val = 8.5
-    elif "AST" in combined_blob:
-        detected_stat = "Assists"
-        if line_val is None:
-            line_val = 6.5
-    elif "3PT" in combined_blob:
-        detected_stat = "3PT Made"
-        if line_val is None:
-            line_val = 2.5
-    elif "PASS" in combined_blob:
-        detected_stat = "Pass Yds"
-        if line_val is None:
-            line_val = 254.5
-    elif "REC" in combined_blob:
-        detected_stat = "Rec Yds"
-        if line_val is None:
-            line_val = 58.5
-    elif "RUSH" in combined_blob:
-        detected_stat = "Rush Yds"
-        if line_val is None:
-            line_val = 62.5
-    elif "TD" in combined_blob:
-        detected_stat = "Touchdowns"
-        if line_val is None:
-            line_val = 0.5
-    elif "SETS" in combined_blob or "STRAIGHT SETS" in combined_blob:
-        detected_stat = "Sets"
-        if line_val is None:
-            line_val = 2.0
-    elif "STRIKEOUT" in combined_blob or " K" in combined_blob:
-        detected_stat = "Strikeouts"
-        if line_val is None:
-            line_val = 5.5
-    elif "SPREAD" in combined_blob or re.search(r"[+-]\d+\.?\d*", text):
-        detected_stat = "Spread"
-        if line_val is None:
-            line_val = 0.5
-    elif "TOTAL" in combined_blob or "OVER/UNDER" in combined_blob:
-        detected_stat = "Total"
-        if line_val is None:
-            line_val = 224.5 if sport == "NBA" else 46.5
-    elif "WIN" in combined_blob or "MONEYLINE" in combined_blob:
-        detected_stat = "Moneyline"
-        if line_val is None:
-            line_val = 0.5
-    else:
-        # Binary outcome prop fallback
-        detected_stat = "Points" if sport == "NBA" else "Outcome"
-        if line_val is None:
-            line_val = 0.5
+    player_name, stat_label = _split_player_and_stat(text if text != ticker else title, line_val)
+    if not extracted_stat or extracted_stat == "Prop":
+        extracted_stat = stat_label
 
-    player_name, stat_type = _split_player_and_stat(text if text != ticker else title, line_val)
-    if stat_type and stat_type != "Prop":
-        detected_stat = stat_type
+    # 3. Sport & Stat Line Resolution (strictly accurate lines per sport!)
+    detected_stat, line_val = resolve_sport_stat_line(sport, extracted_stat, combined_blob, line_val)
+
     if not player_name or player_name == text or len(player_name) > 35:
-        # Extract clean team/player snippet from ticker or title
         cleaned_title = title.split(":")[0].replace("Will ", "").replace("?", "").strip()
         player_name = cleaned_title[:32] if cleaned_title else ticker.split("-")[0]
 
@@ -676,9 +700,14 @@ def parse_manual_leg_token(
         if sp_candidate.upper() in SPORT_EMOJIS:
             explicit_sport = sp_candidate.upper()
             raw = rest.strip()
+    elif " " in raw:
+        sp_first = raw.split(maxsplit=1)[0].upper()
+        if sp_first in SPORT_EMOJIS:
+            explicit_sport = sp_first
+            raw = raw.split(maxsplit=1)[1].strip()
 
-    parsed = parse_prop_and_line(raw, raw)
-    sport = explicit_sport or detect_sport(raw, parsed["player_prop"])
+    sport = explicit_sport or detect_sport(raw, raw)
+    parsed = parse_prop_and_line(raw, raw, sport=sport)
     ticker_slug = re.sub(r"[^A-Z0-9\-]", "-", raw.upper())[:32].strip("-") or "MANUAL-PROP"
 
     telem = (
@@ -713,6 +742,8 @@ def parse_manual_leg_token(
         p10=sim_res.p10,
         p50=sim_res.p50,
         p90=sim_res.p90,
+        mc_mean=sim_res.mean_proj,
+        mc_std=sim_res.std_proj,
         dist_family=sim_res.dist_family,
         archetype=sim_res.archetype,
         sim_method=sim_res.sim_method,
@@ -763,6 +794,9 @@ def build_leg_from_kalshi_market(
 
     title = market.get("title") or market.get("subtitle") or ticker
     category = market.get("category") or ""
+    blob = f"{ticker} {title} {category}".upper()
+    if any(tok in blob for tok in FUTURES_OR_CUP_TOKENS):
+        return None
     engine_name, profile = classify_sport_engine(ticker, title, category)
 
     spread = (yes_ask - yes_bid) if yes_bid > 0 else 3
@@ -772,7 +806,8 @@ def build_leg_from_kalshi_market(
     volume = int(float(market.get("volume") or 0))
     open_interest = int(float(market.get("open_interest") or 0))
     liquid_vol = volume + open_interest
-    if liquid_vol < min(350, MIN_LIQUID_VOLUME):
+    # In-game liquidity guard: allow actionable contracts with active quotes even before initial volume builds
+    if yes_ask <= 0:
         return None
 
     # Maintain rolling 10-tick history for Momentum / Steam Flash-Drop Snipe
@@ -818,9 +853,25 @@ def build_leg_from_kalshi_market(
             orderbook_edge = max(0.0, yes_ev)
 
     sport = detect_sport(ticker, title)
-    if sport == "OTHER" and engine_name in ("NBA", "TENNIS", "NFL", "MLB", "WNBA", "ESPORTS"):
+    if sport in ("OTHER", "GENERAL") and engine_name in ("NBA", "TENNIS", "NFL", "MLB", "WNBA", "ESPORTS"):
         sport = engine_name
-    parsed = parse_prop_and_line(ticker, title)
+
+    # Direct strike fields from market object if available
+    strike_override = None
+    for sf in ("floor_strike", "strike_price", "cap_strike"):
+        v = market.get(sf)
+        if v is not None:
+            try:
+                fv = float(v)
+                if fv > 0:
+                    strike_override = fv
+                    break
+            except (ValueError, TypeError):
+                pass
+
+    parsed = parse_prop_and_line(ticker, title, sport=sport)
+    if strike_override is not None and (parsed.get("line") is None or parsed.get("line", 0) <= 1.0 < strike_override):
+        parsed["line"] = strike_override
     if chosen_side == "UNDER":
         parsed["side"] = "UNDER"
 
@@ -871,6 +922,8 @@ def build_leg_from_kalshi_market(
         p10=sim_res.p10,
         p50=sim_res.p50,
         p90=sim_res.p90,
+        mc_mean=sim_res.mean_proj,
+        mc_std=sim_res.std_proj,
         dist_family=sim_res.dist_family,
         archetype=sim_res.archetype,
         sim_method=sim_res.sim_method,

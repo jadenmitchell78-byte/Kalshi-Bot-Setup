@@ -44,11 +44,17 @@ class GameTelemetry:
 
     @property
     def blowout_risk(self) -> float:
-        """Estimate starter benching / blowout risk in late quarters."""
-        if self.sport in ("NBA", "WNBA") and self.period >= 4 and self.score_diff >= 18:
-            return 0.25
-        if self.sport == "NFL" and self.period >= 4 and self.score_diff >= 21:
-            return 0.20
+        """
+        Estimate starter benching / blowout risk in late quarters.
+        Regular Season Rule: Blowout benching is ONLY applied if deep in the 4th quarter (Q4)
+        with a 20+ point lead. Pre-game, 1Q, 2Q, and 3Q starters play full rotation minutes!
+        """
+        if self.sport in ("NBA", "WNBA"):
+            if self.period >= 4 and self.score_diff >= 20:
+                return 0.18
+            return 0.0
+        if self.sport == "NFL" and self.period >= 4 and self.score_diff >= 24:
+            return 0.15
         return 0.0
 
     def anti_snipe_check(self) -> Dict[str, Any]:
@@ -56,6 +62,7 @@ class GameTelemetry:
         Evaluate the Anti-Snipe Shield:
         Blocks execution if play is suspended, latency exceeds threshold,
         injury/foul spikes are detected, or feed timestamp is stale.
+        For pre-game slates, feed is valid across the pre-game window (2 hours) without expiring.
         """
         age_sec = time.time() - self.fetched_at
         reasons: List[str] = []
@@ -66,7 +73,10 @@ class GameTelemetry:
             reasons.append("INJURY_OR_ROSTER_SPIKE")
         if self.latency_ms > ANTI_SNIPE_MAX_LATENCY_MS:
             reasons.append(f"HIGH_FEED_LATENCY ({self.latency_ms:.0f}ms)")
-        if age_sec > TELEMETRY_STALE_SEC:
+
+        # Pre-game games don't update every 90s (game hasn't started); allow full pre-tipoff window
+        stale_threshold = 7200.0 if (not self.is_live and not self.is_final) else TELEMETRY_STALE_SEC
+        if age_sec > stale_threshold:
             reasons.append(f"STALE_TELEMETRY ({age_sec:.0f}s old)")
 
         return {
@@ -275,15 +285,49 @@ def _build_synthetic_telemetry(sport: str) -> GameTelemetry:
     )
 
 
+_NBA_TEAM_ALIASES = {
+    "NOP": ("NO", "PELICANS", "NEW ORLEANS"),
+    "NO": ("NOP", "PELICANS", "NEW ORLEANS"),
+    "GSW": ("GS", "WARRIORS", "GOLDEN STATE"),
+    "GS": ("GSW", "WARRIORS", "GOLDEN STATE"),
+    "SAS": ("SA", "SPURS", "SAN ANTONIO"),
+    "SA": ("SAS", "SPURS", "SAN ANTONIO"),
+    "NYK": ("NY", "KNICKS", "NEW YORK"),
+    "NY": ("NYK", "KNICKS", "NEW YORK"),
+    "WAS": ("WSH", "WIZARDS", "WASHINGTON"),
+    "WSH": ("WAS", "WIZARDS", "WASHINGTON"),
+    "UTA": ("UTAH", "JAZZ"),
+    "UTAH": ("UTA", "JAZZ"),
+    "BKN": ("NETS", "BROOKLYN"),
+    "CLE": ("CAVS", "CAVALIERS", "CLEVELAND"),
+    "HOU": ("ROCKETS", "HOUSTON"),
+    "ATL": ("HAWKS", "ATLANTA"),
+    "DEN": ("NUGGETS", "DENVER"),
+    "PHX": ("SUNS", "PHOENIX"),
+    "MIL": ("BUCKS", "MILWAUKEE"),
+    "PHI": ("76ERS", "SIXERS", "PHILADELPHIA"),
+    "CHI": ("BULLS", "CHICAGO"),
+    "DAL": ("MAVS", "MAVERICKS", "DALLAS"),
+}
+
+
 def match_telemetry_for_prop(
     sport: str, ticker: str, prop_text: str, telemetry_map: Dict[str, List[GameTelemetry]]
 ) -> GameTelemetry:
-    """Match a prop or market ticker to its corresponding live ESPN GameTelemetry object."""
+    """Match a prop or market ticker to its corresponding live ESPN GameTelemetry object with alias resolution."""
     games = telemetry_map.get(sport.upper()) or []
     combined = f"{ticker} {prop_text}".upper()
+
     for g in games:
-        if g.home_team.upper() in combined or g.away_team.upper() in combined:
+        h = g.home_team.upper()
+        a = g.away_team.upper()
+        if h in combined or a in combined:
             return g
+        h_aliases = _NBA_TEAM_ALIASES.get(h, ())
+        a_aliases = _NBA_TEAM_ALIASES.get(a, ())
+        if any(al in combined for al in h_aliases) or any(al in combined for al in a_aliases):
+            return g
+
     if games:
         return games[0]
     return _build_synthetic_telemetry(sport)

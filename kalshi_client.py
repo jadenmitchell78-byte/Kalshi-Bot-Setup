@@ -250,28 +250,40 @@ async def place_kalshi_order(
 
     attempts = [
         (
-            f"{KALSHI_BASE_URL}/portfolio/events/orders",
+            f"{KALSHI_BASE_URL}/portfolio/orders",
             {
                 "ticker": ticker,
-                "side": v2_side,
+                "action": action.lower(),
                 "type": "limit",
+                "side": "yes" if is_yes else "no",
                 "count": max(1, int(count)),
-                "price": price_str,
-                "time_in_force": "good_till_canceled",
+                "yes_price": price_cents if is_yes else (100 - price_cents),
                 "client_order_id": client_oid,
-                "self_trade_prevention_type": "taker_at_cross",
             },
         ),
         (
             f"{KALSHI_BASE_URL}/portfolio/orders",
             {
-                "action": "buy",
-                "client_order_id": client_oid,
-                "count": max(1, int(count)),
-                "side": "yes" if is_yes else "no",
                 "ticker": ticker,
+                "action": action.lower(),
                 "type": "limit",
-                "yes_price" if is_yes else "no_price": max(1, min(99, int(price_cents))),
+                "side": "yes" if is_yes else "no",
+                "count": max(1, int(count)),
+                "price": price_cents if is_yes else (100 - price_cents),
+                "client_order_id": client_oid,
+            },
+        ),
+        (
+            f"{KALSHI_BASE_URL}/portfolio/events/orders",
+            {
+                "ticker": ticker,
+                "side": v2_side,
+                "type": "limit",
+                "count": str(max(1, int(count))),
+                "price": price_str,
+                "time_in_force": "good_till_canceled",
+                "client_order_id": client_oid,
+                "self_trade_prevention_type": "taker_at_cross",
             },
         ),
     ]

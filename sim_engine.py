@@ -42,26 +42,64 @@ class PropSimResult:
 # =========================================================
 SPORT_ARCHETYPES: Dict[str, Dict[str, Dict[str, Any]]] = {
     "NBA": {
-        "HELIO_CREATOR": {
-            "keywords": ("LEBRON", "JOKIC", "DONCIC", "LUKA", "TRAE", "HALIBURTON", "CADE", "HARDEN", "AST", "PRA"),
-            "sim_method": "NBA Minute-Possession Heliocentric NB",
-            "usage_cv": 0.16,
-            "blowout_sensitivity": 0.65,
+        "VOLUME_SCORER": {
+            "keywords": (
+                "RANDLE", "JULIUS RANDLE", "J RANDLE", "TATUM", "CURRY", "DURANT", "BOOKER",
+                "EDWARDS", "ANT", "SHAI", "SGA", "BRUNSON", "MITCHELL", "FOX", "ZION", "MAXEY",
+                "LAVINE", "POOLE", "CAM THOMAS", "THOMAS", "BANCHERO", "INGRAM", "DEROZAN", "BEAL",
+                "PTS", "POINTS"
+            ),
+            "sim_method": "NBA Hot-Hand Gamma-Poisson Shot Model",
+            "dist_family": "STUDENT_T",
+            "usage_cv": 0.24,
+            "blowout_sensitivity": 0.80,
             "clutch_boost": 1.04,
         },
-        "VOLUME_SCORER": {
-            "keywords": ("TATUM", "CURRY", "DURANT", "BOOKER", "EDWARDS", "SHAI", "SGA", "BRUNSON", "PTS", "POINTS", "3PT"),
-            "sim_method": "NBA Hot-Hand Gamma-Poisson Shot Model",
-            "usage_cv": 0.21,
-            "blowout_sensitivity": 0.80,
-            "clutch_boost": 1.03,
+        "HELIOCENTRIC_GUARD": {
+            "keywords": (
+                "DONCIC", "LUKA", "JOKIC", "LEBRON", "TRAE", "HALIBURTON", "HARDEN", "CADE",
+                "LAMELO", "BALL", "MORANT", "GARLAND", "VANVLEET", "PAUL", "SENGUN", "SABONIS",
+                "AST", "ASSISTS", "PRA", "PA", "RA"
+            ),
+            "sim_method": "NBA Minute-Possession Heliocentric NB",
+            "dist_family": "NEG_BINOMIAL",
+            "usage_cv": 0.22,
+            "blowout_sensitivity": 0.65,
+            "clutch_boost": 1.05,
         },
-        "GLASS_RIM_BIG": {
-            "keywords": ("DAVIS", "AD", "GIANNIS", "SABONIS", "WEMBANYAMA", "GOBERT", "BAM", "KAT", "REB", "REBOUNDS", "BLK"),
+        "STRETCH_BIG": {
+            "keywords": (
+                "TOWNS", "KAT", "CHET", "HOLMGREN", "PORZINGIS", "MARKKANEN", "BROOK LOPEZ",
+                "TURNER", "HORFORD", "VOOCH", "VUCEVIC", "3PT", "3-PT", "THREES", "3PM"
+            ),
+            "sim_method": "NBA Stretch-Space 3PM Poisson-Binomial",
+            "dist_family": "POISSON",
+            "usage_cv": 0.26,
+            "blowout_sensitivity": 0.60,
+            "clutch_boost": 1.02,
+        },
+        "GLASS_CLEANER": {
+            "keywords": (
+                "DAVIS", "AD", "GIANNIS", "WEMBANYAMA", "WEMBY", "GOBERT", "BAM", "ADEBAYO",
+                "CLAXTON", "ALLEN", "JARRETT ALLEN", "POELTL", "ZUBAC", "DUREN", "CAPELA", "LIVELY",
+                "REB", "REBOUNDS", "BLK", "BLOCKS"
+            ),
             "sim_method": "NBA Rebound-Chance & Foul-Hazard Model",
-            "usage_cv": 0.18,
-            "blowout_sensitivity": 0.75,
+            "dist_family": "NEG_BINOMIAL",
+            "usage_cv": 0.20,
+            "blowout_sensitivity": 0.70,
             "clutch_boost": 1.01,
+        },
+        "MICROWAVE_BENCH": {
+            "keywords": (
+                "MONK", "NAZ REID", "POWELL", "CLARKSON", "PORTIS", "MATHURIN", "BOGDANOVIC",
+                "LEVERT", "BROGDON", "PRITCHARD", "ALVARADO", "WESTBROOK", "BENCH", "6TH MAN"
+            ),
+            "sim_method": "NBA Volatile Microwave Bench Burst Model",
+            "dist_family": "STUDENT_T",
+            "usage_cv": 0.29,
+            "blowout_sensitivity": -0.40,
+            "clutch_boost": 0.95,
         },
     },
     "WNBA": {
@@ -174,11 +212,631 @@ SPORT_ARCHETYPES: Dict[str, Dict[str, Dict[str, Any]]] = {
     },
 }
 
+# =========================================================
+# NBA PLAYER BASELINE REGISTRY & PEER ARCHETYPES
+# Real 2024-2026 per-game priors and minute anchors
+# =========================================================
+NBA_PLAYER_REGISTRY: Dict[str, Dict[str, Any]] = {
+    "JULIUS RANDLE": {
+        "aliases": ("RANDLE", "J RANDLE", "JULIUS RANDLE", "J. RANDLE"),
+        "team": "MIN",
+        "archetype": "VOLUME_SCORER",
+        "proj_mins": 34.0,
+        "baselines": {"PTS": 24.2, "REB": 9.2, "AST": 5.0, "PRA": 38.4, "PR": 33.4, "PA": 29.2, "RA": 14.2, "3PT": 1.7, "BLK": 0.5, "STL": 0.7, "TO": 3.2},
+    },
+    "ANTHONY EDWARDS": {
+        "aliases": ("EDWARDS", "ANT", "ANTHONY EDWARDS", "A. EDWARDS"),
+        "team": "MIN",
+        "archetype": "VOLUME_SCORER",
+        "proj_mins": 35.5,
+        "baselines": {"PTS": 26.8, "REB": 5.5, "AST": 5.2, "PRA": 37.5, "PR": 32.3, "PA": 32.0, "RA": 10.7, "3PT": 3.1, "STL": 1.3},
+    },
+    "RUDY GOBERT": {
+        "aliases": ("GOBERT", "RUDY GOBERT", "R. GOBERT"),
+        "team": "MIN",
+        "archetype": "GLASS_CLEANER",
+        "proj_mins": 32.0,
+        "baselines": {"PTS": 13.8, "REB": 12.8, "AST": 1.3, "PRA": 27.9, "BLK": 2.1, "RA": 14.1},
+    },
+    "NAZ REID": {
+        "aliases": ("NAZ REID", "REID", "N. REID"),
+        "team": "MIN",
+        "archetype": "MICROWAVE_BENCH",
+        "proj_mins": 24.5,
+        "baselines": {"PTS": 13.5, "REB": 5.2, "AST": 1.3, "PRA": 20.0, "3PT": 2.1},
+    },
+    "LEBRON JAMES": {
+        "aliases": ("LEBRON", "LEBRON JAMES", "L. JAMES", "LBJ"),
+        "team": "LAL",
+        "archetype": "HELIOCENTRIC_GUARD",
+        "proj_mins": 35.0,
+        "baselines": {"PTS": 25.2, "REB": 7.3, "AST": 8.1, "PRA": 40.6, "PR": 32.5, "PA": 33.3, "RA": 15.4, "3PT": 2.1},
+    },
+    "ANTHONY DAVIS": {
+        "aliases": ("DAVIS", "ANTHONY DAVIS", "A. DAVIS", "AD"),
+        "team": "LAL",
+        "archetype": "GLASS_CLEANER",
+        "proj_mins": 35.5,
+        "baselines": {"PTS": 25.8, "REB": 12.6, "AST": 3.5, "PRA": 41.9, "PR": 38.4, "PA": 29.3, "RA": 16.1, "BLK": 2.4},
+    },
+    "NIKOLA JOKIC": {
+        "aliases": ("JOKIC", "NIKOLA JOKIC", "N. JOKIC", "JOKER"),
+        "team": "DEN",
+        "archetype": "HELIOCENTRIC_GUARD",
+        "proj_mins": 35.0,
+        "baselines": {"PTS": 26.4, "REB": 12.4, "AST": 9.8, "PRA": 48.6, "PR": 38.8, "PA": 36.2, "RA": 22.2, "3PT": 1.2},
+    },
+    "LUKA DONCIC": {
+        "aliases": ("DONCIC", "LUKA", "LUKA DONCIC", "L. DONCIC"),
+        "team": "DAL",
+        "archetype": "HELIOCENTRIC_GUARD",
+        "proj_mins": 36.5,
+        "baselines": {"PTS": 33.6, "REB": 9.2, "AST": 9.8, "PRA": 52.6, "PR": 42.8, "PA": 43.4, "RA": 19.0, "3PT": 4.1},
+    },
+    "STEPHEN CURRY": {
+        "aliases": ("CURRY", "STEPHEN CURRY", "STEPH CURRY", "S. CURRY"),
+        "team": "GSW",
+        "archetype": "VOLUME_SCORER",
+        "proj_mins": 33.0,
+        "baselines": {"PTS": 26.4, "REB": 4.5, "AST": 5.1, "PRA": 36.0, "3PT": 4.8},
+    },
+    "KEVIN DURANT": {
+        "aliases": ("DURANT", "KEVIN DURANT", "K. DURANT", "KD"),
+        "team": "PHX",
+        "archetype": "VOLUME_SCORER",
+        "proj_mins": 36.0,
+        "baselines": {"PTS": 27.2, "REB": 6.6, "AST": 5.0, "PRA": 38.8, "3PT": 2.2},
+    },
+    "DEVIN BOOKER": {
+        "aliases": ("BOOKER", "DEVIN BOOKER", "D. BOOKER"),
+        "team": "PHX",
+        "archetype": "VOLUME_SCORER",
+        "proj_mins": 36.0,
+        "baselines": {"PTS": 27.1, "REB": 4.5, "AST": 6.9, "PRA": 38.5, "3PT": 2.3},
+    },
+    "GIANNIS ANTETOKOUNMPO": {
+        "aliases": ("GIANNIS", "ANTETOKOUNMPO", "GIANNIS ANTETOKOUNMPO", "G. ANTETOKOUNMPO"),
+        "team": "MIL",
+        "archetype": "VOLUME_SCORER",
+        "proj_mins": 35.0,
+        "baselines": {"PTS": 30.4, "REB": 11.5, "AST": 6.5, "PRA": 48.4, "PR": 41.9, "PA": 36.9, "RA": 18.0},
+    },
+    "JAYSON TATUM": {
+        "aliases": ("TATUM", "JAYSON TATUM", "J. TATUM"),
+        "team": "BOS",
+        "archetype": "VOLUME_SCORER",
+        "proj_mins": 36.0,
+        "baselines": {"PTS": 27.0, "REB": 8.2, "AST": 5.0, "PRA": 40.2, "3PT": 3.1},
+    },
+    "JAYLEN BROWN": {
+        "aliases": ("BROWN", "JAYLEN BROWN", "J. BROWN"),
+        "team": "BOS",
+        "archetype": "VOLUME_SCORER",
+        "proj_mins": 34.0,
+        "baselines": {"PTS": 23.2, "REB": 5.6, "AST": 3.7, "PRA": 32.5, "3PT": 2.4},
+    },
+    "SHAI GILGEOUS-ALEXANDER": {
+        "aliases": ("SHAI", "GILGEOUS-ALEXANDER", "GILGEOUS", "SGA"),
+        "team": "OKC",
+        "archetype": "VOLUME_SCORER",
+        "proj_mins": 34.5,
+        "baselines": {"PTS": 30.1, "REB": 5.6, "AST": 6.2, "PRA": 41.9, "STL": 2.0},
+    },
+    "CHET HOLMGREN": {
+        "aliases": ("CHET", "HOLMGREN", "CHET HOLMGREN", "C. HOLMGREN"),
+        "team": "OKC",
+        "archetype": "STRETCH_BIG",
+        "proj_mins": 30.0,
+        "baselines": {"PTS": 17.5, "REB": 8.5, "AST": 2.6, "PRA": 28.6, "BLK": 2.5, "3PT": 1.7},
+    },
+    "VICTOR WEMBANYAMA": {
+        "aliases": ("WEMBANYAMA", "WEMBY", "VICTOR WEMBANYAMA", "V. WEMBANYAMA"),
+        "team": "SAS",
+        "archetype": "GLASS_CLEANER",
+        "proj_mins": 32.0,
+        "baselines": {"PTS": 22.8, "REB": 11.2, "AST": 4.0, "PRA": 38.0, "BLK": 3.6, "3PT": 2.0},
+    },
+    "TRAE YOUNG": {
+        "aliases": ("TRAE", "TRAE YOUNG", "T. YOUNG"),
+        "team": "ATL",
+        "archetype": "HELIOCENTRIC_GUARD",
+        "proj_mins": 35.5,
+        "baselines": {"PTS": 25.8, "REB": 2.8, "AST": 10.8, "PRA": 39.4, "PA": 36.6, "3PT": 3.2},
+    },
+    "TYRESE HALIBURTON": {
+        "aliases": ("HALIBURTON", "TYRESE HALIBURTON", "T. HALIBURTON"),
+        "team": "IND",
+        "archetype": "HELIOCENTRIC_GUARD",
+        "proj_mins": 33.5,
+        "baselines": {"PTS": 20.1, "REB": 3.9, "AST": 10.9, "PRA": 34.9, "PA": 31.0, "3PT": 2.8},
+    },
+    "TYRESE MAXEY": {
+        "aliases": ("MAXEY", "TYRESE MAXEY", "T. MAXEY"),
+        "team": "PHI",
+        "archetype": "VOLUME_SCORER",
+        "proj_mins": 37.0,
+        "baselines": {"PTS": 26.2, "REB": 3.8, "AST": 6.2, "PRA": 36.2, "3PT": 3.0},
+    },
+    "JOEL EMBIID": {
+        "aliases": ("EMBIID", "JOEL EMBIID", "J. EMBIID"),
+        "team": "PHI",
+        "archetype": "GLASS_CLEANER",
+        "proj_mins": 34.0,
+        "baselines": {"PTS": 33.1, "REB": 11.0, "AST": 5.6, "PRA": 49.7, "BLK": 1.7},
+    },
+    "DONOVAN MITCHELL": {
+        "aliases": ("MITCHELL", "DONOVAN MITCHELL", "D. MITCHELL"),
+        "team": "CLE",
+        "archetype": "VOLUME_SCORER",
+        "proj_mins": 35.5,
+        "baselines": {"PTS": 26.6, "REB": 5.1, "AST": 6.1, "PRA": 37.8, "3PT": 3.3},
+    },
+    "BAM ADEBAYO": {
+        "aliases": ("BAM", "ADEBAYO", "BAM ADEBAYO", "B. ADEBAYO"),
+        "team": "MIA",
+        "archetype": "GLASS_CLEANER",
+        "proj_mins": 34.0,
+        "baselines": {"PTS": 19.3, "REB": 10.4, "AST": 3.9, "PRA": 33.6, "PR": 29.7},
+    },
+    "DOMANTAS SABONIS": {
+        "aliases": ("SABONIS", "DOMANTAS SABONIS", "D. SABONIS"),
+        "team": "SAC",
+        "archetype": "GLASS_CLEANER",
+        "proj_mins": 35.5,
+        "baselines": {"PTS": 19.4, "REB": 13.7, "AST": 8.2, "PRA": 41.3, "PR": 33.1, "RA": 21.9},
+    },
+    "DE'AARON FOX": {
+        "aliases": ("FOX", "DE'AARON FOX", "DEAARON FOX", "D. FOX"),
+        "team": "SAC",
+        "archetype": "VOLUME_SCORER",
+        "proj_mins": 35.5,
+        "baselines": {"PTS": 26.6, "REB": 4.6, "AST": 5.6, "PRA": 36.8, "3PT": 2.6},
+    },
+    "ZACH LAVINE": {
+        "aliases": ("LAVINE", "ZACH LAVINE", "Z. LAVINE"),
+        "team": "CHI",
+        "archetype": "VOLUME_SCORER",
+        "proj_mins": 34.0,
+        "baselines": {"PTS": 22.5, "REB": 4.8, "AST": 4.0, "PRA": 31.3, "3PT": 2.6},
+    },
+    "JORDAN POOLE": {
+        "aliases": ("POOLE", "JORDAN POOLE", "J. POOLE"),
+        "team": "WAS",
+        "archetype": "VOLUME_SCORER",
+        "proj_mins": 32.0,
+        "baselines": {"PTS": 21.2, "REB": 2.8, "AST": 4.4, "PRA": 28.4, "3PT": 2.8},
+    },
+    "CAM THOMAS": {
+        "aliases": ("CAM THOMAS", "C. THOMAS"),
+        "team": "BKN",
+        "archetype": "VOLUME_SCORER",
+        "proj_mins": 33.0,
+        "baselines": {"PTS": 23.8, "REB": 3.4, "AST": 3.1, "PRA": 30.3, "3PT": 2.4},
+    },
+    "KARL-ANTHONY TOWNS": {
+        "aliases": ("TOWNS", "KARL-ANTHONY TOWNS", "KAT", "K. TOWNS"),
+        "team": "NYK",
+        "archetype": "STRETCH_BIG",
+        "proj_mins": 34.0,
+        "baselines": {"PTS": 22.5, "REB": 9.8, "AST": 3.2, "PRA": 35.5, "3PT": 2.2},
+    },
+    "JALEN BRUNSON": {
+        "aliases": ("BRUNSON", "JALEN BRUNSON", "J. BRUNSON"),
+        "team": "NYK",
+        "archetype": "VOLUME_SCORER",
+        "proj_mins": 35.5,
+        "baselines": {"PTS": 28.4, "REB": 3.6, "AST": 6.8, "PRA": 38.8, "3PT": 2.7},
+    },
+    "ALPEREN SENGUN": {
+        "aliases": ("SENGUN", "ALPEREN SENGUN", "A. SENGUN"),
+        "team": "HOU",
+        "archetype": "HELIOCENTRIC_GUARD",
+        "proj_mins": 32.5,
+        "baselines": {"PTS": 21.1, "REB": 9.3, "AST": 5.0, "PRA": 35.4, "PR": 30.4, "RA": 14.3},
+    },
+    "ZION WILLIAMSON": {
+        "aliases": ("ZION", "ZION WILLIAMSON", "Z. WILLIAMSON"),
+        "team": "NOP",
+        "archetype": "VOLUME_SCORER",
+        "proj_mins": 32.0,
+        "baselines": {"PTS": 23.5, "REB": 5.8, "AST": 5.0, "PRA": 34.3, "PR": 29.3},
+    },
+}
+
+
+def lookup_nba_player_baseline(name_or_text: str) -> Optional[Dict[str, Any]]:
+    clean = re.sub(r"[^A-Z0-9\s]", " ", name_or_text.upper())
+    tokens = clean.split()
+    for full_name, data in NBA_PLAYER_REGISTRY.items():
+        if full_name in clean:
+            return data
+        for alias in data.get("aliases", ()):
+            alias_u = alias.upper()
+            if alias_u in clean:
+                return data
+            if alias_u in tokens:
+                return data
+    return None
+
+
+def calculate_empirical_bayes_projection(
+    prior_mean: float,
+    proj_minutes: float = 34.0,
+    live_minutes: float = 0.0,
+    live_stat: float = 0.0,
+    pseudo_minutes: float = 16.0,
+) -> Tuple[float, float]:
+    """
+    Gamma-Poisson Empirical Bayes Rate Shrinkage (16.0 Pseudo-Minute Anchor):
+    Anchors prior per-minute rate with M_0 = 16.0 pseudo-minutes.
+    lambda_post = (M_0 * lambda_0 + y_live) / (M_0 + m_live)
+    Returns: (projected_mean, posterior_rate)
+    """
+    total_mins = max(18.0, min(42.0, proj_minutes))
+    lambda_0 = prior_mean / total_mins
+    if live_minutes <= 0.0:
+        return prior_mean, lambda_0
+
+    lambda_post = (pseudo_minutes * lambda_0 + live_stat) / (pseudo_minutes + live_minutes)
+    rem_minutes = max(0.0, total_mins - live_minutes)
+    projected_mean = live_stat + rem_minutes * lambda_post
+    return projected_mean, lambda_post
+
+
+# =========================================================
+# SPORT-SPECIFIC STAT & LINE CALIBRATION MATRIX
+# =========================================================
+SPORT_STAT_DEFAULT_LINES: Dict[str, Dict[str, float]] = {
+    "NBA": {
+        "POINTS": 21.5,
+        "PTS": 21.5,
+        "REBOUNDS": 7.5,
+        "REB": 7.5,
+        "ASSISTS": 5.5,
+        "AST": 5.5,
+        "3PT": 2.5,
+        "3PT MADE": 2.5,
+        "THREE POINTERS": 2.5,
+        "THREES": 2.5,
+        "PRA": 34.5,
+        "PTS+REB+AST": 34.5,
+        "POINTS + REBOUNDS + ASSISTS": 34.5,
+        "POINTS + REBOUNDS": 28.5,
+        "PR": 28.5,
+        "PTS+REB": 28.5,
+        "POINTS + ASSISTS": 26.5,
+        "PA": 26.5,
+        "PTS+AST": 26.5,
+        "REBOUNDS + ASSISTS": 12.5,
+        "RA": 12.5,
+        "REB+AST": 12.5,
+        "STOCKS": 2.5,
+        "BLOCKS": 1.5,
+        "BLK": 1.5,
+        "STEALS": 1.5,
+        "STL": 1.5,
+        "TURNOVERS": 2.5,
+        "TO": 2.5,
+        "SPREAD": 4.5,
+        "TOTAL": 224.5,
+        "MONEYLINE": 0.5,
+        "WINNER": 0.5,
+        "DEFAULT": 21.5,
+    },
+    "WNBA": {
+        "POINTS": 16.5,
+        "PTS": 16.5,
+        "REBOUNDS": 6.5,
+        "REB": 6.5,
+        "ASSISTS": 4.5,
+        "AST": 4.5,
+        "3PT": 1.5,
+        "3PT MADE": 1.5,
+        "TOTAL": 164.5,
+        "SPREAD": 4.5,
+        "MONEYLINE": 0.5,
+        "DEFAULT": 16.5,
+    },
+    "NFL": {
+        "PASS YDS": 245.5,
+        "PASSING YARDS": 245.5,
+        "PASS YARDS": 245.5,
+        "RUSH YDS": 64.5,
+        "RUSHING YARDS": 64.5,
+        "RUSH YARDS": 64.5,
+        "REC YDS": 56.5,
+        "RECEIVING YARDS": 56.5,
+        "TOUCHDOWNS": 0.5,
+        "TD": 0.5,
+        "PASS TDS": 1.5,
+        "PASSING TDS": 1.5,
+        "COMPLETIONS": 21.5,
+        "PASS ATTEMPTS": 33.5,
+        "INTERCEPTIONS": 0.5,
+        "SPREAD": 3.5,
+        "TOTAL": 45.5,
+        "MONEYLINE": 0.5,
+        "DEFAULT": 64.5,
+    },
+    "CFB": {
+        "PASS YDS": 235.5,
+        "RUSH YDS": 68.5,
+        "REC YDS": 54.5,
+        "TOUCHDOWNS": 0.5,
+        "TD": 0.5,
+        "SPREAD": 6.5,
+        "TOTAL": 52.5,
+        "MONEYLINE": 0.5,
+        "DEFAULT": 68.5,
+    },
+    "MLB": {
+        "STRIKEOUTS": 5.5,
+        "K": 5.5,
+        "HITS": 1.5,
+        "HOME RUNS": 0.5,
+        "HR": 0.5,
+        "TOTAL BASES": 1.5,
+        "RBIS": 0.5,
+        "RUNS": 0.5,
+        "EARNED RUNS": 2.5,
+        "OUTS RECORDED": 17.5,
+        "PITCHES": 92.5,
+        "SPREAD": 1.5,
+        "TOTAL": 8.5,
+        "MONEYLINE": 0.5,
+        "DEFAULT": 5.5,
+    },
+    "TENNIS": {
+        "SETS": 2.0,
+        "STRAIGHT SETS": 2.0,
+        "TOTAL SETS": 2.5,
+        "GAMES": 22.5,
+        "TOTAL GAMES": 22.5,
+        "GAME HANDICAP": 3.5,
+        "ACES": 6.5,
+        "DOUBLE FAULTS": 2.5,
+        "MONEYLINE": 0.5,
+        "MATCH WINNER": 0.5,
+        "DEFAULT": 2.0,
+    },
+    "NHL": {
+        "GOALS": 0.5,
+        "ASSISTS": 0.5,
+        "POINTS": 1.5,
+        "PTS": 1.5,
+        "SHOTS ON GOAL": 2.5,
+        "SOG": 2.5,
+        "SAVES": 27.5,
+        "GOALS AGAINST": 2.5,
+        "TOTAL": 5.5,
+        "SPREAD": 1.5,
+        "MONEYLINE": 0.5,
+        "DEFAULT": 1.5,
+    },
+    "ESPORTS": {
+        "KILLS": 16.5,
+        "MAP KILLS": 16.5,
+        "TOTAL KILLS": 32.5,
+        "HEADSHOTS": 8.5,
+        "ROUNDS": 21.5,
+        "TOTAL ROUNDS": 21.5,
+        "MAPS": 2.5,
+        "MONEYLINE": 0.5,
+        "DEFAULT": 16.5,
+    },
+}
+
+
+def resolve_sport_stat_line(
+    sport: str, stat_type: str = "", raw_text: str = "", current_line: Optional[float] = None
+) -> Tuple[str, float]:
+    """
+    Resolve both normalized stat_type and the realistic line per sport.
+    Eliminates cross-sport defaults (e.g. 20.5 or 0.5 being blindly assigned to wrong sports).
+    """
+    sp = sport.upper() if sport else "NBA"
+    blob = f"{stat_type} {raw_text}".upper()
+    sport_map = SPORT_STAT_DEFAULT_LINES.get(sp, SPORT_STAT_DEFAULT_LINES["NBA"])
+
+    norm_stat = stat_type.strip() if stat_type and stat_type != "Prop" else ""
+
+    if sp in ("NBA", "WNBA"):
+        if any(k in blob for k in ("3PT", "3-PT", "THREE", "THREES", "3PM")):
+            norm_stat = "3PT Made"
+        elif any(k in blob for k in ("PRA", "PTS+REB+AST", "POINTS+REBOUNDS+ASSISTS", "PTS + REB + AST")):
+            norm_stat = "PRA"
+        elif any(k in blob for k in ("PTS+REB", "POINTS+REBOUNDS", "PTS + REB", "POINTS + REBOUNDS", " PR ", " PR")):
+            norm_stat = "Points + Rebounds"
+        elif any(k in blob for k in ("PTS+AST", "POINTS+ASSISTS", "PTS + AST", "POINTS + ASSISTS", " PA ", " PA")):
+            norm_stat = "Points + Assists"
+        elif any(k in blob for k in ("REB+AST", "REBOUNDS+ASSISTS", "REB + AST", "REBOUNDS + ASSISTS", " RA ", " RA")):
+            norm_stat = "Rebounds + Assists"
+        elif any(k in blob for k in ("STOCK", "STL+BLK", "BLK+STL", "STEALS+BLOCKS", "BLOCKS+STEALS")):
+            norm_stat = "Stocks"
+        elif any(k in blob for k in ("AST", "ASSIST")):
+            norm_stat = "Assists"
+        elif any(k in blob for k in ("REB", "REBOUND")):
+            norm_stat = "Rebounds"
+        elif any(k in blob for k in ("BLK", "BLOCK")):
+            norm_stat = "Blocks"
+        elif any(k in blob for k in ("STL", "STEAL")):
+            norm_stat = "Steals"
+        elif any(k in blob for k in ("TURNOVER", "TO ", " TO")):
+            norm_stat = "Turnovers"
+        elif any(k in blob for k in ("TOTAL", "OVER/UNDER", "O/U")):
+            norm_stat = "Total"
+        elif any(k in blob for k in ("SPREAD", "HANDICAP")):
+            norm_stat = "Spread"
+        elif any(k in blob for k in ("WIN", "MONEYLINE", "OUTCOME")):
+            norm_stat = "Moneyline"
+        elif any(k in blob for k in ("PTS", "POINT", "SCORE")):
+            norm_stat = "Points"
+        else:
+            norm_stat = norm_stat or "Points"
+
+    elif sp in ("NFL", "CFB"):
+        if any(k in blob for k in ("PASS TD", "PASSING TD")):
+            norm_stat = "Pass TDs"
+        elif any(k in blob for k in ("PASS", "PASSING")) and "TD" not in blob:
+            norm_stat = "Pass Yds"
+        elif any(k in blob for k in ("RUSH", "RUSHING")) and "TD" not in blob:
+            norm_stat = "Rush Yds"
+        elif any(k in blob for k in ("REC", "RECEIVING")) and "TD" not in blob:
+            norm_stat = "Rec Yds"
+        elif any(k in blob for k in ("TD", "TOUCHDOWN")):
+            norm_stat = "Touchdowns"
+        elif any(k in blob for k in ("COMPLETION", "COMP")):
+            norm_stat = "Completions"
+        elif any(k in blob for k in ("TOTAL", "O/U")):
+            norm_stat = "Total"
+        elif any(k in blob for k in ("SPREAD", "HANDICAP")):
+            norm_stat = "Spread"
+        elif any(k in blob for k in ("WIN", "MONEYLINE")):
+            norm_stat = "Moneyline"
+        else:
+            norm_stat = norm_stat or "Rush Yds"
+
+    elif sp == "MLB":
+        if any(k in blob for k in ("STRIKEOUT", " K", " SO")):
+            norm_stat = "Strikeouts"
+        elif any(k in blob for k in ("HR", "HOME RUN")):
+            norm_stat = "Home Runs"
+        elif any(k in blob for k in ("HIT", "HITS")):
+            norm_stat = "Hits"
+        elif any(k in blob for k in ("TOTAL BASES", "TB")):
+            norm_stat = "Total Bases"
+        elif any(k in blob for k in ("EARNED RUN", "ER")):
+            norm_stat = "Earned Runs"
+        elif any(k in blob for k in ("PITCH", "PITCHES")):
+            norm_stat = "Pitches"
+        elif any(k in blob for k in ("TOTAL", "RUNS")):
+            norm_stat = "Total"
+        elif any(k in blob for k in ("SPREAD", "RUN LINE")):
+            norm_stat = "Spread"
+        elif any(k in blob for k in ("WIN", "MONEYLINE")):
+            norm_stat = "Moneyline"
+        else:
+            norm_stat = norm_stat or "Strikeouts"
+
+    elif sp == "TENNIS":
+        if any(k in blob for k in ("SET", "SETS", "STRAIGHT SETS")):
+            norm_stat = "Sets"
+        elif any(k in blob for k in ("GAME", "GAMES")):
+            norm_stat = "Games"
+        elif any(k in blob for k in ("ACE", "ACES")):
+            norm_stat = "Aces"
+        elif any(k in blob for k in ("WIN", "MATCH", "MONEYLINE")):
+            norm_stat = "Moneyline"
+        else:
+            norm_stat = norm_stat or "Sets"
+
+    elif sp == "NHL":
+        if any(k in blob for k in ("SAVE", "SAVES")):
+            norm_stat = "Saves"
+        elif any(k in blob for k in ("GOAL", "GOALS")):
+            norm_stat = "Goals"
+        elif any(k in blob for k in ("SHOT", "SOG")):
+            norm_stat = "Shots on Goal"
+        elif any(k in blob for k in ("POINT", "POINTS")):
+            norm_stat = "Points"
+        elif any(k in blob for k in ("TOTAL", "O/U")):
+            norm_stat = "Total"
+        elif any(k in blob for k in ("WIN", "MONEYLINE")):
+            norm_stat = "Moneyline"
+        else:
+            norm_stat = norm_stat or "Points"
+
+    elif sp == "ESPORTS":
+        if any(k in blob for k in ("HEADSHOT", "HS")):
+            norm_stat = "Headshots"
+        elif any(k in blob for k in ("MAP KILL", "MAP 1", "MAP 2")):
+            norm_stat = "Map Kills"
+        elif any(k in blob for k in ("KILL", "KILLS")):
+            norm_stat = "Kills"
+        elif any(k in blob for k in ("ROUND", "ROUNDS")):
+            norm_stat = "Rounds"
+        elif any(k in blob for k in ("MAP", "MAPS")):
+            norm_stat = "Maps"
+        else:
+            norm_stat = norm_stat or "Kills"
+
+    if not norm_stat:
+        norm_stat = "Points" if sp == "NBA" else ("Pass Yds" if sp == "NFL" else "Outcome")
+
+    default_for_stat = sport_map.get(norm_stat.upper(), sport_map.get("DEFAULT", 21.5))
+    for k, v in sport_map.items():
+        if k in norm_stat.upper():
+            default_for_stat = v
+            break
+
+    # If NBA player is in registry and no line was passed, use authentic player baseline
+    if sp == "NBA":
+        reg_data = lookup_nba_player_baseline(raw_text)
+        if reg_data and reg_data.get("baselines"):
+            p_bases = reg_data["baselines"]
+            stat_key = "PTS"
+            if norm_stat == "Rebounds":
+                stat_key = "REB"
+            elif norm_stat == "Assists":
+                stat_key = "AST"
+            elif norm_stat == "PRA":
+                stat_key = "PRA"
+            elif norm_stat == "Points + Rebounds":
+                stat_key = "PR"
+            elif norm_stat == "Points + Assists":
+                stat_key = "PA"
+            elif norm_stat == "Rebounds + Assists":
+                stat_key = "RA"
+            elif norm_stat == "3PT Made":
+                stat_key = "3PT"
+            elif norm_stat == "Blocks":
+                stat_key = "BLK"
+            elif norm_stat == "Steals":
+                stat_key = "STL"
+            
+            if stat_key in p_bases:
+                base_val = p_bases[stat_key]
+                if current_line is None or current_line <= 1.0 or (current_line == 21.5 and stat_key != "PTS"):
+                    default_for_stat = round(base_val - 0.5) + 0.5
+
+    # Guard against invalid lines (e.g. 0.0, 0.5 on volume stats, or 20.5 assigned to passing/tennis)
+    if current_line is not None and current_line > 0:
+        if norm_stat in ("Points", "Pass Yds", "Rush Yds", "Rec Yds", "Total") and current_line <= 1.0:
+            resolved_line = default_for_stat
+        elif norm_stat in ("Rebounds", "Assists", "Strikeouts", "3PT Made") and current_line <= 0.5:
+            resolved_line = default_for_stat
+        elif norm_stat == "Pass Yds" and current_line < 50.0:
+            resolved_line = default_for_stat
+        elif norm_stat == "Rush Yds" and current_line < 10.0:
+            resolved_line = default_for_stat
+        elif norm_stat == "Total" and sp == "NBA" and current_line < 100.0:
+            resolved_line = default_for_stat
+        elif norm_stat == "Total" and sp == "NFL" and current_line < 20.0:
+            resolved_line = default_for_stat
+        elif norm_stat in ("Sets", "3PT Made", "Strikeouts") and current_line >= 20.0:
+            resolved_line = default_for_stat
+        else:
+            resolved_line = float(current_line)
+    else:
+        resolved_line = default_for_stat
+
+    return norm_stat, round(resolved_line, 2)
+
 
 def classify_player_archetype(sport: str, prop_text: str, line: float) -> Tuple[str, Dict[str, Any]]:
     """Match a player/prop to its sport-specific archetype and simulation physics profile."""
     sp = sport.upper()
     blob = prop_text.upper()
+
+    # Exact registry lookup for NBA stars
+    if sp == "NBA":
+        reg_player = lookup_nba_player_baseline(prop_text)
+        if reg_player and reg_player.get("archetype"):
+            arch_name = reg_player["archetype"]
+            cfg = SPORT_ARCHETYPES["NBA"].get(arch_name)
+            if cfg:
+                return arch_name, cfg
+
     sport_map = SPORT_ARCHETYPES.get(sp, {})
     for arch_name, cfg in sport_map.items():
         if any(kw in blob for kw in cfg["keywords"]):
@@ -303,15 +961,16 @@ def _draw_sport_archetype_samples(
     samples: List[float] = []
     for _ in range(iterations):
         if sp in ("NBA", "WNBA"):
-            # Simulate active minutes fraction (blowout/foul trouble down, clutch/OT up)
+            # Regular Season: starters play full rotation (32-38 mins)
+            # Preseason 20-24m ceilings are disabled; blowout benching only applies if Q4 20+ pt lead
             min_factor = 1.0
             r = random.random()
-            if r < blowout_prob:
-                min_factor -= 0.15 * blowout_sens
-            elif r < (blowout_prob + 0.05):  # Foul trouble hazard
-                min_factor -= 0.12
-            elif r > (1.0 - blowout_prob * 1.2):  # Close game / clutch / OT upside
-                min_factor += 0.12 * float(arch_cfg.get("clutch_boost", 1.04))
+            if blowout_prob > 0 and r < blowout_prob:
+                min_factor -= 0.12 * blowout_sens
+            elif r < 0.035:  # Rare foul hazard in regular season
+                min_factor -= 0.08
+            elif r > 0.85:   # Competitive 4Q / clutch / OT upside
+                min_factor += 0.08 * float(arch_cfg.get("clutch_boost", 1.04))
             # Gamma-Poisson / Negative Binomial dispersion on possessions
             rate_draw = max(0.2, random.gauss(expected_mean * min_factor, std_est))
             val = float(max(0, round(rate_draw))) if dist_family != "STUDENT_T" else rate_draw
@@ -382,7 +1041,7 @@ def simulate_prop_leg(
     Run a 10,000-iteration sport-specific & archetype-aware Monte Carlo simulation
     conditioned on live ESPN game telemetry.
     """
-    eff_line = float(line) if (line is not None and line > 0) else 20.5
+    _, eff_line = resolve_sport_stat_line(sport, player_prop, player_prop, line)
     dist_family = classify_stat_distribution(sport, player_prop, eff_line)
     archetype, arch_cfg = classify_player_archetype(sport, player_prop, eff_line)
     sim_method = str(arch_cfg.get("sim_method", "Parametric Monte Carlo"))
@@ -394,13 +1053,56 @@ def simulate_prop_leg(
 
     norm_side = side.upper()
     is_over = norm_side in ("OVER", "YES", "O")
-    cv = float(arch_cfg.get("usage_cv", 0.22))
-    std_est = max(1.25, eff_line * cv) if eff_line >= 12.0 else max(1.05, math.sqrt(eff_line * 1.20))
+    cv = float(arch_cfg.get("usage_cv", 0.24))
 
-    target_prob = max(0.05, min(0.95, book_prob + prior_edge_boost))
-    z_shift = _norm_ppf(target_prob) if is_over else -_norm_ppf(target_prob)
-    base_mean = max(0.3, eff_line + z_shift * std_est)
-    expected_mean = max(0.3, base_mean * (0.72 + 0.28 * min(1.15, max(0.88, telem_factor))))
+    # Check NBA player registry for authentic per-minute prior and Empirical Bayes shrinkage
+    nba_player = lookup_nba_player_baseline(player_prop) if sport.upper() == "NBA" else None
+    if nba_player and nba_player.get("baselines"):
+        p_bases = nba_player["baselines"]
+        stat_key = "PTS"
+        upper_p = player_prop.upper()
+        if any(k in upper_p for k in ("PRA", "PTS+REB+AST")):
+            stat_key = "PRA"
+        elif any(k in upper_p for k in ("PR", "PTS+REB")):
+            stat_key = "PR"
+        elif any(k in upper_p for k in ("PA", "PTS+AST")):
+            stat_key = "PA"
+        elif any(k in upper_p for k in ("RA", "REB+AST")):
+            stat_key = "RA"
+        elif any(k in upper_p for k in ("AST", "ASSIST")):
+            stat_key = "AST"
+        elif any(k in upper_p for k in ("REB", "REBOUND")):
+            stat_key = "REB"
+        elif any(k in upper_p for k in ("3PT", "THREE", "THREES", "3PM")):
+            stat_key = "3PT"
+        elif any(k in upper_p for k in ("BLK", "BLOCK")):
+            stat_key = "BLK"
+        elif any(k in upper_p for k in ("STL", "STEAL")):
+            stat_key = "STL"
+
+        player_prior = float(p_bases.get(stat_key, eff_line))
+        proj_mins = float(nba_player.get("proj_mins", 34.0))
+
+        # Check telemetry for live in-game minutes/stats
+        live_mins = float(getattr(telemetry, "minutes_played", 0.0) if telemetry else 0.0)
+        live_stat = float(getattr(telemetry, "current_stat", 0.0) if telemetry else 0.0)
+
+        # Gamma-Poisson Empirical Bayes Rate Shrinkage (16.0 Pseudo-Minute Anchor)
+        bayes_mean, _ = calculate_empirical_bayes_projection(
+            prior_mean=player_prior,
+            proj_minutes=proj_mins,
+            live_minutes=live_mins,
+            live_stat=live_stat,
+            pseudo_minutes=16.0,
+        )
+        expected_mean = max(0.5, bayes_mean * telem_factor)
+        std_est = max(1.8, expected_mean * cv) if expected_mean >= 10.0 else max(1.2, math.sqrt(expected_mean * 1.35))
+    else:
+        std_est = max(1.8, eff_line * cv) if eff_line >= 12.0 else max(1.15, math.sqrt(eff_line * 1.25))
+        target_prob = max(0.05, min(0.95, book_prob + prior_edge_boost))
+        z_shift = _norm_ppf(target_prob) if is_over else -_norm_ppf(target_prob)
+        base_mean = max(0.3, eff_line + z_shift * std_est)
+        expected_mean = max(0.3, base_mean * (0.75 + 0.25 * min(1.15, max(0.92, telem_factor))))
 
     samples_list = _draw_sport_archetype_samples(
         sport=sport,

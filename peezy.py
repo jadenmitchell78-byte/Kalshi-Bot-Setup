@@ -73,6 +73,8 @@ from settle_engine import run_settlement_cycle, settle_engine_worker
 from sim_engine import run_calibration_and_symmetry_audit
 from slip import (
     _COOLDOWN_TRACKER,
+    BANNED_PREFIXES,
+    FUTURES_OR_CUP_TOKENS,
     SlipLeg,
     build_leg_from_kalshi_market,
     clear_cooldown_locks,
@@ -320,26 +322,177 @@ async def get_effective_bankroll() -> float:
 
 async def scan_markets_with_telemetry() -> List[SlipLeg]:
     """
-    Poll live Kalshi orderbooks + live ESPN telemetry across NBA (5m primary), NFL/CFB (10m),
-    and Tennis (Armed), while keeping off-slate MLB and WNBA on Standby.
-    Records exact diagnostic reasons to SQLite `bot_state` for `/menu` & `/status`.
+    Robust 5-Layer Kalshi V2 Sports Discovery Engine:
+    1. Targeted Sports Series sweeps (KXNBAGAME, KXNBASPREAD, KXNBATOTAL, KXNBAPTS, KXNBAAST, KXNBAREB, KXNBA3PT, KXNBAPRA, etc.)
+    2. Dynamic Sports Series discovery via /trade-api/v2/series (cursor pagination)
+    3. Live Sports Events sweep via /trade-api/v2/events (matching NBA, NFL, Tennis)
+    4. Cursor pagination across /trade-api/v2/markets?status=open&limit=200 (up to 12 pages)
+    5. Strict exclusion of all NBA Cup, In-Season Tournament, and season-long futures contracts.
     """
     increment_scans()
     recycle_stale_rfq_orders()
     telemetry_map = await fetch_all_telemetry()
 
-    url = f"{KALSHI_BASE_URL}/markets?limit=120&status=open"
     raw_markets: List[Dict[str, Any]] = []
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url, timeout=aiohttp.ClientTimeout(total=8)
-            ) as resp:
-                if resp.status == 200:
-                    payload = await resp.json()
-                    raw_markets = payload.get("markets", [])
-    except Exception as exc:
-        logger.debug("Kalshi live scan fallback: %s", exc)
+    existing_tickers = set()
+
+    known_sports_series = [
+        "KXNBAGAME", "KXNBAGAMES", "KXNBASPREAD", "KXNBATOTAL", "KXNBAML",
+        "KXNBAPTS", "KXNBAAST", "KXNBAREB", "KXNBA3PT", "KXNBAPRA",
+        "KXNBABLK", "KXNBASTL", "KXNBATO", "KXNBAPM", "KXNBAPROP", "KXNBAPROPS",
+        "KXNBAFIRST", "KXNBA1Q", "KXNBA1H", "KXNBA2H", "KXNBA",
+        "KXNFLGAME", "KXNFLGAMES", "KXNFL", "KXNFLPASS", "KXNFLRUSH", "KXNFLREC", "KXNFLTD",
+        "KXCFBGAME", "KXCFBGAMES", "KXCFB",
+        "KXATPMATCH", "KXWTAMATCH", "KXTENNIS",
+        "KXNHLGAME", "KXNHLGAMES", "KXNHL",
+        "KXMLBGAME", "KXMLBGAMES", "KXMLB",
+    ]
+
+    async with aiohttp.ClientSession() as session:
+        # 1. Query known sports series
+        for st in known_sports_series:
+            try:
+                s_url = f"{KALSHI_BASE_URL}/markets?status=open&series_ticker={st}&limit=100"
+                async with session.get(s_url, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+                    if resp.status == 200:
+                        payload = await resp.json()
+                        for sm in payload.get("markets", []):
+                            tkr = sm.get("ticker", "")
+                            if tkr and tkr not in existing_tickers:
+                                existing_tickers.add(tkr)
+                                raw_markets.append(sm)
+            except Exception:
+                continue
+
+        # 2. Dynamically discover active sports series
+        discovered_series = set()
+        s_cursor = None
+        for _ in range(3):
+            try:
+                s_path = f"{KALSHI_BASE_URL}/series?limit=200"
+                if s_cursor:
+                    s_path += f"&cursor={s_cursor}"
+                async with session.get(s_path, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+                    if resp.status == 200:
+                        s_data = await resp.json()
+                        s_list = s_data.get("series", [])
+                        for s_item in s_list:
+                            stk = s_item.get("ticker") or s_item.get("series_ticker")
+                            if not stk:
+                                continue
+                            stk_u = stk.upper()
+                            title = str(s_item.get("title") or "").upper()
+                            cat = str(s_item.get("category") or "").upper()
+                            if any(tok in stk_u or tok in title for tok in FUTURES_OR_CUP_TOKENS):
+                                continue
+                            if (
+                                stk_u.startswith("KXNBA")
+                                or "BASKETBALL" in title
+                                or "NBA" in title
+                                or cat in ("SPORTS", "BASKETBALL")
+                                or stk_u.startswith(("KXNFL", "KXCFB", "KXTENNIS", "KXATP", "KXWTA", "KXNHL", "KXMLB"))
+                            ):
+                                if stk not in known_sports_series:
+                                    discovered_series.add(stk)
+                        s_cursor = s_data.get("cursor")
+                        if not s_cursor or not s_list:
+                            break
+                    else:
+                        break
+            except Exception:
+                break
+
+        for st in list(discovered_series)[:30]:
+            try:
+                s_url = f"{KALSHI_BASE_URL}/markets?status=open&series_ticker={st}&limit=100"
+                async with session.get(s_url, timeout=aiohttp.ClientTimeout(total=3.5)) as resp:
+                    if resp.status == 200:
+                        payload = await resp.json()
+                        for sm in payload.get("markets", []):
+                            tkr = sm.get("ticker", "")
+                            if tkr and tkr not in existing_tickers:
+                                existing_tickers.add(tkr)
+                                raw_markets.append(sm)
+            except Exception:
+                continue
+
+        # 3. Explore open Sports Events
+        ev_cursor = None
+        for _ in range(3):
+            try:
+                ev_url = f"{KALSHI_BASE_URL}/events?status=open&limit=200"
+                if ev_cursor:
+                    ev_url += f"&cursor={ev_cursor}"
+                async with session.get(ev_url, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+                    if resp.status == 200:
+                        e_data = await resp.json()
+                        e_list = e_data.get("events", [])
+                        for ev in e_list:
+                            etk = str(ev.get("event_ticker") or "").upper()
+                            estk = str(ev.get("series_ticker") or "").upper()
+                            etitle = str(ev.get("title") or "").upper()
+                            ecat = str(ev.get("category") or "").upper()
+                            if any(tok in etk or tok in estk or tok in etitle for tok in FUTURES_OR_CUP_TOKENS):
+                                continue
+                            if (
+                                etk.startswith("KXNBA")
+                                or estk.startswith("KXNBA")
+                                or "NBA" in etitle
+                                or "BASKETBALL" in etitle
+                                or ecat in ("SPORTS", "BASKETBALL")
+                                or etk.startswith(("KXNFL", "KXCFB", "KXTENNIS", "KXATP", "KXWTA", "KXNHL"))
+                            ):
+                                for em in ev.get("markets", []):
+                                    if isinstance(em, dict) and em.get("ticker") and em["ticker"] not in existing_tickers:
+                                        existing_tickers.add(em["ticker"])
+                                        raw_markets.append(em)
+                        ev_cursor = e_data.get("cursor")
+                        if not ev_cursor or not e_list:
+                            break
+                    else:
+                        break
+            except Exception:
+                break
+
+        # 4. Deep cursor sweep across /markets?status=open (up to 12 pages)
+        m_cursor = None
+        for _ in range(12):
+            try:
+                m_url = f"{KALSHI_BASE_URL}/markets?status=open&limit=200"
+                if m_cursor:
+                    m_url += f"&cursor={m_cursor}"
+                async with session.get(m_url, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        page_markets = data.get("markets", [])
+                        for pm in page_markets:
+                            tkr = str(pm.get("ticker") or "").upper()
+                            if (
+                                tkr.startswith(("KXNBA", "KXNFL", "KXCFB", "KXTENNIS", "KXATP", "KXWTA", "KXNHL", "KXMLB"))
+                                or any(sp in tkr for sp in ("LAKERS", "CELTICS", "WARRIORS", "BUCKS", "NUGGETS", "SUNS", "MAVS", "BULLS", "CAVS", "NETS", "76ERS", "SPURS", "HAWKS", "ROCKETS", "PELICANS"))
+                            ):
+                                if tkr not in existing_tickers:
+                                    existing_tickers.add(pm.get("ticker"))
+                                    raw_markets.append(pm)
+                        m_cursor = data.get("cursor")
+                        if not m_cursor or not page_markets:
+                            break
+                    else:
+                        break
+            except Exception:
+                break
+
+    # 5. Filter out banned prefixes, cups, and futures
+    clean_raw_markets = []
+    for m in raw_markets:
+        tkr = str(m.get("ticker") or "").upper()
+        tit = str(m.get("title") or "").upper()
+        sub = str(m.get("subtitle") or "").upper()
+        blob = f"{tkr} {tit} {sub}"
+        if any(b in tkr for b in BANNED_PREFIXES) or any(tok in blob for tok in FUTURES_OR_CUP_TOKENS):
+            continue
+        clean_raw_markets.append(m)
+    raw_markets = clean_raw_markets
 
     legs: List[SlipLeg] = []
     rejected_spread = 0
