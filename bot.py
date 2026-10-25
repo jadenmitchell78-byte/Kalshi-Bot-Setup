@@ -1805,9 +1805,31 @@ def run_monte_carlo_and_combo_pipeline(
                     continue
             mapped_props.append(p)
 
-    # In LIVE_MODE, prioritize real live Kalshi markets,
-    # while ensuring active NBA player props are always retained for 10k MC simulation and EV calculation.
-    if LIVE_MODE:
+    # In LIVE_MODE or sport_filter, prioritize real live Kalshi markets,
+    # while ensuring active player prop models are always retained for 10k MC simulation and EV calculation.
+    if sport_filter:
+        sp_target = sport_filter.upper()
+        target_sports = {"NFL", "CFB", "NCAAF"} if sp_target in ("NFL", "CFB", "FOOTBALL") else (
+            {"TENNIS", "ATP", "WTA"} if sp_target in ("TENNIS", "ATP", "WTA") else (
+                {"NBA", "WNBA", "BASKETBALL"} if sp_target in ("NBA", "WNBA", "BASKETBALL") else {sp_target}
+            )
+        )
+        sport_props = [p for p in mapped_props if p.get("sport", "").upper() in target_sports]
+        real_sport_props = [p for p in sport_props if not p.get("is_synthetic")]
+        synthetic_sport_props = [p for p in sport_props if p.get("is_synthetic")]
+
+        if len(real_sport_props) < 4:
+            existing_tkrs = {p["ticker"] for p in real_sport_props}
+            mapped_props = real_sport_props + [p for p in synthetic_sport_props if p["ticker"] not in existing_tkrs]
+        else:
+            mapped_props = real_sport_props
+
+        if not mapped_props:
+            for demo in LATE_OCTOBER_ACTIVE_MARKETS:
+                for p in sim_to_prop_mapper(demo):
+                    if p.get("sport", "").upper() in target_sports:
+                        mapped_props.append(p)
+    elif LIVE_MODE:
         real_props = [p for p in mapped_props if not p.get("is_synthetic")]
         real_nba_player_props = [
             p for p in real_props
@@ -1828,7 +1850,7 @@ def run_monte_carlo_and_combo_pipeline(
             else:
                 mapped_props = real_props
         else:
-            mapped_props = [p for p in mapped_props if not sport_filter or p.get("sport", "").upper() == sport_filter.upper()]
+            mapped_props = [p for p in mapped_props]
 
     if not mapped_props:
         for demo in LATE_OCTOBER_ACTIVE_MARKETS:

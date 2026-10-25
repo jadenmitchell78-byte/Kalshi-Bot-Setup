@@ -440,7 +440,7 @@ async def get_effective_bankroll() -> float:
     return rt["sim_cash"]
 
 
-async def scan_markets_with_telemetry() -> List[SlipLeg]:
+async def scan_markets_with_telemetry(sport_filter: Optional[str] = None) -> List[SlipLeg]:
     """
     Robust 5-Layer Kalshi V2 Sports Discovery Engine:
     1. Targeted Sports Series sweeps (KXNBAGAME, KXNBASPREAD, KXNBATOTAL, KXNBAPTS, KXNBAAST, KXNBAREB, KXNBA3PT, KXNBAPRA, etc.)
@@ -635,8 +635,23 @@ async def scan_markets_with_telemetry() -> List[SlipLeg]:
         else:
             rejected_spread += 1
 
-    if len(legs) < 6:
+    if sport_filter:
+        sp_u = sport_filter.upper()
+        target_sps = {"NFL", "CFB", "NCAAF"} if sp_u in ("NFL", "CFB", "FOOTBALL") else (
+            {"NBA", "WNBA"} if sp_u in ("NBA", "WNBA", "BASKETBALL") else {sp_u}
+        )
+        legs = [l for l in legs if l.sport.upper() in target_sps]
+
+    if len(legs) < 4:
         for demo in CURATED_QUANT_MARKETS:
+            demo_cat = str(demo.get("category", "")).upper()
+            if sport_filter:
+                sp_u = sport_filter.upper()
+                target_sps = {"NFL", "CFB", "NCAAF"} if sp_u in ("NFL", "CFB", "FOOTBALL") else (
+                    {"NBA", "WNBA"} if sp_u in ("NBA", "WNBA", "BASKETBALL") else {sp_u}
+                )
+                if demo_cat not in target_sps:
+                    continue
             leg = build_leg_from_kalshi_market(
                 demo, telemetry_map=telemetry_map, iterations=MC_ITERATIONS
             )
@@ -973,12 +988,12 @@ async def build_sim_text(query: str) -> str:
     )
 
 
-async def build_scan_text() -> str:
+async def build_scan_text(sport_filter: Optional[str] = None) -> str:
     rt = get_runtime_state()
     bankroll = await get_effective_bankroll()
-    candidate_legs = await scan_markets_with_telemetry()
+    candidate_legs = await scan_markets_with_telemetry(sport_filter=sport_filter)
     if len(candidate_legs) < 2:
-        return "⚠️ Not enough anti-snipe verified markets right now."
+        return f"⚠️ Not enough anti-snipe verified markets for {sport_filter or 'all slates'} right now."
 
     optimal_slips = build_optimal_parlays(
         candidate_legs,
@@ -1397,7 +1412,7 @@ async def cmd_nba(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         report = await build_sim_text(q)
         await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN)
     else:
-        await cmd_scan(update, context)
+        await cmd_scan(update, context, sport_filter="NBA")
 
 
 async def cmd_nfl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1409,18 +1424,19 @@ async def cmd_nfl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         report = await build_sim_text(q)
         await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN)
     else:
-        await cmd_scan(update, context)
+        await cmd_scan(update, context, sport_filter="NFL")
 
 
-async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, sport_filter: Optional[str] = None) -> None:
     _ensure_chat_id(update)
     if not update.message:
         return
+    sport_tag = f" [{sport_filter}]" if sport_filter else ""
     status_msg = await update.message.reply_text(
-        "🔍 *Polling ESPN telemetry + Kalshi orderbooks & running 10k Copula sims...*",
+        f"🔍 *Polling ESPN telemetry + Kalshi orderbooks & running 10k Copula sims{sport_tag}...*",
         parse_mode=ParseMode.MARKDOWN,
     )
-    text = await build_scan_text()
+    text = await build_scan_text(sport_filter=sport_filter)
     await status_msg.edit_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
