@@ -242,44 +242,67 @@ async def place_kalshi_order(
             "msg": "KALSHI_API_KEY / KALSHI_PRIVATE_KEY not configured for LIVE execution.",
         }
 
-    url = f"{KALSHI_BASE_URL}/portfolio/orders"
-    headers = build_kalshi_auth_headers("POST", url)
-    norm_side = "no" if side.upper() in ("NO", "UNDER") else "yes"
-    norm_action = "sell" if action.lower() == "sell" else "buy"
-    price_key = "yes_price" if norm_side == "yes" else "no_price"
+    is_yes = side.upper() in ("YES", "OVER", "O")
+    v2_side = "bid" if is_yes else "ask"
+    price_dollars = (price_cents / 100.0) if is_yes else ((100 - price_cents) / 100.0)
+    price_str = f"{price_dollars:.4f}"
+    client_oid = str(uuid.uuid4())
 
-    payload = {
-        "action": norm_action,
-        "client_order_id": str(uuid.uuid4()),
-        "count": max(1, int(count)),
-        "side": norm_side,
-        "ticker": ticker,
-        "type": "limit",
-        price_key: max(1, min(99, int(price_cents))),
-    }
+    attempts = [
+        (
+            f"{KALSHI_BASE_URL}/portfolio/events/orders",
+            {
+                "ticker": ticker,
+                "side": v2_side,
+                "type": "limit",
+                "count": max(1, int(count)),
+                "price": price_str,
+                "time_in_force": "good_till_canceled",
+                "client_order_id": client_oid,
+                "self_trade_prevention_type": "taker_at_cross",
+            },
+        ),
+        (
+            f"{KALSHI_BASE_URL}/portfolio/orders",
+            {
+                "action": "buy",
+                "client_order_id": client_oid,
+                "count": max(1, int(count)),
+                "side": "yes" if is_yes else "no",
+                "ticker": ticker,
+                "type": "limit",
+                "yes_price" if is_yes else "no_price": max(1, min(99, int(price_cents))),
+            },
+        ),
+    ]
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url,
-                headers=headers,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                data = await resp.json()
-                if resp.status in (200, 201):
-                    order_obj = data.get("order", {})
+    for url, payload in attempts:
+        headers = build_kalshi_auth_headers("POST", url)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as resp:
+                    data = await resp.json()
+                    if resp.status in (200, 201):
+                        order_obj = data.get("order") or data.get("event_order") or {}
+                        return {
+                            "ok": True,
+                            "order_id": order_obj.get("order_id", client_oid),
+                            "msg": f"LIVE order placed: {count}x {'YES' if is_yes else 'NO'} {ticker} @ {price_cents}c",
+                        }
+                    if resp.status == 410:
+                        continue
                     return {
-                        "ok": True,
-                        "order_id": order_obj.get("order_id", payload["client_order_id"]),
-                        "msg": f"LIVE order placed: {count}x {norm_side.upper()} {ticker} @ {price_cents}c",
+                        "ok": False,
+                        "msg": f"Kalshi order HTTP {resp.status}: {json.dumps(data)[:160]}",
                     }
-                return {
-                    "ok": False,
-                    "msg": f"Kalshi order HTTP {resp.status}: {json.dumps(data)[:160]}",
-                }
-    except Exception as exc:
-        return {"ok": False, "msg": f"Kalshi order exception: {exc}"}
+        except Exception as exc:
+            logger.warning("Order post to %s failed: %s", url, exc)
+    return {"ok": False, "msg": "Failed order placement across endpoints"}
 
 
 async def generate_gemini_slip_insight(legs_summary: List[str], ev_pct: float) -> Optional[str]:

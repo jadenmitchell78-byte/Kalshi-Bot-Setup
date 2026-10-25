@@ -346,19 +346,42 @@ def create_web_app(
     return app
 
 
+ACTIVE_WEB_PORT: int = WEB_PORT
+
+
 async def start_background_web_server(
     scan_fn: Callable[[], Awaitable[List[SlipLeg]]],
     execute_fn: Callable[[ParlaySlip], Awaitable[List[str]]],
     telegram_dispatch_fn: Optional[Callable[[str], Awaitable[None]]] = None,
     port: int = WEB_PORT,
 ) -> web.AppRunner:
-    """Start the aiohttp mobile Web UI server inside the running asyncio event loop."""
+    """Start the aiohttp mobile Web UI server inside the running asyncio event loop with graceful port fallback."""
+    global ACTIVE_WEB_PORT
     app = create_web_app(scan_fn, execute_fn, telegram_dispatch_fn)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    logger.info("Mobile Web UI live at http://127.0.0.1:%d", port)
+
+    candidate_ports = [port]
+    for alt_p in (8080, 8787, 8000, 8081):
+        if alt_p not in candidate_ports:
+            candidate_ports.append(alt_p)
+
+    last_exc = None
+    for p in candidate_ports:
+        try:
+            site = web.TCPSite(runner, "0.0.0.0", p, reuse_address=True, reuse_port=True)
+            await site.start()
+            ACTIVE_WEB_PORT = p
+            print(f"[WEB-HUD] ✅ Sweat HUD live on port {p} -> http://127.0.0.1:{p} (0.0.0.0:{p})")
+            logger.info("Mobile Web UI live at http://127.0.0.1:%d", p)
+            return runner
+        except (OSError, Exception) as exc:
+            last_exc = exc
+            logger.debug("Port %d busy (%s), trying alternate...", p, exc)
+            continue
+
+    if last_exc:
+        logger.warning("[WEB-PORT-WARN] All candidate ports busy: %s", last_exc)
     return runner
 
 

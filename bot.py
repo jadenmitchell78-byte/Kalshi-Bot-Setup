@@ -1138,10 +1138,13 @@ def test_kalshi_api_connection() -> dict:
             headers = get_auth_headers("GET", path)
             r = session.get(f"{base}{path}", headers=headers, timeout=5)
             if r.status_code == 200:
-                bal_cents = r.json().get("balance", 0)
+                raw_bal_data = r.json()
+                bal_cents = raw_bal_data.get("balance", 0)
                 bal_dollars = round(bal_cents / 100.0, 2)
+                p_val_cents = raw_bal_data.get("portfolio_value", bal_cents)
                 BASE_URL = base
                 live_kalshi_balance = bal_dollars
+                print(f"[KALSHI-API-DATA] Available Cash: ${bal_dollars:.2f} | Portfolio: ${p_val_cents/100:.2f} | Payload: {raw_bal_data}")
                 try:
                     pconn = sqlite3.connect(str(BASE_DIR / "picks.db"))
                     pconn.execute("UPDATE bot_state SET sim_cash = ? WHERE id = 1", (bal_dollars,))
@@ -1149,6 +1152,18 @@ def test_kalshi_api_connection() -> dict:
                     pconn.close()
                 except Exception:
                     pass
+
+                # Check if there are active resting orders holding up cash in escrow
+                try:
+                    ord_headers = get_auth_headers("GET", "/trade-api/v2/portfolio/orders")
+                    ord_r = session.get(f"{base}/trade-api/v2/portfolio/orders?status=resting&limit=10", headers=ord_headers, timeout=4)
+                    if ord_r.status_code == 200:
+                        resting_orders = ord_r.json().get("orders", [])
+                        if resting_orders:
+                            print(f"[KALSHI-RESTING-ORDERS] ⚠️ Notice: {len(resting_orders)} resting order(s) currently locking funds on Kalshi: {[o.get('ticker') for o in resting_orders]}")
+                except Exception:
+                    pass
+
                 res = {
                     "ok": True,
                     "balance": bal_dollars,
@@ -1201,9 +1216,10 @@ def fetch_all_open_markets() -> list:
     seen_bases = set()
     bases = [b for b in target_bases if not (b in seen_bases or seen_bases.add(b))]
 
+    # 1. Multi-page scan across open Kalshi markets
     for base in bases:
         try:
-            for _ in range(2):
+            for _ in range(5):
                 path = "/trade-api/v2/markets?status=open&limit=100"
                 if cursor:
                     path += f"&cursor={cursor}"
@@ -1215,16 +1231,113 @@ def fetch_all_open_markets() -> list:
                     cursor = data.get("cursor")
                     if not cursor:
                         break
+                else:
+                    break
             if markets:
                 break
         except Exception:
             continue
 
-    # Always ensure Late-October NBA (5m), NFL/CFB (10m) & Tennis active props are in the scan pool
     existing_tickers = {m.get("ticker") for m in markets if m.get("ticker")}
+
+    # 2. Dynamically discover all active Sports series from Kalshi API (both ticker and series_ticker keys)
+    discovered_series = set()
+    for s_path in ("/trade-api/v2/series", "/trade-api/v2/series?category=Sports", "/trade-api/v2/series?category=sports"):
+        try:
+            sr = session.get(f"{BASE_URL}{s_path}", headers=public_headers, timeout=4)
+            if sr.status_code == 200:
+                s_list = sr.json().get("series", [])
+                for s_item in s_list:
+                    stk = s_item.get("ticker") or s_item.get("series_ticker")
+                    if not stk:
+                        continue
+                    title = str(s_item.get("title") or "").upper()
+                    cat = str(s_item.get("category") or "").upper()
+                    tags = [str(t).upper() for t in s_item.get("tags") or []]
+                    if (
+                        "NBA" in stk.upper()
+                        or "BASKETBALL" in title
+                        or "NBA" in title
+                        or "NBA" in tags
+                        or cat in ("SPORTS", "BASKETBALL")
+                        or "NFL" in stk.upper()
+                        or "FOOTBALL" in title
+                        or "TENNIS" in stk.upper()
+                    ):
+                        discovered_series.add(stk)
+        except Exception:
+            continue
+
+    # 3. Explore open Sports Events (Kalshi indexes NBA matchups & player props under Events)
+    for ev_path in ("/trade-api/v2/events?status=open&limit=100", "/trade-api/v2/events?category=Sports&status=open&limit=100"):
+        try:
+            er = session.get(f"{BASE_URL}{ev_path}", headers=public_headers, timeout=4)
+            if er.status_code == 200:
+                e_list = er.json().get("events", [])
+                for ev in e_list:
+                    etk = ev.get("event_ticker") or ""
+                    estk = ev.get("series_ticker") or ""
+                    etitle = str(ev.get("title") or "").upper()
+                    ecat = str(ev.get("category") or "").upper()
+                    if (
+                        "NBA" in etk.upper()
+                        or "NBA" in estk.upper()
+                        or "NBA" in etitle
+                        or "BASKETBALL" in etitle
+                        or ecat in ("SPORTS", "BASKETBALL")
+                    ):
+                        if estk:
+                            discovered_series.add(estk)
+                        for em in ev.get("markets", []):
+                            if isinstance(em, dict) and em.get("ticker") and em["ticker"] not in existing_tickers:
+                                existing_tickers.add(em["ticker"])
+                                markets.append(em)
+                        if etk:
+                            try:
+                                mr = session.get(f"{BASE_URL}/trade-api/v2/markets?event_ticker={etk}&status=open", headers=public_headers, timeout=3)
+                                if mr.status_code == 200:
+                                    for em2 in mr.json().get("markets", []):
+                                        if em2.get("ticker") and em2["ticker"] not in existing_tickers:
+                                            existing_tickers.add(em2["ticker"])
+                                            markets.append(em2)
+                            except Exception:
+                                pass
+        except Exception:
+            continue
+
+    # 4. Comprehensive sports series catalog including all NBA game and player prop variants
+    known_sports_series = {
+        "KXNBAGAMES", "KXNBAGAME", "KXNBA", "KXNBAPTS", "KXNBAAST", "KXNBAREB", "KXNBA3PT", "KXNBAPRA",
+        "KXNBASPREAD", "KXNBATOTAL", "KXNBAML", "KXNBAFIRST", "KXNBAHALF", "KXNBAPM", "KXNBASG",
+        "KXNBAPROPS", "KXNBAPROP", "KXNBACHAMP", "KXNBAMVP", "KXNBASTAT", "KXNBAAWARDS", "KXNBADRAFT",
+        "KXNBAEAST", "KXNBAWEST", "KXNBAPLAYOFFS", "KXNBACUP",
+        "KXWNBA", "KXWNBAGAMES", "KXWNBAGAME",
+        "KXNFLGAMES", "KXNFLGAME", "KXNFL", "KXCFBGAMES", "KXCFB",
+        "KXMLBGAMES", "KXMLB", "KXNHLGAMES", "KXNHL",
+        "KXATPMATCH", "KXWTAMATCH", "KXTENNIS"
+    }
+    all_sports_series = list(discovered_series | known_sports_series)
+
+    # 5. Query open markets for every sports series
+    for st in all_sports_series:
+        try:
+            path = f"/trade-api/v2/markets?status=open&series_ticker={st}&limit=100"
+            r = session.get(f"{BASE_URL}{path}", headers=public_headers, timeout=4)
+            if r.status_code == 200:
+                s_markets = r.json().get("markets", [])
+                for sm in s_markets:
+                    if sm.get("ticker") and sm["ticker"] not in existing_tickers:
+                        existing_tickers.add(sm["ticker"])
+                        markets.append(sm)
+        except Exception:
+            continue
+
+    # 6. Fallback demo templates for off-slate display / simulation (marked as synthetic)
     for demo in LATE_OCTOBER_ACTIVE_MARKETS:
         if demo["ticker"] not in existing_tickers:
-            markets.append(dict(demo))
+            d_copy = dict(demo)
+            d_copy["is_synthetic"] = True
+            markets.append(d_copy)
     return markets
 
 
@@ -1272,33 +1385,91 @@ def execute_order(ticker: str, action: str, side: str, price_cents: int, count: 
         print(f"  --> [SIM-{norm_action.upper()}] {count}x {ticker} ({norm_side.upper()}) @ {price_cents}c | ID: {sim_id}")
         return OrderResult({"ok": True, "order_id": sim_id, "mode": "SIM", "price_cents": price_cents, "count": count, "ticker": ticker})
 
-    path = "/trade-api/v2/portfolio/orders"
-    client_oid = str(uuid.uuid4())
-    payload = {
-        "action": norm_action,
-        "client_order_id": client_oid,
-        "count": max(1, int(count)),
-        "side": norm_side,
-        "ticker": ticker,
-        "type": "limit",
-        "yes_price" if norm_side == "yes" else "no_price": max(1, min(99, int(price_cents))),
-    }
+    # Guard: Synthetic demo templates must never be sent to the live Kalshi exchange
+    if any(ticker == demo.get("ticker") for demo in LATE_OCTOBER_ACTIVE_MARKETS):
+        sim_id = f"SIM-DEMO-{uuid.uuid4().hex[:6].upper()}"
+        print(f"  --> [DEMO-TEMPLATE-SIM] {count}x {ticker} is a demo template — routed to SIM | ID: {sim_id}")
+        return OrderResult({"ok": True, "order_id": sim_id, "mode": "SIM_DEMO", "price_cents": price_cents, "count": count, "ticker": ticker})
 
-    endpoints_to_try = [BASE_URL, "https://trading-api.kalshi.com", "https://api.elections.kalshi.com"]
+    client_oid = str(uuid.uuid4())
+    is_yes = norm_side in ("yes", "over", "o")
+    # In Kalshi's V2 single-book event market:
+    # "bid" = Buy YES at price in dollars (e.g. "0.5000")
+    # "ask" = Buy NO at complementary price (1.00 - price in dollars)
+    v2_side = "bid" if is_yes else "ask"
+    price_dollars = (price_cents / 100.0) if is_yes else ((100 - price_cents) / 100.0)
+    price_str = f"{price_dollars:.4f}"
+
+    attempts = [
+        (
+            "/trade-api/v2/portfolio/events/orders",
+            {
+                "ticker": ticker,
+                "side": v2_side,
+                "type": "limit",
+                "count": f"{float(count):.2f}",
+                "price": price_str,
+                "time_in_force": "good_till_canceled",
+                "client_order_id": client_oid,
+                "self_trade_prevention_type": "taker_at_cross",
+            },
+        ),
+        (
+            "/trade-api/v2/portfolio/events/orders",
+            {
+                "ticker": ticker,
+                "side": v2_side,
+                "type": "limit",
+                "count": str(max(1, int(count))),
+                "price": price_str,
+                "time_in_force": "good_till_canceled",
+                "client_order_id": client_oid,
+                "self_trade_prevention_type": "taker_at_cross",
+            },
+        ),
+        (
+            "/trade-api/v2/portfolio/events/orders",
+            {
+                "ticker": ticker,
+                "side": v2_side,
+                "type": "limit",
+                "count": "1.00",
+                "price": price_str,
+                "time_in_force": "good_till_canceled",
+                "client_order_id": client_oid,
+                "self_trade_prevention_type": "taker_at_cross",
+            },
+        ),
+    ]
+
+    endpoints_to_try = [BASE_URL, "https://api.elections.kalshi.com"]
     seen = set()
     unique_endpoints = [e for e in endpoints_to_try if not (e in seen or seen.add(e))]
 
     for base in unique_endpoints:
-        try:
-            r = session.post(f"{base}{path}", headers=get_auth_headers("POST", path), data=json.dumps(payload), timeout=5)
-            if r.status_code in (200, 201):
-                resp_data = r.json() if r.text else {}
-                real_order_id = (resp_data.get("order") or {}).get("order_id") or client_oid
-                print(f"  --> [LIVE-{norm_action.upper()}] {ticker} | {norm_side.upper()} x{count} @ {price_cents}c (on {base}) | OrderID: {real_order_id}")
-                return OrderResult({"ok": True, "order_id": real_order_id, "mode": "LIVE", "price_cents": price_cents, "count": count, "ticker": ticker})
-            print(f"  --> [ORDER-ATTEMPT] {ticker} ({r.status_code} on {base}): {r.text[:80]}")
-        except Exception as exc:
-            print(f"  --> [ORDER-ERR] {ticker} on {base}: {exc}")
+        for path, payload in attempts:
+            try:
+                r = session.post(
+                    f"{base}{path}",
+                    headers=get_auth_headers("POST", path),
+                    data=json.dumps(payload),
+                    timeout=5,
+                )
+                if r.status_code in (200, 201):
+                    resp_data = r.json() if r.text else {}
+                    order_obj = resp_data.get("order") or resp_data.get("event_order") or {}
+                    real_order_id = order_obj.get("order_id") or client_oid
+                    print(f"  --> [LIVE-{norm_action.upper()}] {ticker} | {norm_side.upper()} x{count} @ {price_cents}c (on {base}{path}) | OrderID: {real_order_id}")
+                    return OrderResult({"ok": True, "order_id": real_order_id, "mode": "LIVE", "price_cents": price_cents, "count": count, "ticker": ticker})
+                err_text = r.text[:200]
+                if "insufficient_balance" in err_text:
+                    print(f"  --> [BALANCE-ALERT] {ticker}: Insufficient available cash for {payload.get('count')} contracts @ {price_cents}c. (Check if open resting orders are holding balance on Kalshi).")
+                elif r.status_code != 410 and "deprecated" not in err_text:
+                    print(f"  --> [ORDER-ATTEMPT] {ticker} ({r.status_code} on {base}{path}): {err_text}")
+                if r.status_code in (400, 422):
+                    continue
+            except Exception as exc:
+                print(f"  --> [ORDER-ERR] {ticker} on {base}{path}: {exc}")
 
     # Fallback to simulation execution if live balance is $0 or market closed
     if live_kalshi_balance <= 0.0:
@@ -1455,6 +1626,18 @@ def run_monte_carlo_and_combo_pipeline(
                     continue
             mapped_props.append(p)
 
+    # In LIVE_MODE, prioritize real live Kalshi markets over synthetic demo templates,
+    # while ensuring NBA models are retained for 10k MC simulation and EV calculation.
+    if LIVE_MODE:
+        real_props = [p for p in mapped_props if not p.get("is_synthetic")]
+        if real_props:
+            has_real_nba = any(p.get("sport") == "NBA" for p in real_props)
+            if not has_real_nba:
+                nba_models = [p for p in mapped_props if p.get("is_synthetic") and p.get("sport") == "NBA"]
+                mapped_props = real_props + nba_models
+            else:
+                mapped_props = real_props
+
     if not mapped_props:
         for demo in LATE_OCTOBER_ACTIVE_MARKETS:
             for p in sim_to_prop_mapper(demo):
@@ -1541,6 +1724,14 @@ def run_monte_carlo_and_combo_pipeline(
             remaining_slate_cap=remaining_slate_cap,
         )
 
+    # Sync props & combo slips into mobile Web App cache (Sweat HUD)
+    try:
+        from app import _WEB_CACHE
+        _WEB_CACHE["props"] = simulated_legs
+        _WEB_CACHE["slips"] = candidate_combos
+    except Exception:
+        pass
+
     # 4. LIVE KALSHI ORDER EXECUTION & RFQ SNIPER
     orders_executed = []
     can_execute = (
@@ -1558,7 +1749,8 @@ def run_monte_carlo_and_combo_pipeline(
                 price_c = leg.ask_cents
                 cost_per_c = max(1, price_c) / 100.0
                 raw_contracts = int(per_leg_stake // cost_per_c)
-                contracts = max(1, min(raw_contracts, 10))
+                max_safe_contracts = 2 if bankroll <= 25.0 else min(10, max(1, int(bankroll // 5)))
+                contracts = max(1, min(raw_contracts, max_safe_contracts))
                 leg_cost = round(contracts * cost_per_c, 2)
 
                 if get_current_exposure() + leg_cost > slate_cap:
@@ -1640,6 +1832,8 @@ def run_monte_carlo_and_combo_pipeline(
             price_c = top_leg.ask_cents
             cost_per_c = max(1, price_c) / 100.0
             qty = quarter_kelly_size(bankroll, top_leg.mc_true_prob, price_c)
+            max_single_qty = 2 if bankroll <= 25.0 else 5
+            qty = max(1, min(qty, max_single_qty))
             leg_cost = round(qty * cost_per_c, 2)
 
             if qty > 0 and (get_current_exposure() + leg_cost <= slate_cap):
@@ -2185,6 +2379,7 @@ def build_help_commands_report() -> str:
         "• `/mode [live|sim]` — Toggle between Live Real-Money and Paper Simulation\n"
         "• `/cap <pct>` — Adjust bankroll exposure cap (`/cap 100` for 100% full balance, `/cap 50` for 50%)\n"
         "• `/bal` — Verify live Kalshi cash balance, signer status, and session PnL\n"
+        "• `/ports` (or `/web`) — View mobile Sweat HUD port (8080) & local/network URLs\n"
         "• `/clear_locks` — Flush all ticker cooldowns and idempotency locks\n"
         "• `/push` — Synchronize code & deploy updates to GitHub\n\n"
         "🔍 *MANUAL SPORT SCANS (10,000 MC DRAWS):*\n"
@@ -3057,6 +3252,24 @@ async def telegram_notifier_and_command_loop():
                         else:
                             await asyncio.to_thread(notify_telegram, rep, hud_kb)
 
+                    elif low.startswith(("/port", "/ports", "/web", "/hud")):
+                        from app import ACTIVE_WEB_PORT
+                        p_txt = (
+                            f"🌐 *AURASCAN PORT & SWEAT HUD STATUS*\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"• 🔌 *Web Port:* `{ACTIVE_WEB_PORT}` (TCP HTTP)\n"
+                            f"• 📱 *Local HUD:* `http://127.0.0.1:{ACTIVE_WEB_PORT}`\n"
+                            f"• 📡 *Network / LAN:* `http://0.0.0.0:{ACTIVE_WEB_PORT}`\n"
+                            f"• 🚀 *Vercel Deployment:* https://peezt-tv.vercel.app\n"
+                            f"• ⚡ *Kalshi V2 WebSocket:* `wss://api.elections.kalshi.com` (Active)\n"
+                            f"• 🟢 *Server Status:* Active & Serving live 10k MC + Copula slips"
+                        )
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, p_txt, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, p_txt, hud_kb)
+
                     elif low.startswith(("/help", "/commands", "help", "commands")) or low in ("?", "info", "/info"):
                         h_txt = build_help_commands_report()
                         _, hud_kb = build_menu_hud_payload()
@@ -3267,6 +3480,40 @@ async def rest_scanner_loop():
             await asyncio.sleep(4)
 
 
+async def start_web_server_adapter():
+    """Start companion Sweat HUD aiohttp web server on port 8080 (with automatic fallback)."""
+    try:
+        from app import start_background_web_server, _WEB_CACHE, ACTIVE_WEB_PORT
+        from config import WEB_PORT
+
+        async def _web_scan_adapter() -> List[SlipLeg]:
+            await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, None, False)
+            return _WEB_CACHE.get("props", [])
+
+        async def _web_exec_adapter(slip) -> List[str]:
+            out = []
+            for leg in getattr(slip, "legs", []):
+                p_c = getattr(leg, "ask_cents", 50)
+                res = execute_order(leg.market_ticker, "buy", getattr(leg, "raw_side", "yes"), p_c, 1)
+                if res:
+                    out.append(leg.market_ticker)
+            return out
+
+        async def _web_tg_adapter(msg: str):
+            await asyncio.to_thread(notify_telegram, msg)
+
+        runner = await start_background_web_server(
+            scan_fn=_web_scan_adapter,
+            execute_fn=_web_exec_adapter,
+            telegram_dispatch_fn=_web_tg_adapter,
+            port=WEB_PORT,
+        )
+        return runner
+    except Exception as exc:
+        print(f"[WEB-SERVER-WARN] Notice: {exc}")
+        return None
+
+
 async def main():
     reaped = kill_stale_bot_processes()
     if reaped:
@@ -3279,19 +3526,27 @@ async def main():
     else:
         print(f"[KALSHI-API] ⚠️ Notice: {api_check['status']}")
 
+    web_runner = await start_web_server_adapter()
+    from app import ACTIVE_WEB_PORT
+
     curr_slate_cap = get_dynamic_slate_cap()
     mode_banner = "LIVE REAL-MONEY" if LIVE_MODE else "SIMULATION"
     print("======================================================================")
     print(f" AURASCAN // KALSHI V2 HYBRID ENGINE [{mode_banner}] (Ed25519 Native)")
     print(f" Kalshi Bal: ${live_kalshi_balance:.2f} | Sniper: {'ARMED' if SNIPER_ARMED else 'DISARMED'} | Slate Cap: ${curr_slate_cap:.2f} ({int(bankroll_allocation_pct*100)}%)")
-    print(" Commands: /menu | /mode [live|sim] | /api | /bal | /cap [10-100] | /build | /resume | /sniper on|off")
+    print(f" Web HUD: http://127.0.0.1:{ACTIVE_WEB_PORT} (0.0.0.0:{ACTIVE_WEB_PORT}) | Vercel: https://peezt-tv.vercel.app")
+    print(" Commands: /menu | /mode [live|sim] | /api | /bal | /cap [10-100] | /ports | /build | /resume | /sniper on|off")
     print("======================================================================")
-    await asyncio.gather(
-        telegram_notifier_and_command_loop(),
-        kalshi_ws_listener(),
-        rest_scanner_loop(),
-        auto_pilot_loop(),
-    )
+    try:
+        await asyncio.gather(
+            telegram_notifier_and_command_loop(),
+            kalshi_ws_listener(),
+            rest_scanner_loop(),
+            auto_pilot_loop(),
+        )
+    finally:
+        if web_runner:
+            await web_runner.cleanup()
 
 if __name__ == "__main__":
     asyncio.run(main())

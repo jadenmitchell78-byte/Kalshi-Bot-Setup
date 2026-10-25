@@ -56,7 +56,7 @@ STALE_ORDER_TTL_SEC: int = int(os.getenv("STALE_ORDER_TTL_SEC", "45"))
 MAX_SPREAD_CENTS: int = int(os.getenv("MAX_SPREAD_CENTS", "8"))
 
 # Web Server Port
-WEB_PORT: int = int(os.getenv("PEEZY_WEB_PORT", "8787"))
+WEB_PORT: int = int(os.getenv("PORT", os.getenv("PEEZY_WEB_PORT", "8080")))
 
 # Background Polling Intervals
 AUTO_SCAN_INTERVAL_SEC: int = int(os.getenv("AUTO_SCAN_INTERVAL_SEC", "35"))

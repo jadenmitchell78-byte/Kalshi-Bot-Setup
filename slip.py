@@ -550,6 +550,10 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
     devig_p_yes = (mid_yes / tot_mid) if tot_mid > 0 else 0.50
     devig_p_no = (mid_no / tot_mid) if tot_mid > 0 else 0.50
 
+    volume = _clean_price_cents(market.get("volume")) + _clean_price_cents(market.get("open_interest"))
+    if volume <= 0:
+        volume = 2400
+
     spread = max(1, yes_ask - yes_bid)
     spread_bonus = max(0.0, (6 - spread) * 0.004)
     vol_bonus = min(0.015, (volume / 60000.0))
@@ -560,9 +564,6 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
     edge_no = round(min(0.085, base_alpha + devig_edge_no), 4)
 
     is_under_contract = ("UNDER" in combined_blob) or ("-U" in ticker.upper())
-    volume = _clean_price_cents(market.get("volume")) + _clean_price_cents(market.get("open_interest"))
-    if volume <= 0:
-        volume = 2400
 
     clean_prop_label = f"{player_name} {detected_stat} {'Under' if is_under_contract else 'Over'} {line_val:g}"
     if detected_stat in ("Spread", "Moneyline", "Outcome"):
@@ -589,6 +590,7 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
             "market_url": f"https://kalshi.com/markets/{ticker.lower()}",
             "volume": volume,
             "title": text[:60],
+            "is_synthetic": bool(market.get("is_synthetic", False)),
         })
 
     # NO side contract
@@ -613,6 +615,7 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
             "market_url": f"https://kalshi.com/markets/{ticker.lower()}",
             "volume": volume,
             "title": text[:60],
+            "is_synthetic": bool(market.get("is_synthetic", False)),
         })
 
     # Fallback to ensure mapped_props is NEVER 0
@@ -634,6 +637,7 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
             "market_url": f"https://kalshi.com/markets/{ticker.lower()}",
             "volume": max(100, volume),
             "title": text[:60],
+            "is_synthetic": bool(market.get("is_synthetic", False)),
         })
 
     return props
