@@ -3552,11 +3552,13 @@ async def auto_pilot_loop():
     2. Pulls all active sports markets, maps all props, runs 10,000-iter MC + Joint Gaussian Copula.
     3. Ranks top +EV single props and 2-to-3 leg correlated combos.
     4. Automatically fires live limit orders sizing stakes dynamically via Fractional Kelly scaled to available balance.
-    5. Pushes instant Telegram execution alerts & updated HUD receipt for every auto-placed order.
+    5. Pushes instant Telegram execution alerts & live auto-scans for props to chat.
     """
     global last_scan_ts, last_markets_checked, last_scan_diag
     cycle_num = 0
-    await asyncio.sleep(5)  # Initial boot grace
+    last_broadcast_ts = 0.0
+    last_broadcast_sig = ""
+    await asyncio.sleep(4)  # Initial boot grace
     print("[AUTO-PILOT] Full-auto background engine loop active (60s loop).")
 
     while True:
@@ -3565,10 +3567,6 @@ async def auto_pilot_loop():
             if is_user_building_combo():
                 print(f"[AUTO-PILOT] Cycle #{cycle_num}: Paused (User is building manual combo in Telegram/Web App).")
                 await asyncio.sleep(15)
-                continue
-
-            if not SNIPER_ARMED:
-                await asyncio.sleep(30)
                 continue
 
             try:
@@ -3580,41 +3578,53 @@ async def auto_pilot_loop():
             curr_exp = get_current_exposure()
             avail_to_deploy = max(0.0, slate_cap - curr_exp)
 
-            if avail_to_deploy < 0.50:
-                last_scan_diag = f"🛡️ Slate Cap full (${curr_exp:.2f}/${slate_cap:.2f}) across {len(open_positions)} pos"
-                await asyncio.sleep(45)
-                continue
-
             if circuit_breaker_tripped:
+                last_scan_diag = f"🛑 Circuit breaker active (${bankroll_allocation_pct*100:.0f}%)"
                 await asyncio.sleep(60)
                 continue
 
-            print(f"[AUTO-PILOT] Cycle #{cycle_num}: Scanning & simulating (Deployable: ${avail_to_deploy:.2f} / ${slate_cap:.2f} Cap)...")
+            print(f"[AUTO-PILOT] Cycle #{cycle_num}: Auto-scanning props & running 10k MC + Copula (Deployable: ${avail_to_deploy:.2f} / ${slate_cap:.2f} Cap)...")
+
+            target_cid = TELEGRAM_CHAT_ID or discover_telegram_chat_id()
+            can_fire = bool(SNIPER_ARMED and (avail_to_deploy >= 0.50))
 
             # Run end-to-end MC + Copula + Execution pipeline
             rep_txt, rep_kb = await asyncio.to_thread(
                 run_monte_carlo_and_combo_pipeline,
                 None,
                 None,
-                True,
-                TELEGRAM_CHAT_ID,
+                can_fire,
+                target_cid,
             )
 
-            if "ORDER EXECUTION RECEIPT" in rep_txt and TELEGRAM_CHAT_ID:
-                notify_telegram(rep_txt, reply_markup=rep_kb)
-            elif (cycle_num == 1 or cycle_num % 10 == 0) and TELEGRAM_CHAT_ID:
-                # Periodic telemetry heartbeat so user sees active background auto-pilot monitoring
-                notify_telegram(
-                    f"📡 *AUTO-PILOT HEARTBEAT // CYCLE #{cycle_num}*\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"• ⚡ *Engine:* 🟢 Full-Auto Background Loop Active (60s)\n"
-                    f"• 🎛 *Mode:* `{'🟢 LIVE REAL-MONEY' if LIVE_MODE else '🎮 SIMULATION'}` | 🎯 *Sniper:* `{'ARMED' if SNIPER_ARMED else 'DISARMED'}`\n"
-                    f"• 💵 *Live Cash:* `${live_bal:.2f}` | 🛡️ *Exposure:* `${curr_exp:.2f} / ${slate_cap:.2f}` Cap ({int(bankroll_allocation_pct*100)}%)\n"
-                    f"• 🩺 *Diagnostics:* `{last_scan_diag}`\n\n"
-                    f"💡 _Auto-Sniper is scanning {last_markets_checked} markets across NBA, NFL & Tennis._\n"
-                    f"Send `/scan` or tap [⚡ Force Scan] for immediate full 10k MC report.",
-                    reply_markup=rep_kb,
+            # Build prop signature from top simulated legs to detect line moves or edge shifts
+            prop_lines = [
+                ln.strip() for ln in rep_txt.splitlines()
+                if (ln.strip().startswith("• [") or "10k MC True:" in ln or "TOP CORRELATED COMBO" in ln)
+            ]
+            current_sig = "|".join(prop_lines[:6])
+
+            now = time.time()
+            order_executed = "ORDER EXECUTION RECEIPT" in rep_txt
+            is_initial = (cycle_num == 1)
+            sig_changed = (bool(current_sig) and current_sig != last_broadcast_sig and (now - last_broadcast_ts >= 90))
+            is_periodic = (now - last_broadcast_ts >= 180)  # Regular follow-up every 3 minutes
+
+            if order_executed or is_initial or sig_changed or is_periodic:
+                header_badge = (
+                    "🚨 *AUTO-PILOT LIVE ORDER RECEIPT* 🚨"
+                    if order_executed
+                    else f"📡 *AUTO-PILOT PROP SCAN // CYCLE #{cycle_num}* 📡"
                 )
+                if not order_executed and not rep_txt.startswith("📡"):
+                    send_txt = f"{header_badge}\n{rep_txt}"
+                else:
+                    send_txt = rep_txt
+
+                print(f"[AUTO-PILOT] Dispatching auto-scan to Telegram (Cycle #{cycle_num}, Order={order_executed}, Initial={is_initial}, SigChanged={sig_changed}, Periodic={is_periodic}).")
+                notify_telegram(send_txt, reply_markup=rep_kb, chat_id=target_cid)
+                last_broadcast_ts = now
+                last_broadcast_sig = current_sig
 
         except Exception as err:
             print(f"[AUTO-PILOT-EXC] Cycle error: {err}")

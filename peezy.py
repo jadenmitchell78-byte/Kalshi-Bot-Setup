@@ -842,12 +842,15 @@ async def auto_scanner_worker(
     notify_callback: Optional[Callable[[str], Awaitable[None]]] = None,
     stop_event: Optional[asyncio.Event] = None,
 ) -> None:
-    """24/7 Autonomous Copula Scanner & Sniper Worker with automatic hot-reload."""
+    """24/7 Autonomous Copula Scanner & Sniper Worker with automatic hot-reload and live Telegram prop broadcasts."""
     logger.info("24/7 Auto-Scanner worker started (interval=%ds)...", AUTO_SCAN_INTERVAL_SEC)
     watched_files = list(Path(BASE_DIR).glob("*.py")) + [Path(BASE_DIR) / ".env"]
     initial_mtimes = {
         str(p): p.stat().st_mtime for p in watched_files if p.exists()
     }
+    last_broadcast_ts = 0.0
+    last_broadcast_sig = ""
+
     while stop_event is None or not stop_event.is_set():
         try:
             for p in watched_files:
@@ -866,6 +869,9 @@ async def auto_scanner_worker(
                 "ON" if rt["auto"] else "OFF",
                 rt["sim_cash"],
             )
+
+            slip_placed = False
+            bankroll = await get_effective_bankroll()
 
             if rt["auto"]:
                 held = get_held_tickers()
@@ -887,7 +893,6 @@ async def auto_scanner_worker(
                     unheld = [l for l in candidate_legs if l.market_ticker not in held]
 
                 if len(unheld) >= MIN_SLIP_LEGS:
-                    bankroll = await get_effective_bankroll()
                     parlays = build_optimal_parlays(
                         unheld,
                         min_legs=MIN_SLIP_LEGS,
@@ -899,6 +904,7 @@ async def auto_scanner_worker(
                         if bankroll >= best_slip.kelly_stake:
                             notes = await execute_and_persist_slip(best_slip)
                             updated_rt = get_runtime_state()
+                            slip_placed = True
                             logger.info(
                                 "🚀 AUTO-PLACED [%s] Slip %s (%d-Leg %s) | Stake: $%.2f -> Est Payout: $%.2f | Edge: +%.1f%% EV | Cash: $%.2f",
                                 rt["mode"],
@@ -920,6 +926,55 @@ async def auto_scanner_worker(
                                 footer += "\n" + "\n".join(notes)
                             if notify_callback:
                                 await notify_callback(card + footer)
+                            last_broadcast_ts = time.time()
+
+            # Automated Prop Scan Broadcast to Telegram (Cycle #1, edge changes, and every 3 minutes)
+            now = time.time()
+            sig = "|".join([f"{l.market_ticker}:{l.side}:{l.line}:{getattr(l, 'ev_edge', 0.0):.2f}" for l in candidate_legs[:4]])
+            need_broadcast = (
+                not slip_placed
+                and notify_callback is not None
+                and bool(candidate_legs)
+                and (
+                    last_broadcast_ts == 0.0
+                    or (now - last_broadcast_ts >= 180)
+                    or (bool(sig) and sig != last_broadcast_sig and (now - last_broadcast_ts >= 90))
+                )
+            )
+
+            if need_broadcast:
+                optimal_slips = build_optimal_parlays(
+                    candidate_legs,
+                    min_legs=MIN_SLIP_LEGS,
+                    max_legs=MAX_SLIP_LEGS,
+                    bankroll=bankroll,
+                )
+                scan_lines = [
+                    f"📡 *AUTO-PILOT PROP SCAN // CYCLE #{rt['scans']}* 📡",
+                    "━━━━━━━━━━━━━━━━━━━━━━━━",
+                    f"• 🎛 *Mode:* `{rt['mode']}` | 🎯 *Auto-Sniper:* `{'ARMED' if rt['auto'] else 'DISARMED'}`",
+                    f"• 💵 *Bankroll:* `${rt['sim_cash']:.2f}` | 🛡️ *Slate Cap:* `${rt['slate_cap']:.2f}`",
+                    f"• 🔬 *Props Evaluated:* `{len(candidate_legs)}` across 10,000 MC draws\n",
+                ]
+                if optimal_slips:
+                    top_s = optimal_slips[0]
+                    scan_lines.append(format_slip_card(top_s, title_banner="TOP CORRELATED COPULA +EV COMBO", mode_label=rt["mode"]))
+                    scan_lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━")
+
+                scan_lines.append("📊 *TOP SIMULATED PROPS (10k MC DISTRIBUTION)*")
+                for leg in candidate_legs[:4]:
+                    edge_sign = "+" if leg.ev_edge >= 0 else ""
+                    scan_lines.append(
+                        f"• [{leg.sport}] *{leg.format_prop_line_label()}*\n"
+                        f"  🎯 10k MC: `{leg.mc_true_prob*100:.1f}%` | Book: `{leg.book_prob*100:.1f}%` (*{edge_sign}{leg.ev_edge*100:.1f}% EV*)\n"
+                        f"  📈 Floor: `{leg.p10:.1f}` | Median: `{leg.p50:.1f}` | Ceiling: `{leg.p90:.1f}` ({getattr(leg, 'archetype', 'QUANT_HYBRID')})"
+                    )
+                try:
+                    await notify_callback("\n".join(scan_lines))
+                    last_broadcast_ts = now
+                    last_broadcast_sig = sig
+                except Exception as b_err:
+                    logger.warning("Could not dispatch auto-scan broadcast: %s", b_err)
         except Exception as exc:
             logger.error("Auto-scanner worker error: %s", exc)
 
