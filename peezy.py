@@ -640,13 +640,21 @@ async def scan_markets_with_telemetry(sport_filter: Optional[str] = None) -> Lis
             except Exception:
                 break
 
-    # 5. Filter out banned prefixes, cups, while allowing macro futures (KXLEBRON, KXBASKETBALL, etc.)
+    # 5. Filter out banned prefixes, cups, politics & non-sports, while allowing sports macro futures
+    EXCLUDED_CATEGORIES = (
+        "POLITICS", "POP CULTURE", "FINANCIAL", "CRYPTO", "WEATHER",
+        "ENTERTAINMENT", "ELECTIONS", "NEWS", "MACRO", "GOVERNMENT",
+        "CONGRESS", "PRESIDENTIAL", "SENATE", "WHITE HOUSE", "CELEBRITY"
+    )
     clean_raw_markets = []
     for m in raw_markets:
         tkr = str(m.get("ticker") or "").upper()
         tit = str(m.get("title") or "").upper()
         sub = str(m.get("subtitle") or "").upper()
-        blob = f"{tkr} {tit} {sub}"
+        cat = str(m.get("category") or "").upper()
+        blob = f"{tkr} {tit} {sub} {cat}"
+        if any(exc in cat or exc in tit or exc in sub for exc in EXCLUDED_CATEGORIES):
+            continue
         is_allowed_macro = any(pfx in tkr for pfx in FUTURES_SERIES_PREFIXES)
         if not is_allowed_macro:
             if any(b in tkr for b in BANNED_PREFIXES) or any(tok in blob for tok in FUTURES_OR_CUP_TOKENS):

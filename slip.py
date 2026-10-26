@@ -39,6 +39,11 @@ FUTURES_OR_CUP_TOKENS = (
     "WORLD SERIES", "PENNANT", "SEASON REWARD", "SEASON REWARDS", "SZN REWARD", "SZN REWARDS",
     "HOME RUN LEADER", "HR LEADER", "BATTING TITLE", "TRIPLE CROWN", "GOLD GLOVE", "SILVER SLUGGER", "HALL OF FAME"
 )
+EXCLUDED_CATEGORIES = (
+    "POLITICS", "POP CULTURE", "FINANCIAL", "CRYPTO", "WEATHER",
+    "ENTERTAINMENT", "ELECTIONS", "NEWS", "MACRO", "GOVERNMENT",
+    "CONGRESS", "PRESIDENTIAL", "SENATE", "WHITE HOUSE", "CELEBRITY"
+)
 COOLDOWN_SECONDS = 45
 
 SPORT_PROFILES: Dict[str, Dict[str, Any]] = {
@@ -111,6 +116,12 @@ def clear_cooldown_locks() -> int:
 
 def classify_sport_engine(ticker: str, title: str = "", category: str = "") -> Tuple[str, Dict[str, Any]]:
     blob = f"{ticker} {title} {category}".upper()
+    if any(exc in blob for exc in EXCLUDED_CATEGORIES):
+        return "EXCLUDED", {
+            "max_spread": 0,
+            "min_ev": 1.0,
+            "swing_trigger": 999,
+        }
     for engine_name, cfg in SPORT_PROFILES.items():
         if any(kw in blob for kw in cfg["keywords"]):
             return engine_name, cfg
@@ -151,13 +162,14 @@ PROP_LINE_REGEX = re.compile(
     r"(?P<side>OVER|UNDER|MORE\s*THAN|LESS\s*THAN|AT\s*LEAST|YES|NO|O|U)?\s*"
     r"(?P<line>\d+(?:\.\d+)?)\+?\s*"
     r"(?P<stat>PRA|PTS\s*\+\s*REB\s*\+\s*AST|POINTS\s*\+\s*REBOUNDS\s*\+\s*ASSISTS|"
-    r"PR|PTS\s*\+\s*REB|POINTS\s*\+\s*REBOUNDS|PA|PTS\s*\+\s*AST|POINTS\s*\+\s*ASSISTS|"
-    r"RA|REB\s*\+\s*AST|REBOUNDS\s*\+\s*ASSISTS|STOCKS|BLK\s*\+\s*STL|STL\s*\+\s*BLK|"
+    r"PTS\s*\+\s*REB|POINTS\s*\+\s*REBOUNDS|PTS\s*\+\s*AST|POINTS\s*\+\s*ASSISTS|"
+    r"REB\s*\+\s*AST|REBOUNDS\s*\+\s*ASSISTS|STOCKS|BLK\s*\+\s*STL|STL\s*\+\s*BLK|"
+    r"\bPR\b|\bPA\b|\bRA\b|"
     r"PTS|POINTS|REB|REBOUNDS|AST|ASSISTS|3PT[S]?|3-PT|THREE\s*POINTERS|THREES|3PM|3S|"
     r"PASS\s*YDS|PASSING\s*YARDS|PASS\s*YARDS|REC\s*YDS|RECEIVING\s*YARDS|REC\s*YARDS|"
     r"RUSH\s*YDS|RUSHING\s*YARDS|RUSH\s*YARDS|YDS|YARDS|TOUCHDOWNS|TD|TDS|"
-    r"BLK|BLOCKS|STL|STEALS|TURNOVERS|TO|"
-    r"K|STRIKEOUTS|HITS|HOME\s*RUNS|HR|SETS|STRAIGHT\s*SETS|GAMES|GOALS|SAVES|SOG|"
+    r"BLK|BLOCKS|STL|STEALS|TURNOVERS|\bTO\b|\bTOS\b|"
+    r"STRIKEOUTS|\bK\b|HITS|HOME\s*RUNS|HR|SETS|STRAIGHT\s*SETS|GAMES|GOALS|SAVES|SOG|"
     r"KILLS|HEADSHOTS|HS|MAPS|ROUNDS)?",
     re.IGNORECASE,
 )
@@ -351,6 +363,9 @@ def prob_to_american(prob: float) -> str:
 
 
 def detect_sport(ticker: str, title: str = "") -> str:
+    combined = f"{ticker} {title}".upper()
+    if any(exc in combined for exc in EXCLUDED_CATEGORIES):
+        return "EXCLUDED"
     tk = ticker.upper()
     if tk.startswith("KXNBA") or "NBA" in tk:
         return "NBA"
@@ -365,7 +380,6 @@ def detect_sport(ticker: str, title: str = "") -> str:
     if tk.startswith(("KXESPORTS", "KXCS2", "KXLOL", "KXVAL")) or "ESPORTS" in tk:
         return "ESPORTS"
 
-    combined = f"{ticker} {title}".upper()
     for sport in ("ESPORTS", "WNBA", "NBA", "NFL", "MLB", "TENNIS"):
         if SPORT_PATTERNS[sport].search(combined):
             return sport
@@ -477,12 +491,18 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     combined_blob = f"{ticker} {title} {subtitle} {category}".upper()
 
+    # Drop politics, entertainment, crypto, weather, and macro novelty markets
+    if any(exc in combined_blob for exc in EXCLUDED_CATEGORIES):
+        return []
+
     # User priority: Strictly daily/live game lines & player props (filter out cups, mid-season tourneys & futures)
     if any(tok in combined_blob for tok in FUTURES_OR_CUP_TOKENS):
         return []
 
     # 1. Sport Detection
     sport = detect_sport(ticker, text)
+    if sport == "EXCLUDED":
+        return []
     if sport == "GENERAL":
         for sp_name, profile in SPORT_PROFILES.items():
             if any(kw in combined_blob for kw in profile["keywords"]):
@@ -499,7 +519,7 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
         elif "KXMLB" in combined_blob or "BASEBALL" in combined_blob:
             sport = "MLB"
         else:
-            sport = "NBA"  # Default to primary active October engine for simulation physics
+            return []  # Drop unclassified non-sports contracts
 
     # 2. Line extraction: floor_strike, strike_price, cap_strike, ticker regex, text regex
     line_val: Optional[float] = None
@@ -812,9 +832,15 @@ def build_leg_from_kalshi_market(
     title = market.get("title") or market.get("subtitle") or ticker
     category = market.get("category") or ""
     blob = f"{ticker} {title} {category}".upper()
+    if any(exc in blob for exc in EXCLUDED_CATEGORIES):
+        return None
     if any(tok in blob for tok in FUTURES_OR_CUP_TOKENS):
         return None
     engine_name, profile = classify_sport_engine(ticker, title, category)
+    if engine_name == "EXCLUDED":
+        return None
+    if engine_name == "GENERAL" and not any(k in ticker.upper() for k in ("KXNBA", "KXNFL", "KXCFB", "KXTENNIS", "KXMLB", "KXWNBA", "KXESPORTS", "KXBASKETBALL")):
+        return None
 
     spread = (yes_ask - yes_bid) if yes_bid > 0 else 3
     if spread <= 0 or spread > profile["max_spread"]:

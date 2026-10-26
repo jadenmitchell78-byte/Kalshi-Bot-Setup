@@ -407,6 +407,13 @@ class KalshiSmartPlacer:
         }
         keywords = SPORT_KEYWORDS.get(sp_u, [sp_u])
 
+        # Drop politics, entertainment, crypto, weather, and macro novelty markets from sports scans
+        EXCLUDED_CATEGORIES = [
+            "POLITICS", "POP CULTURE", "FINANCIAL", "CRYPTO", "WEATHER",
+            "ENTERTAINMENT", "ELECTIONS", "NEWS", "MACRO", "GOVERNMENT",
+            "CONGRESS", "PRESIDENTIAL", "SENATE", "WHITE HOUSE", "CELEBRITY"
+        ]
+
         # 1. Sweep open events with nested markets (all active live props in 1-2 calls)
         cursor = None
         for _ in range(6):
@@ -420,13 +427,24 @@ class KalshiSmartPlacer:
                 data = resp.json()
                 events = data.get("events", [])
                 for ev in events:
-                    ev_blob = f"{ev.get('event_ticker', '')} {ev.get('series_ticker', '')} {ev.get('title', '')} {ev.get('sub_title', '')} {ev.get('category', '')}".upper()
+                    ev_cat = (ev.get("category") or "").upper()
+                    ev_title = (ev.get("title") or "").upper()
+                    if any(exc in ev_cat or exc in ev_title for exc in EXCLUDED_CATEGORIES):
+                        continue
+
+                    ev_blob = f"{ev.get('event_ticker', '')} {ev.get('series_ticker', '')} {ev_title} {ev.get('sub_title', '')} {ev_cat}".upper()
                     ev_match = any(k in ev_blob for k in keywords)
 
                     for m in ev.get("markets", []):
                         if m.get("status") not in ("active", "open"):
                             continue
-                        m_blob = f"{m.get('ticker', '')} {m.get('title', '')} {m.get('subtitle', '')}".upper()
+                        m_cat = (m.get("category") or ev_cat).upper()
+                        m_title = (m.get("title") or ev_title).upper()
+                        m_sub = (m.get("subtitle") or "").upper()
+                        m_tkr = (m.get("ticker") or "").upper()
+                        if any(exc in m_cat or exc in m_title or exc in m_sub or exc in m_tkr for exc in EXCLUDED_CATEGORIES):
+                            continue
+                        m_blob = f"{m_tkr} {m_title} {m_sub}".upper()
                         if ev_match or any(k in m_blob for k in keywords):
                             tk = m.get("ticker")
                             if tk and tk not in seen_tickers:
@@ -490,10 +508,16 @@ class KalshiSmartPlacer:
             lookup_names = ["WEMBANYAMA", "WEMBY"]
 
         for m in candidates:
-            searchable = f"{m.get('ticker', '')} {m.get('title', '')} {m.get('subtitle', '')}".upper()
+            m_cat = (m.get("category") or "").upper()
+            m_title = (m.get("title") or "").upper()
+            m_sub = (m.get("subtitle") or "").upper()
+            m_tkr = (m.get("ticker") or "").upper()
+            if any(exc in m_cat or exc in m_title or exc in m_sub or exc in m_tkr for exc in ("POLITICS", "POP CULTURE", "FINANCIAL", "CRYPTO", "WEATHER", "ENTERTAINMENT", "ELECTIONS", "NEWS", "MACRO")):
+                continue
+            searchable = f"{m_tkr} {m_title} {m_sub}".upper()
             words_in_market = re.findall(r"[A-Z]+", searchable)
             exact_hit = any(n in searchable for n in lookup_names)
-            fuzzy_hit = any(SequenceMatcher(None, n, w).ratio() >= 0.80 for n in lookup_names for w in words_in_market)
+            fuzzy_hit = any(SequenceMatcher(None, n, w).ratio() >= 0.85 for n in lookup_names for w in words_in_market)
             if not exact_hit and not fuzzy_hit:
                 continue
 

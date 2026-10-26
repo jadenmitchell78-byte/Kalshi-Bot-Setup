@@ -289,6 +289,26 @@ SCHEME_MULTIPLIERS: Dict[Tuple[str, str], Dict[str, float]] = {
 }
 
 
+# Drop politics, entertainment, crypto, weather, and macro novelty markets from sports prop scans
+EXCLUDED_CATEGORIES = [
+    "POLITICS",
+    "POP CULTURE",
+    "FINANCIAL",
+    "CRYPTO",
+    "WEATHER",
+    "ENTERTAINMENT",
+    "ELECTIONS",
+    "NEWS",
+    "MACRO",
+    "GOVERNMENT",
+    "CONGRESS",
+    "PRESIDENTIAL",
+    "SENATE",
+    "WHITE HOUSE",
+    "CELEBRITY",
+]
+
+
 def _norm_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
@@ -391,12 +411,18 @@ def parse_user_query(raw_text: str) -> Dict[str, Any]:
         # Check aliases
         for alias in reg_data.get("aliases", ()):
             alias_u = alias.upper()
-            if len(alias_u) <= 3 and alias_u in raw_tokens:
-                best_match, best_score = reg_name, 0.99
-                break
-            if alias_u in raw_player or raw_player in alias_u:
-                best_match, best_score = reg_name, 0.95
-                break
+            if len(alias_u) <= 4:
+                # Exact token match for short aliases (prevents 'KAT' matching 'KAT TIMPF', 'JA' matching 'JANUARY', etc.)
+                if alias_u in raw_tokens and len(raw_tokens) == 1:
+                    best_match, best_score = reg_name, 0.99
+                    break
+                elif alias_u in raw_tokens:
+                    best_match, best_score = reg_name, 0.88
+                    break
+            else:
+                if alias_u in raw_player or raw_player in alias_u:
+                    best_match, best_score = reg_name, 0.95
+                    break
 
         if best_score >= 0.95:
             break
@@ -654,7 +680,7 @@ class KalshiUnifiedSniper:
         }
 
     def fetch_live_kalshi_markets(self, sport: str = "NBA") -> List[Dict[str, Any]]:
-        """Sweeps Kalshi /events with nested markets so NBA/NFL boards never return empty."""
+        """Sweeps Kalshi /events with nested markets so NBA/NFL boards never return empty, strictly dropping non-sports/politics categories."""
         sport_u = sport.upper()
         kws = (
             ["NBA", "BASKETBALL", "KNICKS", "TIMBERWOLVES", "THUNDER", "76ERS", "LAKERS", "KINGS", "NETS", "CAVS"]
@@ -668,10 +694,23 @@ class KalshiUnifiedSniper:
             r = requests.get(url, headers={"Content-Type": "application/json"}, timeout=8)
             if r.status_code == 200:
                 for ev in r.json().get("events", []):
-                    blob = f"{ev.get('event_ticker','')} {ev.get('title','')} {ev.get('category','')}".upper()
+                    ev_cat = (ev.get("category") or "").upper()
+                    ev_title = (ev.get("title") or "").upper()
+                    # Filter out politics, pop culture, entertainment, macro novelty events
+                    if any(exc in ev_cat or exc in ev_title for exc in EXCLUDED_CATEGORIES):
+                        continue
+
+                    blob = f"{ev.get('event_ticker','')} {ev_title} {ev_cat}".upper()
                     if any(k in blob for k in kws):
                         for m in ev.get("markets", []):
                             if m.get("status") in ("active", "open"):
+                                m_cat = (m.get("category") or ev_cat).upper()
+                                m_title = (m.get("title") or ev_title).upper()
+                                m_sub = (m.get("subtitle") or "").upper()
+                                m_tkr = (m.get("ticker") or "").upper()
+                                # Drop politics, entertainment, and macro novelty markets from sports prop scans
+                                if any(exc in m_cat or exc in m_title or exc in m_sub or exc in m_tkr for exc in EXCLUDED_CATEGORIES):
+                                    continue
                                 tkr = m.get("ticker", "")
                                 if tkr and tkr not in seen:
                                     seen.add(tkr)
@@ -693,9 +732,15 @@ class KalshiUnifiedSniper:
 
         matched_mkt = None
         for m in markets:
-            m_blob = f"{m.get('ticker','')} {m.get('title','')} {m.get('subtitle','')}".upper()
+            m_cat = (m.get("category") or "").upper()
+            m_title = (m.get("title") or "").upper()
+            m_sub = (m.get("subtitle") or "").upper()
+            m_tkr = (m.get("ticker") or "").upper()
+            if any(exc in m_cat or exc in m_title or exc in m_sub or exc in m_tkr for exc in EXCLUDED_CATEGORIES):
+                continue
+            m_blob = f"{m_tkr} {m_title} {m_sub}".upper()
             words = re.findall(r"[A-Z]+", m_blob)
-            if last_name in m_blob or any(SequenceMatcher(None, last_name, w).ratio() >= 0.82 for w in words):
+            if last_name in words or any(SequenceMatcher(None, last_name, w).ratio() >= 0.85 for w in words):
                 matched_mkt = m
                 break
 

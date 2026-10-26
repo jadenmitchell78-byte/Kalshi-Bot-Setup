@@ -16,6 +16,25 @@ FUTURES_SERIES_PREFIXES = [
     "KXNFL",          # NFL futures
 ]
 
+# Drop politics, entertainment, crypto, weather, and macro novelty markets from sports scans
+EXCLUDED_CATEGORIES = [
+    "POLITICS",
+    "POP CULTURE",
+    "FINANCIAL",
+    "CRYPTO",
+    "WEATHER",
+    "ENTERTAINMENT",
+    "ELECTIONS",
+    "NEWS",
+    "MACRO",
+    "GOVERNMENT",
+    "CONGRESS",
+    "PRESIDENTIAL",
+    "SENATE",
+    "WHITE HOUSE",
+    "CELEBRITY",
+]
+
 class UnifiedKalshiEngine:
     def __init__(
         self,
@@ -56,8 +75,18 @@ class UnifiedKalshiEngine:
                     data = resp.json()
                     events = data.get("events", [])
                     for ev in events:
+                        ev_cat = (ev.get("category") or "").upper()
+                        ev_title = (ev.get("title") or "").upper()
+                        if any(exc in ev_cat or exc in ev_title for exc in EXCLUDED_CATEGORIES):
+                            continue
                         for m in ev.get("markets", []):
                             if m.get("status") in ("active", "open"):
+                                m_cat = (m.get("category") or ev_cat).upper()
+                                m_title = (m.get("title") or ev_title).upper()
+                                m_sub = (m.get("subtitle") or "").upper()
+                                m_tkr = (m.get("ticker") or "").upper()
+                                if any(exc in m_cat or exc in m_title or exc in m_sub or exc in m_tkr for exc in EXCLUDED_CATEGORIES):
+                                    continue
                                 t = m.get("ticker")
                                 if t and t not in seen_tickers:
                                     seen_tickers.add(t)
@@ -83,6 +112,19 @@ class UnifiedKalshiEngine:
                     mkts = data.get("markets", [])
                     for m in mkts:
                         if m.get("status") in ("active", "open"):
+                            m_cat = (m.get("category") or "").upper()
+                            m_title = (m.get("title") or "").upper()
+                            m_sub = (m.get("subtitle") or "").upper()
+                            m_tkr = (m.get("ticker") or "").upper()
+                            if any(exc in m_cat or exc in m_title or exc in m_sub or exc in m_tkr for exc in EXCLUDED_CATEGORIES):
+                                continue
+                            is_sports = (
+                                m_cat in ("SPORTS", "BASKETBALL", "FOOTBALL", "TENNIS", "BASEBALL", "HOCKEY")
+                                or any(pfx in m_tkr for pfx in FUTURES_SERIES_PREFIXES)
+                                or m_tkr.startswith(("KXNBA", "KXNFL", "KXCFB", "KXTENNIS", "KXATP", "KXWTA", "KXMLB", "KXNHL", "KXWNBA", "KXBASKETBALL"))
+                            )
+                            if not is_sports:
+                                continue
                             t = m.get("ticker")
                             if t and t not in seen_tickers:
                                 seen_tickers.add(t)
@@ -139,8 +181,14 @@ class UnifiedKalshiEngine:
         max_score = 0
 
         for m in markets:
-            searchable = f"{m.get('ticker', '')} {m.get('title', '')} {m.get('subtitle', '')} {m.get('category', '')}".upper()
-            score = sum(2 if tok == m.get('ticker', '').upper() else (1 if tok in searchable else 0) for tok in tokens)
+            m_cat = (m.get("category") or "").upper()
+            m_title = (m.get("title") or "").upper()
+            m_sub = (m.get("subtitle") or "").upper()
+            m_tkr = (m.get("ticker") or "").upper()
+            if any(exc in m_cat or exc in m_title or exc in m_sub or exc in m_tkr for exc in EXCLUDED_CATEGORIES):
+                continue
+            searchable = f"{m_tkr} {m_title} {m_sub} {m_cat}"
+            score = sum(2 if tok == m_tkr else (1 if tok in searchable else 0) for tok in tokens)
             if score > max_score:
                 max_score = score
                 best_match = m
