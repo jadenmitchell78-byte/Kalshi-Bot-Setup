@@ -655,86 +655,61 @@ class KalshiSmartPlacer:
         # Execute Real Kalshi V2 Limit Order
         client_oid = str(uuid.uuid4())
         is_yes = kalshi_side.lower() in ("yes", "over", "o")
-        v2_side = "bid" if is_yes else "ask"
-        price_dollars = (limit_cents / 100.0) if is_yes else ((100 - limit_cents) / 100.0)
-        price_str = f"{price_dollars:.4f}"
+        v2_side = "yes" if is_yes else "no"
+        price_field = "yes_price" if is_yes else "no_price"
+        price_val = int(limit_cents if is_yes else (100 - limit_cents))
 
-        attempts = [
-            (
-                "/trade-api/v2/portfolio/events/orders",
-                {
+        payload = {
+            "ticker": ticker,
+            "action": "buy",
+            "side": v2_side,
+            "count": max(1, int(contracts)),
+            "type": "limit",
+            "client_order_id": client_oid,
+            price_field: price_val,
+        }
+
+        path = "/trade-api/v2/portfolio/orders"
+        try:
+            resp = requests.post(
+                self.base_url + path,
+                json=payload,
+                headers=self.sign_headers("POST", path),
+                timeout=8,
+            )
+            if resp.status_code in (200, 201):
+                order_data = resp.json().get("order") or resp.json().get("event_order") or {}
+                real_oid = order_data.get("order_id") or client_oid
+                return {
+                    "status": "PLACED",
+                    "order_id": real_oid,
                     "ticker": ticker,
-                    "side": v2_side,
-                    "type": "limit",
-                    "count": str(max(1, int(contracts))),
-                    "price": price_str,
-                    "time_in_force": "good_till_canceled",
-                    "client_order_id": client_oid,
-                    "self_trade_prevention_type": "taker_at_cross",
-                },
-            ),
-            (
-                "/trade-api/v2/portfolio/orders",
-                {
+                    "side": kalshi_side.upper(),
+                    "contracts": contracts,
+                    "limit_cents": limit_cents,
+                    "cost_usd": cost_usd,
+                    "style": exec_style,
+                    "note": pricing_note,
+                }
+            err_msg = resp.text[:180]
+            if "insufficient_balance" in err_msg.lower():
+                return {"status": "BALANCE_HELD", "code": resp.status_code, "reason": "Resting orders holding cash", "limit_cents": limit_cents, "contracts": contracts, "ticker": ticker}
+            if "market_not_found" in err_msg.lower():
+                sim_id = f"SIM-QUEUED-{uuid.uuid4().hex[:6].upper()}"
+                return {
+                    "status": "SIM_QUEUED",
                     "ticker": ticker,
-                    "action": "buy",
-                    "side": "yes" if is_yes else "no",
-                    "count": max(1, int(contracts)),
-                    "type": "limit",
-                    "client_order_id": client_oid,
-                    "yes_price": limit_cents if is_yes else (100 - limit_cents),
-                },
-            ),
-        ]
-
-        last_resp_err = ""
-        for path, payload in attempts:
-            try:
-                resp = requests.post(
-                    self.base_url + path,
-                    json=payload,
-                    headers=self.sign_headers("POST", path),
-                    timeout=8,
-                )
-                if resp.status_code in (200, 201):
-                    order_data = resp.json().get("order") or resp.json().get("event_order") or {}
-                    real_oid = order_data.get("order_id") or client_oid
-                    return {
-                        "status": "PLACED",
-                        "order_id": real_oid,
-                        "ticker": ticker,
-                        "side": kalshi_side.upper(),
-                        "contracts": contracts,
-                        "limit_cents": limit_cents,
-                        "cost_usd": cost_usd,
-                        "style": exec_style,
-                        "note": pricing_note,
-                    }
-                err_msg = resp.text[:180]
-                last_resp_err = err_msg
-                if resp.status_code == 410 or "deprecated" in err_msg.lower():
-                    continue
-                if "insufficient_balance" in err_msg.lower():
-                    return {"status": "BALANCE_HELD", "code": resp.status_code, "reason": "Resting orders holding cash", "limit_cents": limit_cents, "contracts": contracts, "ticker": ticker}
-                if "market_not_found" in err_msg.lower() or "not found" in err_msg.lower():
-                    sim_id = f"SIM-QUEUED-{uuid.uuid4().hex[:6].upper()}"
-                    return {
-                        "status": "SIM_QUEUED",
-                        "ticker": ticker,
-                        "side": kalshi_side.upper(),
-                        "contracts": contracts,
-                        "limit_cents": limit_cents,
-                        "cost_usd": cost_usd,
-                        "style": exec_style,
-                        "order_id": sim_id,
-                        "note": f"Paper tracked ({pricing_note} — market not open on exchange)",
-                    }
-                return {"status": "API_REJECTED", "code": resp.status_code, "reason": err_msg, "limit_cents": limit_cents, "contracts": contracts, "ticker": ticker}
-            except Exception as e:
-                last_resp_err = str(e)
-                continue
-
-        return {"status": "API_REJECTED", "code": 410, "reason": last_resp_err or "Order endpoint error", "limit_cents": limit_cents, "contracts": contracts, "ticker": ticker}
+                    "side": kalshi_side.upper(),
+                    "contracts": contracts,
+                    "limit_cents": limit_cents,
+                    "cost_usd": cost_usd,
+                    "style": exec_style,
+                    "order_id": sim_id,
+                    "note": f"Paper tracked ({pricing_note} — market not open on exchange)",
+                }
+            return {"status": "API_REJECTED", "code": resp.status_code, "reason": err_msg, "limit_cents": limit_cents, "contracts": contracts, "ticker": ticker}
+        except Exception as e:
+            return {"status": "ERROR", "reason": str(e), "limit_cents": limit_cents, "contracts": contracts, "ticker": ticker}
 
     # -----------------------------------------------------------------
     # 5. SMART COMBO BASKET EXECUTOR (Places Correlated Copula Legs Together)

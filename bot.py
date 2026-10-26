@@ -1410,6 +1410,9 @@ def fetch_live_sport_markets(sport: Optional[str] = None) -> list:
     return matched_markets
 
 
+scan_kalshi_sports_props = fetch_live_sport_markets
+
+
 def fetch_all_open_markets(sport_filter: Optional[str] = None) -> list:
     """
     Robust Sports Discovery Engine:
@@ -1515,69 +1518,44 @@ def execute_order(ticker: str, action: str, side: str, price_cents: int, count: 
 
     client_oid = str(uuid.uuid4())
     is_yes = norm_side in ("yes", "over", "o")
-    # In Kalshi's V2 single-book event market:
-    # "bid" = Buy YES at price in dollars (e.g. "0.5000")
-    # "ask" = Buy NO at complementary price (1.00 - price in dollars)
-    v2_side = "bid" if is_yes else "ask"
-    price_dollars = (price_cents / 100.0) if is_yes else ((100 - price_cents) / 100.0)
-    price_str = f"{price_dollars:.4f}"
+    order_payload = {
+        "ticker": ticker,
+        "action": "buy" if norm_action == "buy" else "sell",
+        "type": "limit",
+        "side": "yes" if is_yes else "no",
+        "count": max(1, int(count)),
+        ("yes_price" if is_yes else "no_price"): int(price_cents if is_yes else (100 - price_cents)),
+        "client_order_id": client_oid,
+    }
 
-    attempts = [
-        (
-            "/trade-api/v2/portfolio/events/orders",
-            {
-                "ticker": ticker,
-                "side": v2_side,
-                "type": "limit",
-                "count": str(max(1, int(count))),
-                "price": price_str,
-                "time_in_force": "good_till_canceled",
-                "client_order_id": client_oid,
-                "self_trade_prevention_type": "taker_at_cross",
-            },
-        ),
-        (
-            "/trade-api/v2/portfolio/orders",
-            {
-                "ticker": ticker,
-                "action": "buy" if norm_action == "buy" else "sell",
-                "type": "limit",
-                "side": "yes" if is_yes else "no",
-                "count": max(1, int(count)),
-                "yes_price": price_cents if is_yes else (100 - price_cents),
-                "client_order_id": client_oid,
-            },
-        ),
-    ]
-
+    path = "/trade-api/v2/portfolio/orders"
     endpoints_to_try = [BASE_URL, "https://api.elections.kalshi.com"]
     seen = set()
     unique_endpoints = [e for e in endpoints_to_try if not (e in seen or seen.add(e))]
 
     for base in unique_endpoints:
-        for path, payload in attempts:
-            try:
-                r = session.post(
-                    f"{base}{path}",
-                    headers=get_auth_headers("POST", path),
-                    data=json.dumps(payload),
-                    timeout=5,
-                )
-                if r.status_code in (200, 201):
-                    resp_data = r.json() if r.text else {}
-                    order_obj = resp_data.get("order") or resp_data.get("event_order") or {}
-                    real_order_id = order_obj.get("order_id") or client_oid
-                    print(f"  --> [LIVE-{norm_action.upper()}] {ticker} | {norm_side.upper()} x{count} @ {price_cents}c (on {base}{path}) | OrderID: {real_order_id}")
-                    return OrderResult({"ok": True, "order_id": real_order_id, "mode": "LIVE", "price_cents": price_cents, "count": count, "ticker": ticker})
-                err_text = r.text[:200]
-                if "insufficient_balance" in err_text:
-                    print(f"  --> [BALANCE-ALERT] {ticker}: Insufficient available cash for {payload.get('count')} contracts @ {price_cents}c. (Check if open resting orders are holding balance on Kalshi).")
-                elif r.status_code != 410 and "deprecated" not in err_text:
-                    print(f"  --> [ORDER-ATTEMPT] {ticker} ({r.status_code} on {base}{path}): {err_text}")
-                if r.status_code in (400, 422):
-                    continue
-            except Exception as exc:
-                print(f"  --> [ORDER-ERR] {ticker} on {base}{path}: {exc}")
+        try:
+            r = session.post(
+                f"{base}{path}",
+                headers=get_auth_headers("POST", path),
+                data=json.dumps(order_payload),
+                timeout=5,
+            )
+            if r.status_code in (200, 201):
+                resp_data = r.json() if r.text else {}
+                order_obj = resp_data.get("order") or resp_data.get("event_order") or {}
+                real_order_id = order_obj.get("order_id") or client_oid
+                print(f"  --> [LIVE-{norm_action.upper()}] {ticker} | {norm_side.upper()} x{count} @ {price_cents}c (on {base}{path}) | OrderID: {real_order_id}")
+                return OrderResult({"ok": True, "order_id": real_order_id, "mode": "LIVE", "price_cents": price_cents, "count": count, "ticker": ticker})
+            err_text = r.text[:200]
+            if "insufficient_balance" in err_text:
+                print(f"  --> [BALANCE-ALERT] {ticker}: Insufficient available cash for {order_payload.get('count')} contracts @ {price_cents}c. (Check if open resting orders are holding balance on Kalshi).")
+            elif r.status_code != 410 and "deprecated" not in err_text:
+                print(f"  --> [ORDER-ATTEMPT] {ticker} ({r.status_code} on {base}{path}): {err_text}")
+            if r.status_code in (400, 422):
+                continue
+        except Exception as exc:
+            print(f"  --> [ORDER-ERR] {ticker} on {base}{path}: {exc}")
 
     # Fallback to simulation execution if live balance is $0 or market closed
     if live_kalshi_balance <= 0.0:
