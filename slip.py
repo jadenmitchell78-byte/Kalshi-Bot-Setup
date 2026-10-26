@@ -20,6 +20,7 @@ from sim_engine import (
     simulate_prop_leg,
 )
 from telemetry import GameTelemetry, match_telemetry_for_prop
+from clean_casual_core import get_prop_date_str, is_real_live_game_contract
 
 BANNED_PREFIXES = (
     "KXMVE", "COMBO", "PARLAY", "MULTIGAME", "CROSS",
@@ -208,13 +209,18 @@ class SlipLeg:
     market_url: str = ""
     player_name: str = ""
     stat_type: str = ""
+    game_date: str = ""
     created_ts: float = field(default_factory=time.time)
     coaching_notes: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        if not self.market_url:
-            slug = self.market_ticker.lower()
-            self.market_url = f"https://kalshi.com/markets/{slug}"
+        if not self.market_url or "/markets/kx" in self.market_url.lower():
+            try:
+                from live_kalshi_scanner import resolve_working_kalshi_url
+                self.market_url = resolve_working_kalshi_url(self.market_ticker)
+            except Exception:
+                slug = self.market_ticker.lower()
+                self.market_url = f"https://kalshi.com/markets/{slug}"
         if not self.player_name or not self.stat_type:
             p_name, s_type = _split_player_and_stat(self.player_prop, self.line)
             if not self.player_name:
@@ -574,6 +580,8 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
         cleaned_title = title.split(":")[0].replace("Will ", "").replace("?", "").strip()
         player_name = cleaned_title[:32] if cleaned_title else ticker.split("-")[0]
 
+    date_str = get_prop_date_str(sport, player_name, market=market)
+
     # 4. Robust Price Parsing (cents)
     yes_ask = _clean_price_cents(market.get("yes_ask"))
     yes_bid = _clean_price_cents(market.get("yes_bid"))
@@ -634,6 +642,7 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
             "player_or_team": player_name,
             "player_prop": clean_prop_label,
             "stat_type": detected_stat,
+            "game_date": date_str,
             "line": line_val,
             "side": "yes",
             "sim_direction": "UNDER" if is_under_contract else "OVER",
@@ -659,6 +668,7 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
             "player_or_team": player_name,
             "player_prop": clean_no_label,
             "stat_type": detected_stat,
+            "game_date": date_str,
             "line": line_val,
             "side": "no",
             "sim_direction": "OVER" if is_under_contract else "UNDER",
@@ -681,6 +691,7 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
             "player_or_team": player_name,
             "player_prop": clean_prop_label,
             "stat_type": detected_stat,
+            "game_date": date_str,
             "line": line_val,
             "side": "yes",
             "sim_direction": "OVER",
@@ -760,12 +771,15 @@ def parse_manual_leg_token(
         prior_edge_boost=prior_boost,
     )
 
+    date_str = get_prop_date_str(sport, parsed.get("player_name", ""))
+
     return SlipLeg(
         market_ticker=ticker_slug,
         sport=sport,
         player_prop=parsed["player_prop"],
         player_name=parsed["player_name"],
         stat_type=parsed["stat_type"],
+        game_date=date_str,
         line=sim_res.line,
         side=sim_res.side,
         book_prob=sim_res.book_prob,
@@ -802,6 +816,9 @@ def build_leg_from_kalshi_market(
     """
     ticker = market.get("ticker", "")
     if not ticker or ticker.startswith(BANNED_PREFIXES) or any(b in ticker for b in BANNED_PREFIXES):
+        return None
+
+    if not is_real_live_game_contract(market):
         return None
 
     now = time.time()
@@ -955,12 +972,15 @@ def build_leg_from_kalshi_market(
         prior_edge_boost=micro_edge,
     )
 
+    date_str = get_prop_date_str(sport, parsed.get("player_name", ""), market=market)
+
     return SlipLeg(
         market_ticker=ticker,
         sport=sport,
         player_prop=parsed["player_prop"],
         player_name=parsed["player_name"],
         stat_type=parsed["stat_type"],
+        game_date=date_str,
         line=sim_res.line,
         side=sim_res.side,
         book_prob=sim_res.book_prob,

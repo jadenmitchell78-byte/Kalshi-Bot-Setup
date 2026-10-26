@@ -209,8 +209,10 @@ def format_slip_card(
         bk_pct = round(leg.book_prob * 100.0, 1)
         mc_pct = round(leg.mc_true_prob * 100.0, 1)
         prop_label = leg.format_prop_line_label()
+        date_str = getattr(leg, "game_date", "") or "Today • Live Slate"
         lines.append(
             f"• *Leg {idx}:* [{leg.sport}] {prop_label}\n"
+            f"  📅 _{date_str}_\n"
             f"  📊 Book Odds / Implied: {bk_pct:.1f}% ({leg.american_odds}) | 🎯 10k MC True: {mc_pct:.1f}%\n"
             f"  🔗 [Direct Market Link]({leg.market_url})"
         )
@@ -279,8 +281,9 @@ def format_db_slip_summary(db_slip: Dict[str, Any]) -> str:
         m_pct = round(float(leg.get("mc_true_prob", leg.get("true_prob", 0.55))) * 100.0, 1)
         line_val = leg.get("line")
         line_s = f" — {line_val:g} ({leg['side']})" if line_val is not None else f" ({leg['side']})"
+        date_s = f"\n  📅 _{leg.get('game_date')}_" if leg.get('game_date') else ""
         leg_lines.append(
-            f"{l_icon} Leg {idx}: [{leg['sport']}] {leg['player_prop']}{line_s}\n"
+            f"{l_icon} Leg {idx}: [{leg['sport']}] {leg['player_prop']}{line_s}{date_s}\n"
             f"  📊 Book: {b_pct:.1f}% | 🎯 10k MC: {m_pct:.1f}% [{l_stat}]"
         )
 

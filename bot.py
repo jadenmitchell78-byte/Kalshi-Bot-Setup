@@ -1043,7 +1043,11 @@ def build_casual_video_buttons(
     """
     webapp_url = os.getenv("PEEZY_WEBAPP_URL", "https://peezt-tv.vercel.app")
     s_url = stream_url or f"{webapp_url}?view=stream"
-    t_url = market_url or "https://kalshi.com"
+    try:
+        from live_kalshi_scanner import resolve_working_kalshi_url
+        t_url = resolve_working_kalshi_url(market_url) if market_url else "https://kalshi.com/markets"
+    except Exception:
+        t_url = market_url or "https://kalshi.com/markets"
     w_url = sweat_url or f"{webapp_url}?view=sweat"
 
     return {
@@ -3645,7 +3649,7 @@ async def telegram_notifier_and_command_loop():
 
                     elif low.startswith(("/scan", "/force_scan", "/forcescan", "scan")):
                         parts = clean_text.split()
-                        sport_arg = None
+                        sport_arg = "ALL"
                         if len(parts) > 1:
                             c = parts[1].upper()
                             if c in ("NBA", "BASKETBALL"):
@@ -3660,11 +3664,12 @@ async def telegram_notifier_and_command_loop():
                                 sport_arg = "WNBA"
                             elif c in ("ESPORTS", "GAMING"):
                                 sport_arg = "ESPORTS"
-                        rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, sport_arg, True, target_cid)
+                        clean_kb = build_casual_video_buttons()
+                        board_html = run_full_sport_board_scan(sport_arg, quant_sniper, bankroll=live_kalshi_balance)
                         if target_cid:
-                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                            await asyncio.to_thread(notify_telegram, board_html, clean_kb, target_cid, "HTML")
                         else:
-                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
+                            await asyncio.to_thread(notify_telegram, board_html, clean_kb, None, "HTML")
 
                     elif low.startswith(("/nba", "/nfl", "/mlb", "/nhl", "/tennis", "/atp", "/wta", "/wnba", "/esports", "/sim", "/card", "/htmlcard")):
                         parsed = parse_user_query(clean_text)

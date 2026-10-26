@@ -906,7 +906,11 @@ def build_casual_video_buttons(
     """
     webapp_url = os.getenv("PEEZY_WEBAPP_URL", "https://peezt-tv.vercel.app")
     s_url = stream_url or f"{webapp_url}?view=stream"
-    t_url = market_url or "https://kalshi.com"
+    try:
+        from live_kalshi_scanner import resolve_working_kalshi_url
+        t_url = resolve_working_kalshi_url(market_url) if market_url else "https://kalshi.com/markets"
+    except Exception:
+        t_url = market_url or "https://kalshi.com/markets"
     w_url = sweat_url or f"{webapp_url}?view=sweat"
 
     return InlineKeyboardMarkup([
@@ -1204,6 +1208,11 @@ async def build_custom_combo_menu(selected_tickers: Optional[List[str]] = None) 
                 props_list.append(l)
             if len(props_list) >= 8:
                 break
+        if not props_list:
+            for cm in CURATED_QUANT_MARKETS:
+                cl = build_leg_from_kalshi_market(cm)
+                if cl:
+                    props_list.append(cl)
         _USER_BUILDING_COMBO["cached_props"] = props_list
         _USER_BUILDING_COMBO["cached_ts"] = now
         cached = props_list
@@ -1725,13 +1734,10 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, sport_fil
     _ensure_chat_id(update)
     if not update.message:
         return
-    sport_tag = f" [{sport_filter}]" if sport_filter else ""
-    status_msg = await update.message.reply_text(
-        f"🔍 *Polling ESPN telemetry + Kalshi orderbooks & running 10k Copula sims{sport_tag}...*",
-        parse_mode=ParseMode.MARKDOWN,
-    )
-    text = await build_scan_text(sport_filter=sport_filter)
-    await status_msg.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+    sp = sport_filter or (context.args[0].upper() if context and context.args else "ALL")
+    board_html = run_full_sport_board_scan(sp, quant_sniper)
+    clean_kb = build_casual_video_buttons()
+    await update.message.reply_text(board_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
 
 
 async def cmd_audit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2175,16 +2181,30 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _ensure_chat_id(update)
     if update.message:
-        report = await build_analytics_text()
-        _, kb = await build_menu_hud_and_keyboard()
-        await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+        try:
+            report = await build_analytics_text()
+            _, kb = await build_menu_hud_and_keyboard()
+            try:
+                await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+            except Exception:
+                await update.message.reply_text(report, reply_markup=kb)
+        except Exception as e:
+            logger.error("Analytics failure: %s", e)
+            await update.message.reply_text(f"📊 Analytics error: {e}")
 
 
 async def cmd_build_combo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _ensure_chat_id(update)
     if update.message:
-        b_txt, b_kb = await build_custom_combo_menu()
-        await update.message.reply_text(b_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=b_kb)
+        try:
+            b_txt, b_kb = await build_custom_combo_menu()
+            try:
+                await update.message.reply_text(b_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=b_kb)
+            except Exception:
+                await update.message.reply_text(b_txt, reply_markup=b_kb)
+        except Exception as e:
+            logger.error("Combo builder failure: %s", e)
+            await update.message.reply_text(f"🛠️ Combo builder error: {e}")
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
