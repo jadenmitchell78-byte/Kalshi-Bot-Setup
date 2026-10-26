@@ -11,6 +11,28 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import requests
 
 try:
+    from tennis_core import simulate_tennis_match, format_tennis_card
+except ImportError:
+    simulate_tennis_match = None  # type: ignore
+    format_tennis_card = None  # type: ignore
+
+try:
+    from injury_gate import RosterInjuryGate
+    injury_checker = RosterInjuryGate()
+except ImportError:
+    injury_checker = None  # type: ignore
+
+try:
+    from hoops_filter import is_valid_hoops_market
+except ImportError:
+    pass
+
+try:
+    from vine_copula import simulate_multi_leg_parlay
+except ImportError:
+    simulate_multi_leg_parlay = None  # type: ignore
+
+try:
     import numpy as np
     HAS_NUMPY = True
 except ImportError:
@@ -368,6 +390,25 @@ def parse_user_query(raw_text: str) -> Dict[str, Any]:
     if not rem or (len(rem) == 1 and rem[0].upper() in ("PROPS", "PROP", "SCAN", "LIVE", "ALL", "SLATE", "BOARD", "COMBOS")):
         return {"mode": "SCAN", "sport": sport}
 
+    # Tennis specific parser: /tennis Sinner Alcaraz clay
+    if sport == "TENNIS":
+        surface = "HARD"
+        rem_surfs = [t for t in rem if t.upper() in ("CLAY", "GRASS", "HARD", "INDOOR_HARD", "INDOOR")]
+        if rem_surfs:
+            surface = rem_surfs[0].upper()
+            if surface == "INDOOR":
+                surface = "INDOOR_HARD"
+            rem = [t for t in rem if t.upper() not in ("CLAY", "GRASS", "HARD", "INDOOR_HARD", "INDOOR")]
+        p1 = rem[0] if len(rem) > 0 else "Sinner"
+        p2 = rem[1] if len(rem) > 1 else ("Alcaraz" if p1.upper() != "ALCARAZ" else "Sinner")
+        return {
+            "mode": "TENNIS_MATCHUP",
+            "sport": "TENNIS",
+            "p1": p1,
+            "p2": p2,
+            "surface": surface,
+        }
+
     # Extract optional trailing numeric line (e.g. 21.5 or 3.5)
     line: Optional[float] = None
     if rem and re.match(r"^\d+(?:\.\d+)?$", rem[-1]):
@@ -457,6 +498,28 @@ def simulate_prop_and_combo(
     line: Optional[float] = None,
     live_meta: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    # 0. AUTOMATIC IR & ROSTER CHECK GATE
+    if injury_checker:
+        is_active, status_note = injury_checker.check_player_availability(player_key, sport)
+        if not is_active:
+            return {
+                "sport": sport,
+                "player": player_key.title(),
+                "team": "N/A",
+                "stat": stat,
+                "line": line or 0.0,
+                "side": "PASS",
+                "arch": "INJURED / INACTIVE",
+                "scheme": "BYPASSED",
+                "scheme_pct": 0.0,
+                "coach_note": f"🚨 SKIPPED: Player is {status_note}",
+                "family": "N/A",
+                "p10": 0, "p50": 0, "p90": 0, "mean": 0, "std": 0,
+                "true_prob": 0.0,
+                "ev_edge": -100.0,  # Zero out edge so sniper never fires
+                "combo": {"partner": "None", "stat": "N/A", "line": 0, "side": "PASS", "partner_prob": 0, "rho": 0, "joint_prob": 0, "boost_pct": 0, "combo_ev": -100},
+            }
+
     live_meta = live_meta or {}
     prof = PLAYER_REGISTRY.get(player_key, {
         "team": "UNK",
@@ -620,6 +683,42 @@ def simulate_prop_and_combo(
 # =====================================================================
 # 3. KALSHI LIVE EVENT SCANNER & SMART BASKET SNIPER
 # =====================================================================
+def is_valid_hoops_market(market: dict) -> bool:
+    """
+    Strictly filters out novelty, retirement, ownership, award, and pop-culture futures
+    even if Kalshi lists them under an NBA series code.
+    """
+    ticker = str(market.get("ticker", "")).upper()
+    title = str(market.get("title", "")).upper()
+    subtitle = str(market.get("subtitle", "")).upper()
+    combined = f"{ticker} {title} {subtitle}"
+
+    # 1. Must contain an actual basketball stat keyword
+    VALID_STAT_KEYWORDS = [
+        "PTS", "POINT", "REB", "REBOUND", "AST", "ASSIST", 
+        "3PT", "THREE", "PRA", "BLK", "BLOCK", "STL", "STEAL"
+    ]
+    has_stat = any(kw in combined for kw in VALID_STAT_KEYWORDS)
+    if not has_stat:
+        return False
+
+    # 2. STRICTLY REJECT novelty, future, award, and non-game keywords
+    FORBIDDEN_KEYWORDS = [
+        "RETIRE", "ANNOUNCE", "OWNER", "HEADLINER", "DRAFT", 
+        "MVP", "CHAMPIONSHIP", "SELECT", "ELECT", "PRESIDENT", 
+        "AWARD", "ALL-STAR", "HALL OF FAME", "TRADED", "SIGN",
+        "COACH OF THE YEAR", "EXECUTIVE", "MAJORITY", "HALFTIME"
+    ]
+    has_forbidden = any(fk in combined for fk in FORBIDDEN_KEYWORDS)
+    if has_forbidden:
+        return False
+
+    # 3. Must have a valid numeric line/threshold (e.g., 21.5, 3.5, 8.5)
+    has_line = bool(re.search(r"\d+(\.\d+)?", combined))
+    
+    return has_stat and not has_forbidden and has_line
+
+
 class KalshiUnifiedSniper:
     def __init__(self, key_id: Optional[str] = None, private_pem: Optional[str] = None):
         self.base_url = os.getenv("KALSHI_BASE_URL", "https://api.elections.kalshi.com").replace("/trade-api/v2", "")
@@ -710,6 +809,9 @@ class KalshiUnifiedSniper:
                                 m_tkr = (m.get("ticker") or "").upper()
                                 # Drop politics, entertainment, and macro novelty markets from sports prop scans
                                 if any(exc in m_cat or exc in m_title or exc in m_sub or exc in m_tkr for exc in EXCLUDED_CATEGORIES):
+                                    continue
+                                # Strictly validate hoops stats to purge retirement, headliner, and novelty lines
+                                if sport_u == "NBA" and not is_valid_hoops_market(m):
                                     continue
                                 tkr = m.get("ticker", "")
                                 if tkr and tkr not in seen:
@@ -902,6 +1004,28 @@ def run_full_sport_board_scan(
     Filtered to today's active ESPN slate only!
     """
     sport_u = sport.upper()
+
+    if sport_u == "TENNIS":
+        if simulate_tennis_match:
+            m1 = simulate_tennis_match("Sinner", "Alcaraz", surface="HARD")
+            m2 = simulate_tennis_match("Djokovic", "Medvedev", surface="HARD")
+            m3 = simulate_tennis_match("Zverev", "Fritz", surface="HARD")
+            return (
+                f"🎾 <b>PEZZY QUANT TERMINAL • TENNIS BOARD</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🏟 <b>Active Surface Model:</b> <code>ATP/WTA Hard Court (Friction 1.00)</code>\n"
+                f"🧠 <b>10,000-Draw Monte Carlo Surface Matchups</b>\n\n"
+                f"<b>1. {m1['matchup']} (Hard)</b>\n"
+                f"   • Sinner: <code>{m1['p1_style']}</code> ({m1['p1_win_prob']}%) | Alcaraz: <code>{m1['p2_style']}</code> ({m1['p2_win_prob']}%)\n"
+                f"   • Exp Games: <code>{m1['avg_total_games']} ± {m1['game_std']}</code>  |  🔥 <b>Edge:</b> <code>{m1['recommended_side']}</code>\n\n"
+                f"<b>2. {m2['matchup']} (Hard)</b>\n"
+                f"   • Djokovic: <code>{m2['p1_style']}</code> ({m2['p1_win_prob']}%) | Medvedev: <code>{m2['p2_style']}</code> ({m2['p2_win_prob']}%)\n"
+                f"   • Exp Games: <code>{m2['avg_total_games']} ± {m2['game_std']}</code>  |  🔥 <b>Edge:</b> <code>{m2['recommended_side']}</code>\n\n"
+                f"<b>3. {m3['matchup']} (Hard)</b>\n"
+                f"   • Zverev: <code>{m3['p1_style']}</code> ({m3['p1_win_prob']}%) | Fritz: <code>{m3['p2_style']}</code> ({m3['p2_win_prob']}%)\n"
+                f"   • Exp Games: <code>{m3['avg_total_games']} ± {m3['game_std']}</code>  |  🔥 <b>Edge:</b> <code>{m3['recommended_side']}</code>\n\n"
+                f"<i>💡 Custom Matchup: Type <code>/tennis Sinner Alcaraz clay</code> or <code>/tennis Djokovic Medvedev hard</code></i>"
+            )
 
     # 1. Fetch active teams playing today from ESPN scoreboard
     active_teams = get_active_teams_today(sport_u)

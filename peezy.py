@@ -90,7 +90,9 @@ from quant_core import (
     format_revamped_sim_card,
     run_full_sport_board_scan,
     quant_sniper,
+    is_valid_hoops_market,
 )
+from tennis_core import simulate_tennis_match, format_tennis_card
 
 smart_placer = KalshiSmartPlacer(auth_header_fn=build_kalshi_auth_headers)
 unified_engine.auth_header_fn = build_kalshi_auth_headers
@@ -654,6 +656,8 @@ async def scan_markets_with_telemetry(sport_filter: Optional[str] = None) -> Lis
         cat = str(m.get("category") or "").upper()
         blob = f"{tkr} {tit} {sub} {cat}"
         if any(exc in cat or exc in tit or exc in sub for exc in EXCLUDED_CATEGORIES):
+            continue
+        if (tkr.startswith("KXNBA") or "NBA" in tkr or cat in ("BASKETBALL", "NBA")) and not is_valid_hoops_market(m):
             continue
         is_allowed_macro = any(pfx in tkr for pfx in FUTURES_SERIES_PREFIXES)
         if not is_allowed_macro:
@@ -1503,6 +1507,26 @@ async def cmd_nfl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(card_html, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
+async def cmd_tennis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _ensure_chat_id(update)
+    if not update.message:
+        return
+    full_cmd = f"/tennis {' '.join(context.args)}" if context.args else "/tennis"
+    parsed = parse_user_query(full_cmd)
+    _, kb = await build_menu_hud_and_keyboard()
+    if parsed.get("mode") == "TENNIS_MATCHUP":
+        sim_res = simulate_tennis_match(
+            p1_name=parsed.get("p1", "Sinner"),
+            p2_name=parsed.get("p2", "Alcaraz"),
+            surface=parsed.get("surface", "HARD"),
+        )
+        card_html = format_tennis_card(sim_res)
+        await update.message.reply_text(card_html, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        board_html = run_full_sport_board_scan("TENNIS", quant_sniper)
+        await update.message.reply_text(board_html, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, sport_filter: Optional[str] = None) -> None:
     _ensure_chat_id(update)
     if not update.message:
@@ -2119,6 +2143,9 @@ def main() -> None:
     app.add_handler(CommandHandler("sim", cmd_sim))
     app.add_handler(CommandHandler("nba", cmd_nba))
     app.add_handler(CommandHandler("nfl", cmd_nfl))
+    app.add_handler(CommandHandler("tennis", cmd_tennis))
+    app.add_handler(CommandHandler("atp", cmd_tennis))
+    app.add_handler(CommandHandler("wta", cmd_tennis))
     app.add_handler(CommandHandler("slip", cmd_slip))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("audit", cmd_audit))

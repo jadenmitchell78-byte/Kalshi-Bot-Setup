@@ -3478,7 +3478,19 @@ async def telegram_notifier_and_command_loop():
                     elif low.startswith(("/nba", "/nfl", "/mlb", "/nhl", "/tennis", "/atp", "/wta", "/wnba", "/esports", "/sim", "/card", "/htmlcard")):
                         parsed = parse_user_query(clean_text)
                         _, hud_kb = build_menu_hud_payload()
-                        if parsed["mode"] == "SCAN":
+                        if parsed.get("mode") == "TENNIS_MATCHUP":
+                            from tennis_core import simulate_tennis_match, format_tennis_card
+                            sim_res = simulate_tennis_match(
+                                p1_name=parsed.get("p1", "Sinner"),
+                                p2_name=parsed.get("p2", "Alcaraz"),
+                                surface=parsed.get("surface", "HARD"),
+                            )
+                            card_html = format_tennis_card(sim_res)
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, card_html, hud_kb, target_cid, "HTML")
+                            else:
+                                await asyncio.to_thread(notify_telegram, card_html, hud_kb, None, "HTML")
+                        elif parsed["mode"] == "SCAN":
                             board_html = run_full_sport_board_scan(parsed["sport"], quant_sniper, bankroll=live_kalshi_balance)
                             if target_cid:
                                 await asyncio.to_thread(notify_telegram, board_html, hud_kb, target_cid, "HTML")

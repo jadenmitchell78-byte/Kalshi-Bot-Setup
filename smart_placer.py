@@ -34,6 +34,24 @@ STAT_ALIASES = {
 # Real Active Teams for Sunday Oct 25, 2026 Slate
 TODAY_ACTIVE_NBA_TEAMS = {"LAL", "UTA", "IND", "BKN", "ORL", "NYK", "LAC", "OKC", "TOR", "MIN", "DET", "PHI", "MEM", "SAC"}
 
+
+def is_valid_hoops_market(market: dict) -> bool:
+    ticker = str(market.get("ticker", "")).upper()
+    title = str(market.get("title", "")).upper()
+    subtitle = str(market.get("subtitle", "")).upper()
+    combined = f"{ticker} {title} {subtitle}"
+    VALID_STAT_KEYWORDS = ["PTS", "POINT", "REB", "REBOUND", "AST", "ASSIST", "3PT", "THREE", "PRA", "BLK", "BLOCK", "STL", "STEAL"]
+    if not any(kw in combined for kw in VALID_STAT_KEYWORDS):
+        return False
+    FORBIDDEN_KEYWORDS = [
+        "RETIRE", "ANNOUNCE", "OWNER", "HEADLINER", "DRAFT", "MVP", "CHAMPIONSHIP",
+        "SELECT", "ELECT", "PRESIDENT", "AWARD", "ALL-STAR", "HALL OF FAME", "TRADED", "SIGN",
+        "COACH OF THE YEAR", "EXECUTIVE", "MAJORITY", "HALFTIME"
+    ]
+    if any(fk in combined for fk in FORBIDDEN_KEYWORDS):
+        return False
+    return bool(re.search(r"\d+(\.\d+)?", combined))
+
 TEAM_SCHEDULE_NOTES = {
     "MIA": "Miami Heat are off today (Next game: Mon Oct 26 vs DAL)",
     "BOS": "Boston Celtics are off today (Next game: Mon Oct 26 vs MIL)",
@@ -443,6 +461,8 @@ class KalshiSmartPlacer:
                         m_sub = (m.get("subtitle") or "").upper()
                         m_tkr = (m.get("ticker") or "").upper()
                         if any(exc in m_cat or exc in m_title or exc in m_sub or exc in m_tkr for exc in EXCLUDED_CATEGORIES):
+                            continue
+                        if sp_u == "NBA" and not is_valid_hoops_market(m):
                             continue
                         m_blob = f"{m_tkr} {m_title} {m_sub}".upper()
                         if ev_match or any(k in m_blob for k in keywords):

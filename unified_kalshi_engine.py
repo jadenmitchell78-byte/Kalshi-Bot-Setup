@@ -118,6 +118,8 @@ class UnifiedKalshiEngine:
                             m_tkr = (m.get("ticker") or "").upper()
                             if any(exc in m_cat or exc in m_title or exc in m_sub or exc in m_tkr for exc in EXCLUDED_CATEGORIES):
                                 continue
+                            if any(fn in m_title or fn in m_sub or fn in m_tkr for fn in ("HEADLINER", "ANNOUNCE", "HALFTIME", "COACH OF THE YEAR", "EXECUTIVE")):
+                                continue
                             is_sports = (
                                 m_cat in ("SPORTS", "BASKETBALL", "FOOTBALL", "TENNIS", "BASEBALL", "HOCKEY")
                                 or any(pfx in m_tkr for pfx in FUTURES_SERIES_PREFIXES)
