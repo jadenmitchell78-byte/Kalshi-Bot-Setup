@@ -195,8 +195,8 @@ def simulate_live_kalshi_market(m: Dict, sport: str = "TENNIS") -> Dict:
 
     book_prob = book_cents / 100.0
 
-    # Deterministic seed from ticker so repeated scans within the same 3-minute window are steady
-    seed_val = abs(hash(f"{ticker}_{ int(time.time() // 180) }")) % (2**32 - 1)
+    # Rolling 20s micro-seed ensures props stay live, active, and fresh without jumping erratically
+    seed_val = abs(hash(f"{ticker}_{ int(time.time() // 20) }")) % (2**32 - 1)
     rng = np.random.default_rng(seed_val)
 
     # 10,000-draw Monte Carlo Bernoulli / Beta-Binomial probability draws

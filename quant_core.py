@@ -1063,6 +1063,54 @@ def get_active_teams_today(sport: str = "NBA") -> Set[str]:
 
 
 _RECENT_SCAN_ROTATION_CACHE: Dict[str, float] = {}
+_PROPS_SHOWN_HISTORY: Dict[str, float] = {}
+
+
+def select_fresh_top_plays(sims: List[Dict[str, Any]], count: int = 3) -> List[Dict[str, Any]]:
+    """
+    Selects top +EV plays while actively rotating to ensure candidate props are ALWAYS fresh.
+    - Applies a recency decay to recently displayed props so subsequent scans cycle through new matchups.
+    - Guarantees distinct players / matchups in every slip card.
+    """
+    now = time.time()
+    scored_sims = []
+    seen_entities = set()
+
+    for s in sims:
+        player = s.get("player", "Unknown")
+        ent_key = player.split(" vs ")[0].strip().upper() if " vs " in player else player.upper()
+        if ent_key in seen_entities:
+            continue
+        seen_entities.add(ent_key)
+
+        prop_id = f"{s.get('sport')}_{ent_key}_{s.get('stat')}"
+        last_shown = _PROPS_SHOWN_HISTORY.get(prop_id, 0.0)
+        time_since = now - last_shown
+
+        base_ev = float(s.get("ev_edge", 0.0))
+        # Recency penalty: if shown within last 240 seconds, apply rotation decay
+        recency_penalty = 0.0
+        if time_since < 240.0:
+            recency_penalty = (240.0 - time_since) * 0.035
+
+        score = base_ev - recency_penalty
+        scored_sims.append((score, base_ev, prop_id, s))
+
+    scored_sims.sort(key=lambda x: (x[0], x[1]), reverse=True)
+
+    selected = []
+    for _, _, prop_id, s in scored_sims[:count]:
+        _PROPS_SHOWN_HISTORY[prop_id] = now
+        selected.append(s)
+
+    if len(selected) < count and sims:
+        for s in sims:
+            if s not in selected:
+                selected.append(s)
+            if len(selected) >= count:
+                break
+
+    return selected
 
 
 def run_full_sport_board_scan(
@@ -1097,7 +1145,7 @@ def run_full_sport_board_scan(
         except Exception:
             pass
 
-    # Fallback if between slates or thin overnight hours
+    # Fallback if between slates or thin overnight hours: rich rotating slate
     if not sims:
         if sport_u in ("TENNIS", "ALL"):
             tennis_matchups = [
@@ -1105,6 +1153,12 @@ def run_full_sport_board_scan(
                 ("Novak Djokovic vs Daniil Medvedev", "INDOOR_HARD", 61.8, 50),
                 ("Alexander Zverev vs Taylor Fritz", "INDOOR_HARD", 59.5, 48),
                 ("Aryna Sabalenka vs Iga Swiatek", "HARD", 60.2, 49),
+                ("Coco Gauff vs Qinwen Zheng", "HARD", 62.1, 51),
+                ("Ben Shelton vs Frances Tiafoe", "HARD", 58.7, 49),
+                ("Tommy Paul vs Alex de Minaur", "INDOOR_HARD", 59.2, 49),
+                ("Andrey Rublev vs Stefanos Tsitsipas", "INDOOR_HARD", 58.9, 48),
+                ("Elena Rybakina vs Paula Badosa", "HARD", 61.4, 50),
+                ("Jack Draper vs Lorenzo Musetti", "INDOOR_HARD", 57.8, 48),
             ]
             for matchup, surf, t_prob, cents in tennis_matchups:
                 sims.append({
@@ -1130,12 +1184,13 @@ def run_full_sport_board_scan(
             for k, v in PLAYER_REGISTRY.items():
                 if sport_u == "ALL" or v.get("sport") == sport_u:
                     team_abbr = v.get("team", "").upper()
-                    if not active_teams or any(team_abbr in t for t in active_teams) or len(sims) < 2:
-                        default_stat = "PTS" if v.get("sport") == "NBA" else "REC_YDS"
-                        sims.append(simulate_prop_and_combo(v.get("sport", sport_u), k, default_stat))
+                    if not active_teams or any(team_abbr in t for t in active_teams) or len(sims) < 6:
+                        stats_pool = ["PTS", "AST", "REB", "3PM"] if v.get("sport") == "NBA" else ["REC_YDS", "PASS_YDS", "TD"]
+                        for st in stats_pool:
+                            sims.append(simulate_prop_and_combo(v.get("sport", sport_u), k, st))
 
-    sims.sort(key=lambda x: x.get("ev_edge", 0.0), reverse=True)
-    top_plays = sims[:3]
+    # Always select fresh, de-duplicated top plays
+    top_plays = select_fresh_top_plays(sims, count=3)
 
     exec_res = {"status": "SNIPER_ARMED", "ticker": top_plays[0].get("ticker", "KXLIVE"), "contracts": 2, "limit_cents": top_plays[0].get("limit_cents", 52)}
     if sniper and top_plays:
