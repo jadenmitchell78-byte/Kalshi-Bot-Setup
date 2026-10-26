@@ -1342,186 +1342,115 @@ def get_balance() -> float:
     return live_kalshi_balance
 
 
-def fetch_all_open_markets() -> list:
+def fetch_live_sport_markets(sport: Optional[str] = None) -> list:
     """
-    Robust 5-Layer Kalshi V2 Sports Discovery Engine:
-    1. Targeted Sports Series sweeps (KXNBAGAME, KXNBASPREAD, KXNBATOTAL, KXNBAPTS, KXNBAAST, KXNBAREB, KXNBA3PT, KXNBAPRA, etc.)
-    2. Dynamic Sports Series discovery via /trade-api/v2/series (cursor pagination)
-    3. Live Sports Events sweep via /trade-api/v2/events (matching NBA, NFL, Tennis)
-    4. Cursor pagination across /trade-api/v2/markets?status=open&limit=200 (up to 15 pages)
-    5. Strict exclusion of all NBA Cup, In-Season Tournament, and season-long futures contracts.
+    Sweeps Kalshi /events with nested markets so NBA & NFL props are NEVER buried
+    under 15,000 crypto/weather/political contracts.
     """
-    markets = []
-    existing_tickers = set()
+    sport_upper = sport.upper() if sport else "ALL"
+    SPORT_KEYWORDS = {
+        "NBA": [
+            "NBA", "BASKETBALL", "KNICKS", "MAGIC", "PACERS", "NETS", "CLIPPERS",
+            "THUNDER", "RAPTORS", "TIMBERWOLVES", "PISTONS", "76ERS", "GRIZZLIES",
+            "KINGS", "LAKERS", "CELTICS", "WARRIORS", "SUNS", "MAVERICKS", "HEAT",
+            "RANDLE", "EDWARDS", "BRUNSON", "MAXEY", "CUNNINGHAM", "SGA", "MORANT",
+            "JOKIC", "GIANNIS", "DONCIC", "WEMBY", "WEMBANYAMA", "CURRY", "HERRO"
+        ],
+        "NFL": [
+            "NFL", "FOOTBALL", "CHIEFS", "RAVENS", "BILLS", "LIONS", "PACKERS",
+            "49ERS", "COWBOYS", "EAGLES", "BENGALS", "TEXANS", "COMMANDERS",
+            "BEARS", "VIKINGS", "FALCONS", "BUCCANEERS", "SEAHAWKS", "CARDINALS",
+            "TOUCHDOWN", "RUSHING", "PASSING", "RECEIVING", "MAHOMES", "BARKLEY", "HENRY", "ALLEN"
+        ],
+        "TENNIS": ["TENNIS", "ATP", "WTA", "ALCARAZ", "SINNER", "DJOKOVIC", "FRITZ", "SETS", "GAMES"],
+        "MLB": ["MLB", "BASEBALL", "STRIKEOUTS", "HITS", "HOME RUN", "HR", "RUNS"],
+    }
+    keywords = SPORT_KEYWORDS.get(sport_upper, [sport_upper] if sport_upper != "ALL" else ["NBA", "NFL", "BASKETBALL", "FOOTBALL", "TENNIS", "MLB"])
+    matched_markets = []
+    seen_tickers = set()
+    cursor = None
     public_headers = {"Content-Type": "application/json", "Accept": "application/json"}
     base_url = BASE_URL or "https://api.elections.kalshi.com"
 
-    # Known daily sports series tickers on Kalshi V2
-    known_sports_series = [
-        "KXNBAGAME", "KXNBAGAMES", "KXNBASPREAD", "KXNBATOTAL", "KXNBAML",
-        "KXNBAPTS", "KXNBAAST", "KXNBAREB", "KXNBA3PT", "KXNBAPRA",
-        "KXNBABLK", "KXNBASTL", "KXNBATO", "KXNBAPM", "KXNBAPROP", "KXNBAPROPS",
-        "KXNBAFIRST", "KXNBA1Q", "KXNBA1H", "KXNBA2H", "KXNBA",
-        "KXNFLGAME", "KXNFLGAMES", "KXNFL", "KXNFLPASS", "KXNFLRUSH", "KXNFLREC", "KXNFLTD",
-        "KXCFBGAME", "KXCFBGAMES", "KXCFB",
-        "KXATPMATCH", "KXWTAMATCH", "KXTENNIS",
-        "KXNHLGAME", "KXNHLGAMES", "KXNHL",
-        "KXMLBGAME", "KXMLBGAMES", "KXMLB",
-    ]
-
-    # 1. Query open markets for all known daily sports series
-    for st in known_sports_series:
+    for _ in range(6):  # Sweeps up to 1,200 full events (~25,000 nested markets)
+        url = f"{base_url}/trade-api/v2/events?status=open&limit=200&with_nested_markets=true"
+        if cursor:
+            url += f"&cursor={cursor}"
         try:
-            path = f"/trade-api/v2/markets?status=open&series_ticker={st}&limit=100"
-            r = session.get(f"{base_url}{path}", headers=public_headers, timeout=3.5)
-            if r.status_code == 200:
-                s_markets = r.json().get("markets", [])
-                for sm in s_markets:
-                    tkr = sm.get("ticker", "")
-                    if tkr and tkr not in existing_tickers:
-                        existing_tickers.add(tkr)
-                        markets.append(sm)
-        except Exception:
-            continue
+            resp = session.get(url, headers=public_headers, timeout=8)
+            if resp.status_code != 200:
+                break
+            data = resp.json()
+            events = data.get("events", [])
+            for ev in events:
+                ev_blob = f"{ev.get('event_ticker', '')} {ev.get('series_ticker', '')} {ev.get('title', '')} {ev.get('sub_title', '')} {ev.get('category', '')}".upper()
+                if any(tok in ev_blob for tok in FUTURES_OR_CUP_TOKENS):
+                    continue
+                ev_match = (sport_upper == "ALL") or any(k in ev_blob for k in keywords)
 
-    # 2. Dynamically discover all active Sports series from Kalshi API
-    discovered_series = set()
-    s_cursor = None
-    for _ in range(4):
-        try:
-            s_path = "/trade-api/v2/series?limit=200"
-            if s_cursor:
-                s_path += f"&cursor={s_cursor}"
-            sr = session.get(f"{base_url}{s_path}", headers=public_headers, timeout=4)
-            if sr.status_code == 200:
-                s_data = sr.json()
-                s_list = s_data.get("series", [])
-                for s_item in s_list:
-                    stk = s_item.get("ticker") or s_item.get("series_ticker")
-                    if not stk:
+                for m in ev.get("markets", []):
+                    # Accept both 'active' and 'open' status strings inside the JSON!
+                    if m.get("status") not in ("active", "open"):
                         continue
-                    stk_u = stk.upper()
-                    title = str(s_item.get("title") or "").upper()
-                    cat = str(s_item.get("category") or "").upper()
-                    tags = [str(t).upper() for t in s_item.get("tags") or []]
-                    if any(tok in stk_u or tok in title for tok in FUTURES_OR_CUP_TOKENS):
+                    m_blob = f"{m.get('ticker', '')} {m.get('title', '')} {m.get('subtitle', '')}".upper()
+                    if any(tok in m_blob for tok in FUTURES_OR_CUP_TOKENS):
                         continue
-                    if (
-                        stk_u.startswith("KXNBA")
-                        or "BASKETBALL" in title
-                        or "NBA" in title
-                        or "NBA" in tags
-                        or cat in ("SPORTS", "BASKETBALL")
-                        or stk_u.startswith(("KXNFL", "KXCFB", "KXTENNIS", "KXATP", "KXWTA", "KXNHL", "KXMLB"))
-                    ):
-                        if stk not in known_sports_series:
-                            discovered_series.add(stk)
-                s_cursor = s_data.get("cursor")
-                if not s_cursor or not s_list:
-                    break
-            else:
+                    if ev_match or any(k in m_blob for k in keywords):
+                        tkr = m.get("ticker")
+                        if tkr and tkr not in seen_tickers:
+                            seen_tickers.add(tkr)
+                            matched_markets.append(m)
+
+            cursor = data.get("cursor")
+            if not cursor or not events:
                 break
         except Exception:
             break
 
-    # Fetch markets for dynamically discovered series
-    for st in list(discovered_series)[:35]:
-        try:
-            path = f"/trade-api/v2/markets?status=open&series_ticker={st}&limit=100"
-            r = session.get(f"{base_url}{path}", headers=public_headers, timeout=3.5)
-            if r.status_code == 200:
-                for sm in r.json().get("markets", []):
-                    tkr = sm.get("ticker", "")
-                    if tkr and tkr not in existing_tickers:
-                        existing_tickers.add(tkr)
-                        markets.append(sm)
-        except Exception:
-            continue
+    return matched_markets
 
-    # 3. Explore open Sports Events (Kalshi indexes NBA matchups & props under Events)
-    ev_cursor = None
-    for _ in range(4):
-        try:
-            ev_path = "/trade-api/v2/events?status=open&limit=200"
-            if ev_cursor:
-                ev_path += f"&cursor={ev_cursor}"
-            er = session.get(f"{base_url}{ev_path}", headers=public_headers, timeout=4)
-            if er.status_code == 200:
-                e_data = er.json()
-                e_list = e_data.get("events", [])
-                for ev in e_list:
-                    etk = str(ev.get("event_ticker") or "").upper()
-                    estk = str(ev.get("series_ticker") or "").upper()
-                    etitle = str(ev.get("title") or "").upper()
-                    ecat = str(ev.get("category") or "").upper()
-                    if any(tok in etk or tok in estk or tok in etitle for tok in FUTURES_OR_CUP_TOKENS):
-                        continue
-                    if (
-                        etk.startswith("KXNBA")
-                        or estk.startswith("KXNBA")
-                        or "NBA" in etitle
-                        or "BASKETBALL" in etitle
-                        or ecat in ("SPORTS", "BASKETBALL")
-                        or etk.startswith(("KXNFL", "KXCFB", "KXTENNIS", "KXATP", "KXWTA", "KXNHL"))
-                    ):
-                        for em in ev.get("markets", []):
-                            if isinstance(em, dict) and em.get("ticker") and em["ticker"] not in existing_tickers:
-                                existing_tickers.add(em["ticker"])
-                                markets.append(em)
-                        if etk and not ev.get("markets"):
-                            try:
-                                mr = session.get(f"{base_url}/trade-api/v2/markets?event_ticker={etk}&status=open", headers=public_headers, timeout=3)
-                                if mr.status_code == 200:
-                                    for em2 in mr.json().get("markets", []):
-                                        if em2.get("ticker") and em2["ticker"] not in existing_tickers:
-                                            existing_tickers.add(em2["ticker"])
-                                            markets.append(em2)
-                            except Exception:
-                                pass
-                ev_cursor = e_data.get("cursor")
-                if not ev_cursor or not e_list:
-                    break
-            else:
-                break
-        except Exception:
-            break
 
-    # 4. Deep cursor sweep across /trade-api/v2/markets?status=open (up to 15 pages)
-    m_cursor = None
-    for _ in range(15):
-        try:
-            path = "/trade-api/v2/markets?status=open&limit=200"
-            if m_cursor:
-                path += f"&cursor={m_cursor}"
-            r = session.get(f"{base_url}{path}", headers=public_headers, timeout=4)
-            if r.status_code == 200:
-                data = r.json()
-                page_markets = data.get("markets", [])
-                for pm in page_markets:
-                    tkr = str(pm.get("ticker") or "").upper()
-                    if (
-                        tkr.startswith(("KXNBA", "KXNFL", "KXCFB", "KXTENNIS", "KXATP", "KXWTA", "KXNHL", "KXMLB"))
-                        or any(sp in tkr for sp in ("LAKERS", "CELTICS", "WARRIORS", "BUCKS", "NUGGETS", "SUNS", "MAVS", "BULLS", "CAVS", "NETS", "76ERS", "SPURS", "HAWKS", "ROCKETS", "PELICANS"))
-                    ):
-                        if tkr not in existing_tickers:
-                            existing_tickers.add(pm.get("ticker"))
-                            markets.append(pm)
-                m_cursor = data.get("cursor")
-                if not m_cursor or not page_markets:
-                    break
-            else:
-                break
-        except Exception:
-            break
+def fetch_all_open_markets(sport_filter: Optional[str] = None) -> list:
+    """
+    Robust Sports Discovery Engine:
+    1. Sweeps /events?status=open&with_nested_markets=true to instantly grab all live games & player props.
+    2. Fallback sweep of targeted daily series (KXNBAPTS, KXNBAGAME, KXNFLPASS, etc.).
+    3. Merges curated active models to ensure 10k MC simulation pipeline is always fully populated.
+    """
+    markets = fetch_live_sport_markets(sport_filter)
+    existing_tickers = {m.get("ticker") for m in markets if m.get("ticker")}
+    base_url = BASE_URL or "https://api.elections.kalshi.com"
+    public_headers = {"Content-Type": "application/json", "Accept": "application/json"}
 
-    # 5. Fallback demo templates for simulation / off-slate display (marked as synthetic)
+    # If live event sweep returned fewer than 20 markets, supplement with known daily series
+    if len(markets) < 20:
+        known_sports_series = [
+            "KXNBAGAME", "KXNBASPREAD", "KXNBATOTAL", "KXNBAPTS", "KXNBAAST", "KXNBAREB", "KXNBA3PT", "KXNBAPRA",
+            "KXNFLGAME", "KXNFLPASS", "KXNFLRUSH", "KXNFLREC", "KXNFLTD",
+            "KXATPMATCH", "KXWTAMATCH", "KXTENNIS"
+        ]
+        for st in known_sports_series:
+            try:
+                path = f"/trade-api/v2/markets?status=open&series_ticker={st}&limit=100"
+                r = session.get(f"{base_url}{path}", headers=public_headers, timeout=3.5)
+                if r.status_code == 200:
+                    for sm in r.json().get("markets", []):
+                        if sm.get("status") in ("active", "open"):
+                            tkr = sm.get("ticker", "")
+                            if tkr and tkr not in existing_tickers:
+                                existing_tickers.add(tkr)
+                                markets.append(sm)
+            except Exception:
+                continue
+
+    # Fallback demo templates for simulation / off-slate display (marked as synthetic)
     for demo in LATE_OCTOBER_ACTIVE_MARKETS:
         if demo["ticker"] not in existing_tickers:
             d_copy = dict(demo)
             d_copy["is_synthetic"] = True
             markets.append(d_copy)
 
-    # 6. Final Guard: Strictly Daily/Live Games & Props (Zero cups, mid-season tourneys or futures)
+    # Final Guard: Strictly Daily/Live Games & Props (Zero cups, mid-season tourneys or futures)
     clean_markets = []
     for m in markets:
         tkr = str(m.get("ticker") or "").upper()
@@ -1775,7 +1704,7 @@ def run_monte_carlo_and_combo_pipeline(
     global last_scan_ts, last_markets_checked, last_scan_diag, total_trades_count, live_kalshi_balance
 
     if markets is None:
-        markets = fetch_all_open_markets()
+        markets = fetch_all_open_markets(sport_filter)
     last_scan_ts = time.time()
     last_markets_checked = max(14, len(markets))
 

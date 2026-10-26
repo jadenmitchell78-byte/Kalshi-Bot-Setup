@@ -563,14 +563,14 @@ async def scan_markets_with_telemetry(sport_filter: Optional[str] = None) -> Lis
             except Exception:
                 continue
 
-        # 3. Explore open Sports Events
+        # 3. Explore open Sports Events with nested markets
         ev_cursor = None
-        for _ in range(3):
+        for _ in range(5):
             try:
-                ev_url = f"{KALSHI_BASE_URL}/events?status=open&limit=200"
+                ev_url = f"{KALSHI_BASE_URL}/events?status=open&limit=200&with_nested_markets=true"
                 if ev_cursor:
                     ev_url += f"&cursor={ev_cursor}"
-                async with session.get(ev_url, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+                async with session.get(ev_url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
                     if resp.status == 200:
                         e_data = await resp.json()
                         e_list = e_data.get("events", [])
@@ -590,9 +590,11 @@ async def scan_markets_with_telemetry(sport_filter: Optional[str] = None) -> Lis
                                 or etk.startswith(("KXNFL", "KXCFB", "KXTENNIS", "KXATP", "KXWTA", "KXNHL"))
                             ):
                                 for em in ev.get("markets", []):
-                                    if isinstance(em, dict) and em.get("ticker") and em["ticker"] not in existing_tickers:
-                                        existing_tickers.add(em["ticker"])
-                                        raw_markets.append(em)
+                                    if isinstance(em, dict) and em.get("status") in ("active", "open"):
+                                        tkr = em.get("ticker")
+                                        if tkr and tkr not in existing_tickers:
+                                            existing_tickers.add(tkr)
+                                            raw_markets.append(em)
                         ev_cursor = e_data.get("cursor")
                         if not ev_cursor or not e_list:
                             break

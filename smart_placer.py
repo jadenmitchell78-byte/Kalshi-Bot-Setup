@@ -378,67 +378,84 @@ class KalshiSmartPlacer:
         }
 
     # -----------------------------------------------------------------
-    # 1. FULL CURSOR PAGINATION + SERIES SWEEP (Fixes "No Active Markets")
+    # 1. HIGH-EFFICIENCY EVENT SWEEP & SERIES RESOLVER
     # -----------------------------------------------------------------
-    def refresh_active_sports_markets(self, sport: str, stat: str, force: bool = False) -> List[Dict[str, Any]]:
-        if not force and self.market_cache and (time.time() - self.last_cache_time < 45):
+    def refresh_active_sports_markets(self, sport: str, stat: str = "PTS", force: bool = False) -> List[Dict[str, Any]]:
+        if not force and self.market_cache and (time.time() - self.last_cache_time < 30):
             return self.market_cache
 
         sp_u = sport.upper()
-        st_u = stat.upper()
-        prefixes = KALSHI_SERIES_PREFIXES.get((sp_u, st_u)) or KALSHI_SERIES_PREFIXES.get((sp_u, st_u.split()[0])) or [f"KX{sp_u}"]
         collected: List[Dict[str, Any]] = []
         seen_tickers = set()
 
-        for prefix in prefixes:
-            cursor = None
-            for _ in range(5):  # Up to 1,000 contracts per series
-                path = f"/trade-api/v2/markets?status=open&limit=200&series_ticker={prefix}"
-                if cursor:
-                    path += f"&cursor={cursor}"
-                try:
-                    resp = requests.get(self.base_url + path, headers=self.sign_headers("GET", path), timeout=5)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        batch = data.get("markets", [])
-                        for m in batch:
-                            tk = m.get("ticker", "")
-                            if tk and tk not in seen_tickers:
-                                seen_tickers.add(tk)
-                                collected.append(m)
-                        cursor = data.get("cursor")
-                        if not cursor or not batch:
-                            break
-                    else:
-                        break
-                except Exception:
-                    break
+        SPORT_KEYWORDS = {
+            "NBA": [
+                "NBA", "BASKETBALL", "KNICKS", "MAGIC", "PACERS", "NETS", "CLIPPERS",
+                "THUNDER", "RAPTORS", "TIMBERWOLVES", "PISTONS", "76ERS", "GRIZZLIES",
+                "KINGS", "LAKERS", "CELTICS", "WARRIORS", "SUNS", "MAVERICKS", "HEAT",
+                "RANDLE", "EDWARDS", "BRUNSON", "MAXEY", "CUNNINGHAM", "SGA", "MORANT",
+                "JOKIC", "GIANNIS", "DONCIC", "WEMBY", "WEMBANYAMA", "CURRY", "HERRO"
+            ],
+            "NFL": [
+                "NFL", "FOOTBALL", "CHIEFS", "RAVENS", "BILLS", "LIONS", "PACKERS",
+                "49ERS", "COWBOYS", "EAGLES", "BENGALS", "TEXANS", "COMMANDERS",
+                "BEARS", "VIKINGS", "FALCONS", "BUCCANEERS", "SEAHAWKS", "CARDINALS",
+                "TOUCHDOWN", "RUSHING", "PASSING", "RECEIVING", "MAHOMES", "BARKLEY", "HENRY", "ALLEN"
+            ],
+            "TENNIS": ["TENNIS", "ATP", "WTA", "ALCARAZ", "SINNER", "DJOKOVIC", "FRITZ", "SETS", "GAMES"],
+            "MLB": ["MLB", "BASEBALL", "STRIKEOUTS", "HITS", "HOME RUN", "HR", "RUNS"],
+        }
+        keywords = SPORT_KEYWORDS.get(sp_u, [sp_u])
 
-        # Fallback: sweep open sports markets with cursor pagination if series_ticker wasn't exact
-        if len(collected) < 4:
-            cursor = None
-            for _ in range(6):
-                path = "/trade-api/v2/markets?status=open&limit=200"
-                if cursor:
-                    path += f"&cursor={cursor}"
-                try:
-                    resp = requests.get(self.base_url + path, headers=self.sign_headers("GET", path), timeout=5)
-                    if resp.status_code != 200:
-                        break
-                    data = resp.json()
-                    batch = data.get("markets", [])
-                    for m in batch:
-                        tk = m.get("ticker", "")
-                        t_str = f"{tk} {m.get('title', '')} {m.get('subtitle', '')} {m.get('category', '')}".upper()
-                        if sp_u in t_str or f"KX{sp_u}" in t_str:
+        # 1. Sweep open events with nested markets (all active live props in 1-2 calls)
+        cursor = None
+        for _ in range(6):
+            path = "/trade-api/v2/events?status=open&limit=200&with_nested_markets=true"
+            if cursor:
+                path += f"&cursor={cursor}"
+            try:
+                resp = requests.get(self.base_url + path, headers=self.sign_headers("GET", path), timeout=8)
+                if resp.status_code != 200:
+                    break
+                data = resp.json()
+                events = data.get("events", [])
+                for ev in events:
+                    ev_blob = f"{ev.get('event_ticker', '')} {ev.get('series_ticker', '')} {ev.get('title', '')} {ev.get('sub_title', '')} {ev.get('category', '')}".upper()
+                    ev_match = any(k in ev_blob for k in keywords)
+
+                    for m in ev.get("markets", []):
+                        if m.get("status") not in ("active", "open"):
+                            continue
+                        m_blob = f"{m.get('ticker', '')} {m.get('title', '')} {m.get('subtitle', '')}".upper()
+                        if ev_match or any(k in m_blob for k in keywords):
+                            tk = m.get("ticker")
                             if tk and tk not in seen_tickers:
                                 seen_tickers.add(tk)
                                 collected.append(m)
-                    cursor = data.get("cursor")
-                    if not cursor:
-                        break
-                except Exception:
+
+                cursor = data.get("cursor")
+                if not cursor or not events:
                     break
+            except Exception:
+                break
+
+        # 2. Targeted series sweep fallback if event sweep returned sparse markets
+        if len(collected) < 10:
+            st_u = stat.upper()
+            prefixes = KALSHI_SERIES_PREFIXES.get((sp_u, st_u)) or KALSHI_SERIES_PREFIXES.get((sp_u, st_u.split()[0])) or [f"KX{sp_u}"]
+            for prefix in prefixes:
+                try:
+                    path = f"/trade-api/v2/markets?status=open&limit=100&series_ticker={prefix}"
+                    resp = requests.get(self.base_url + path, headers=self.sign_headers("GET", path), timeout=4)
+                    if resp.status_code == 200:
+                        for m in resp.json().get("markets", []):
+                            if m.get("status") in ("active", "open"):
+                                tk = m.get("ticker", "")
+                                if tk and tk not in seen_tickers:
+                                    seen_tickers.add(tk)
+                                    collected.append(m)
+                except Exception:
+                    continue
 
         if collected:
             self.market_cache = collected
@@ -756,3 +773,134 @@ class KalshiSmartPlacer:
             )
             receipts.append(res)
         return receipts
+
+    # -----------------------------------------------------------------
+    # 6. UNIVERSAL MONEYLINE & SPREAD EXECUTOR
+    # -----------------------------------------------------------------
+    def smart_place_moneyline_or_spread(
+        self,
+        sport: str,
+        team_name: str,
+        bet_type: str = "ML",   # "ML" (Moneyline) or "SPREAD"
+        line_value: float = 0.0,
+        true_prob_pct: float = 55.0,
+        ev_edge_pct: float = 3.5,
+        bankroll_usd: float = 32.22,
+        sniper_on: bool = True,
+        live_mode: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Resolves and places Kalshi Game Moneylines and Spreads.
+        """
+        if ev_edge_pct < 2.5:
+            return {"status": "SKIPPED", "reason": "Edge below game-line threshold"}
+
+        markets = self.refresh_active_sports_markets(sport, "PTS")
+        team_upper = team_name.upper()
+
+        best_market = None
+        for m in markets:
+            searchable = f"{m.get('ticker', '')} {m.get('title', '')} {m.get('subtitle', '')}".upper()
+            if team_upper in searchable and ("WIN" in searchable or "SPREAD" in searchable or "VS" in searchable or "GAME" in searchable):
+                best_market = m
+                break
+
+        if not best_market:
+            return {"status": "NO_TICKER", "reason": f"Could not find open Kalshi game line for {team_name}"}
+
+        ticker = best_market["ticker"]
+        kalshi_side = "yes"  # Kalshi structures team moneylines as YES on that team winning
+
+        limit_cents, exec_style, pricing_note = self.calculate_smart_entry_price(ticker, kalshi_side, true_prob_pct)
+        stake_usd = max(1.00, round(bankroll_usd * 0.03, 2))  # 3% standard bankroll slice for game lines
+        contracts = max(1, int((stake_usd * 100) // max(1, limit_cents)))
+
+        if not (sniper_on and live_mode):
+            return {
+                "status": "SIM_QUEUED",
+                "ticker": ticker,
+                "contracts": contracts,
+                "limit_cents": limit_cents,
+                "cost_usd": round((contracts * limit_cents) / 100.0, 2),
+                "style": exec_style,
+                "note": f"Paper tracked ({pricing_note})",
+            }
+
+        order_path = "/trade-api/v2/portfolio/orders"
+        payload = {
+            "ticker": ticker,
+            "action": "buy",
+            "side": kalshi_side,
+            "count": contracts,
+            "type": "limit",
+            "client_order_id": str(uuid.uuid4()),
+            f"{kalshi_side}_price": limit_cents,
+        }
+
+        try:
+            resp = requests.post(
+                self.base_url + order_path,
+                json=payload,
+                headers=self.sign_headers("POST", order_path),
+                timeout=8,
+            )
+            if resp.status_code in (200, 201):
+                order_id = resp.json().get("order", {}).get("order_id", "")
+                return {
+                    "status": "PLACED",
+                    "ticker": ticker,
+                    "contracts": contracts,
+                    "limit_cents": limit_cents,
+                    "cost_usd": round((contracts * limit_cents) / 100.0, 2),
+                    "order_id": order_id,
+                }
+            return {"status": "API_REJECTED", "code": resp.status_code, "reason": resp.text[:140]}
+        except Exception as e:
+            return {"status": "ERROR", "reason": str(e)}
+
+    # -----------------------------------------------------------------
+    # 7. SMART COMBO BASKET ROUTER (Multi-Leg Concurrent Sizing)
+    # -----------------------------------------------------------------
+    def smart_place_combo_basket(
+        self,
+        slip_id: str,
+        legs: List[Any],
+        total_stake_usd: float,
+        sniper_on: bool = True,
+        live_mode: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """
+        Smart Basket Router: Kalshi has no native multi-leg parlay endpoint.
+        This function splits total Kelly bankroll across the correlated legs
+        and concurrently submits synchronized limit/taker orders for all legs.
+        """
+        results = []
+        if not legs:
+            return results
+
+        per_leg_stake = max(1.00, round(total_stake_usd / max(1, len(legs)), 2))
+        for leg in legs:
+            tk = getattr(leg, "market_ticker", None) or getattr(leg, "ticker", "")
+            sport = getattr(leg, "sport", "NBA")
+            player = getattr(leg, "player_name", "") or getattr(leg, "player_prop", "").split()[0]
+            stat = getattr(leg, "stat_type", "PTS")
+            line = float(getattr(leg, "line", 0.0))
+            side = getattr(leg, "side", "OVER")
+            true_prob = float(getattr(leg, "mc_true_prob", 0.50)) * 100.0
+            ev_pct = float(getattr(leg, "edge_pct", getattr(leg, "ev_edge", 0.05) * 100.0))
+
+            res = self.smart_place_leg(
+                sport=sport,
+                player_name=player,
+                stat=stat,
+                line=line,
+                pick_dir=side,
+                true_prob_pct=true_prob,
+                ev_edge_pct=ev_pct,
+                bankroll_usd=per_leg_stake * 3,
+                sniper_on=sniper_on,
+                live_mode=live_mode,
+                existing_ticker=tk if (tk and tk.startswith("KX") and len(tk) >= 10) else None,
+            )
+            results.append({"ticker": tk, "result": res})
+        return results

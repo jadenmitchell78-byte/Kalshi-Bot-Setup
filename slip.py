@@ -784,20 +784,29 @@ def build_leg_from_kalshi_market(
     if now - _COOLDOWN_TRACKER.get(ticker, 0.0) < COOLDOWN_SECONDS:
         return None
 
-    yes_bid = int(market.get("yes_bid") or 0)
-    yes_ask = int(market.get("yes_ask") or 0)
-    no_bid = int(market.get("no_bid") or 0)
-    no_ask = int(market.get("no_ask") or 0)
-    last_price = int(market.get("last_price") or 0)
+    yes_bid = _clean_price_cents(market.get("yes_bid"))
+    yes_ask = _clean_price_cents(market.get("yes_ask"))
+    no_bid = _clean_price_cents(market.get("no_bid"))
+    no_ask = _clean_price_cents(market.get("no_ask"))
+    last_price = _clean_price_cents(market.get("last_price"))
 
     if yes_ask <= 0:
-        yes_ask = last_price if last_price > 0 else 0
-    if yes_ask <= 3 or yes_ask >= 95:
-        return None
+        if last_price > 0:
+            yes_ask = last_price
+        elif yes_bid > 0:
+            yes_ask = min(98, yes_bid + 2)
+        elif no_ask > 0:
+            yes_ask = max(2, 100 - no_ask)
+        else:
+            yes_ask = 50
+    if yes_bid <= 0 and yes_ask > 0:
+        yes_bid = max(1, yes_ask - 2)
     if no_ask <= 0 and yes_bid > 0:
         no_ask = 100 - yes_bid
     if no_bid <= 0 and yes_ask > 0:
         no_bid = 100 - yes_ask
+    if yes_ask <= 1 or yes_ask >= 99:
+        return None
 
     title = market.get("title") or market.get("subtitle") or ticker
     category = market.get("category") or ""
