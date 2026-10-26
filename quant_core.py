@@ -26,8 +26,15 @@ except ImportError:
     scipy_student_t = None  # type: ignore
     HAS_SCIPY = False
 
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding
+try:
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+    HAS_CRYPTOGRAPHY = True
+except (ImportError, Exception):
+    hashes = None  # type: ignore
+    serialization = None  # type: ignore
+    padding = None  # type: ignore
+    HAS_CRYPTOGRAPHY = False
 
 # =====================================================================
 # 1. CLEAN STAT & PLAYER PARSER (Fixes "Tyler Hero 3pts" Bug)
@@ -525,7 +532,7 @@ class KalshiUnifiedSniper:
                 except Exception:
                     pass
 
-        if pem_text:
+        if pem_text and HAS_CRYPTOGRAPHY and serialization is not None:
             if not pem_text.startswith("-----BEGIN"):
                 b64 = "".join(ln.strip() for ln in pem_text.splitlines() if not ln.strip().startswith("-----"))
                 pem_text = f"-----BEGIN PRIVATE KEY-----\n{b64}\n-----END PRIVATE KEY-----"
@@ -535,9 +542,20 @@ class KalshiUnifiedSniper:
                 pass
 
     def _headers(self, method: str, path: str) -> Dict[str, str]:
+        # Priority 1: Pure-Python RFC 8032 Ed25519 signer from kalshi_client (Zero C/Rust .so dependencies)
+        try:
+            from kalshi_client import build_kalshi_auth_headers
+            auth_h = build_kalshi_auth_headers(method, self.base_url + path)
+            if auth_h:
+                auth_h["Content-Type"] = "application/json"
+                auth_h["Accept"] = "application/json"
+                return auth_h
+        except Exception:
+            pass
+
         clean_path = path.split("?")[0]
         ts = str(int(time.time() * 1000))
-        if not self.private_key or not self.key_id:
+        if not self.private_key or not self.key_id or not HAS_CRYPTOGRAPHY:
             return {"Content-Type": "application/json", "Accept": "application/json"}
         msg = f"{ts}{method.upper()}{clean_path}".encode("utf-8")
         try:

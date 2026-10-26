@@ -26,14 +26,26 @@
       --cyan: #06B6D4;
     }
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html {
+      height: 100%;
+      -webkit-text-size-adjust: 100%;
+    }
     body {
       margin: 0;
-      padding: 12px 12px 245px 12px;
+      min-height: 100vh;
+      min-height: 100dvh;
+      padding: 12px 12px calc(88px + env(safe-area-inset-bottom, 0px)) 12px;
       background: var(--bg);
       color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, sans-serif;
       font-size: 13px;
       line-height: 1.4;
+      touch-action: manipulation;
+    }
+    button, .btn, .cat-pill, .nav-btn, .slot-pill, .score-card, .prop-card, .btn-watch-chip {
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
     }
     /* Top Quant Header */
     .top-bar {
@@ -433,6 +445,7 @@
 
     /* Floating "Pick-6" Slip Builder Card */
     .pick6-drawer {
+      display: none;
       position: fixed;
       bottom: 62px;
       left: 8px;
@@ -443,6 +456,10 @@
       padding: 11px 13px;
       box-shadow: 0 -6px 26px rgba(0, 0, 0, 0.75);
       z-index: 90;
+      pointer-events: auto;
+    }
+    .pick6-drawer.active {
+      display: block;
     }
     .pick6-header {
       display: flex;
@@ -522,6 +539,7 @@
       z-index: 200;
       display: none;
       box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+      pointer-events: none;
     }
 
     /* Quant Analytics Modal & Radar Chart */
@@ -531,13 +549,21 @@
       inset: 0;
       background: rgba(0, 0, 0, 0.78);
       backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
       z-index: 9999;
       padding: 16px;
       overflow-y: auto;
       justify-content: center;
       align-items: center;
+      pointer-events: none;
     }
-    .modal-backdrop.open { display: flex; }
+    .modal-backdrop.open {
+      display: flex;
+      pointer-events: auto;
+    }
+    .modal-box {
+      pointer-events: auto;
+    }
     .modal-box {
       background: #0E1525;
       border: 1px solid var(--border);
@@ -1136,6 +1162,7 @@
     }
 
     async function evaluatePick6() {
+      const drawerEl = document.getElementById('pick6-drawer');
       const titleEl = document.getElementById('pick6-title');
       const pillsEl = document.getElementById('pick6-pills');
       const corrEl = document.getElementById('pick6-corr');
@@ -1143,6 +1170,7 @@
 
       titleEl.innerText = `🎟 PICK-6 COPULA SLIP BUILDER (${selectedTickers.length}/6 Legs)`;
       if (selectedTickers.length === 0) {
+        if (drawerEl) drawerEl.style.display = 'none';
         currentEval = null;
         pillsEl.innerHTML = `<span style="font-size:11px;color:var(--muted)">Tap props in "Player Props" to add 2–6 correlated legs...</span>`;
         corrEl.innerText = '🧬 Copula Ready';
@@ -1150,6 +1178,7 @@
         metricsEl.innerHTML = `<span>💰 Implied: <b>--%</b> | True Hit: <b>--%</b></span><span>📈 Edge: <b>--% EV</b> | Stake: <b>--u</b></span>`;
         return;
       }
+      if (drawerEl) drawerEl.style.display = 'block';
 
       pillsEl.innerHTML = selectedTickers.map(t => {
         const p = latestState.props.find(x => x.market_ticker === t);
