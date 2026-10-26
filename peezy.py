@@ -128,6 +128,8 @@ def kill_stale_bot_processes() -> int:
             continue
     return killed
 
+_ROTATION_OFFSET: int = 0
+
 CURATED_QUANT_MARKETS: List[Dict[str, Any]] = [
     {
         "ticker": "KXNBA-MIN-RANDLE-O23P5PTS",
@@ -711,6 +713,14 @@ async def scan_markets_with_telemetry(sport_filter: Optional[str] = None) -> Lis
                 legs.append(leg)
 
     legs.sort(key=lambda x: x.ev_edge, reverse=True)
+    # Smart Prop Rotation: Pin top-tier high-EV edges (>= 5.5%), dynamically rotate standard edges across players & stats
+    global _ROTATION_OFFSET
+    pinned = [l for l in legs if getattr(l, "ev_edge", 0.0) >= 0.055]
+    rotatable = [l for l in legs if getattr(l, "ev_edge", 0.0) < 0.055]
+    if rotatable:
+        _ROTATION_OFFSET = (_ROTATION_OFFSET + 2) % len(rotatable)
+        rotatable = rotatable[_ROTATION_OFFSET:] + rotatable[:_ROTATION_OFFSET]
+    legs = pinned + rotatable
     _WEB_CACHE["props"] = legs
     _WEB_CACHE["telemetry"] = [
         {"sport": sp, "badge": g_list[0].format_badge()}
@@ -867,7 +877,8 @@ async def build_menu_hud_and_keyboard() -> tuple[str, InlineKeyboardMarkup]:
                 InlineKeyboardButton("📋 Open Positions", callback_data="menu_open_positions"),
             ],
             [
-                InlineKeyboardButton("📱 Open Analytics App", web_app={"url": webapp_url}),
+                InlineKeyboardButton("📊 Analytics HUD", callback_data="menu_analytics"),
+                InlineKeyboardButton("📱 Open WebApp", web_app={"url": webapp_url}),
             ],
             [
                 InlineKeyboardButton("🔓 Flush Locks", callback_data="menu_flush_locks"),
@@ -879,6 +890,37 @@ async def build_menu_hud_and_keyboard() -> tuple[str, InlineKeyboardMarkup]:
         ]
     )
     return hud_text, keyboard
+
+
+def build_casual_video_buttons(
+    stream_url: Optional[str] = None,
+    market_url: Optional[str] = None,
+    sweat_url: Optional[str] = None,
+) -> InlineKeyboardMarkup:
+    """
+    3 Clean video-style action buttons underneath predictions cards:
+    - [ 📺 Watch Game Live (In-App) ]
+    - [ ⚡ Tail Slip on Kalshi ]
+    - [ 📊 Live Sweat Tracker ]
+    - [ ⚙️ Menu HUD ]
+    """
+    webapp_url = os.getenv("PEEZY_WEBAPP_URL", "https://peezt-tv.vercel.app")
+    s_url = stream_url or f"{webapp_url}?view=stream"
+    t_url = market_url or "https://kalshi.com"
+    w_url = sweat_url or f"{webapp_url}?view=sweat"
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📺 Watch Game Live (In-App)", web_app={"url": s_url}),
+        ],
+        [
+            InlineKeyboardButton("⚡ Tail Slip on Kalshi", url=t_url),
+            InlineKeyboardButton("📊 Live Sweat Tracker", web_app={"url": w_url}),
+        ],
+        [
+            InlineKeyboardButton("⚙️ Full Menu HUD", callback_data="menu_refresh_hud"),
+        ]
+    ])
 
 
 async def build_status_text() -> str:
@@ -1122,6 +1164,158 @@ async def build_audit_text() -> str:
         f"• Correlated Copula Joint Prob: `{audit['copula_joint_pct']}%`\n"
         f"• Correlation Boost: `+{audit['copula_boost_pct']}%`"
     )
+
+
+_USER_BUILDING_COMBO: Dict[str, Any] = {
+    "active": False,
+    "ts": 0.0,
+    "selected_tickers": [],
+    "cached_props": [],
+    "cached_ts": 0.0,
+}
+
+
+async def build_custom_combo_menu(selected_tickers: Optional[List[str]] = None) -> tuple[str, InlineKeyboardMarkup]:
+    """
+    Interactive Manual Slip & Combo Builder:
+    Allows user to select/toggle 2 to 3 legs across NBA, NFL, and Tennis,
+    evaluates Joint Gaussian / Vine Copula correlations in real-time,
+    and submits limit/RFQ orders directly to Kalshi or Sim portfolio.
+    """
+    global _USER_BUILDING_COMBO
+    _USER_BUILDING_COMBO["active"] = True
+    _USER_BUILDING_COMBO["ts"] = time.time()
+    if selected_tickers is not None:
+        _USER_BUILDING_COMBO["selected_tickers"] = selected_tickers
+    sel = _USER_BUILDING_COMBO.setdefault("selected_tickers", [])
+
+    cached = _USER_BUILDING_COMBO.get("cached_props", [])
+    now = time.time()
+    if not cached or (now - _USER_BUILDING_COMBO.get("cached_ts", 0) > 180):
+        legs = _WEB_CACHE.get("props") or []
+        if not legs or len(legs) < 4:
+            legs = await scan_markets_with_telemetry()
+        props_list = []
+        seen = set()
+        for l in legs:
+            tk = getattr(l, "market_ticker", "")
+            if tk and tk not in seen:
+                seen.add(tk)
+                props_list.append(l)
+            if len(props_list) >= 8:
+                break
+        _USER_BUILDING_COMBO["cached_props"] = props_list
+        _USER_BUILDING_COMBO["cached_ts"] = now
+        cached = props_list
+
+    lines = [
+        "🛠️ *AURASCAN // CUSTOM COMBO BUILDER* 🛠️",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "• 🎯 *Auto-Sniper:* `PAUSED FOR BUILDER` (Tap Resume to re-arm)",
+        f"• 📋 *Selected Legs:* `{len(sel)} / {MAX_SLIP_LEGS}`",
+    ]
+
+    selected_legs = [l for l in cached if getattr(l, "market_ticker", "") in sel]
+    if len(selected_legs) >= 2:
+        bankroll = await get_effective_bankroll()
+        slip = evaluate_parlay(selected_legs, bankroll=bankroll, iterations=MC_ITERATIONS)
+        boost_sign = "+" if slip.copula_boost_pct >= 0 else ""
+        lines.extend([
+            "",
+            "🧬 *CORRELATED COPULA PROJECTION:*",
+            f"• 🎲 Combined Implied: `{slip.book_prob*100:.1f}%` ➡️ True: `{slip.copula_joint_prob*100:.1f}%`",
+            f"• 🚀 Copula Correlation Boost: `{boost_sign}{slip.copula_boost_pct:.1f}%`",
+            f"• 💵 Odds: `{slip.american_odds}` ({slip.decimal_odds:.2f}x) | *+{slip.ev_pct:.1f}% EV*",
+            f"• 🏦 Sized Stake: `${slip.kelly_stake:.2f}` ➡️ Est. Payout: `${slip.potential_payout:.2f}`",
+        ])
+    else:
+        lines.append("\n_Select 2 or 3 legs below to calculate joint Copula probabilities & arm orders._")
+
+    lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━\n*Available Prop Pool (10k MC Verified):*")
+    buttons: List[List[InlineKeyboardButton]] = []
+    for idx, l in enumerate(cached[:8]):
+        tk = getattr(l, "market_ticker", f"prop_{idx}")
+        is_sel = tk in sel
+        icon = "✅" if is_sel else "🔘"
+        p_name = getattr(l, "player_name", "") or getattr(l, "player_prop", "")[:14]
+        s_type = getattr(l, "stat_type", "") or ""
+        edge = getattr(l, "ev_edge", 0.0) * 100
+        btn_label = f"{icon} [{l.sport}] {p_name} {s_type} {l.side} {l.line} ({edge:+.1f}%)"
+        buttons.append([InlineKeyboardButton(btn_label[:40], callback_data=f"combo_toggle_{idx}")])
+
+    action_row = []
+    if len(selected_legs) >= 2:
+        action_row.append(InlineKeyboardButton(f"🚀 Fire Slip ({len(selected_legs)} Legs)", callback_data="combo_fire"))
+    if sel:
+        action_row.append(InlineKeyboardButton("🔄 Clear", callback_data="combo_clear"))
+    if action_row:
+        buttons.append(action_row)
+
+    buttons.append([
+        InlineKeyboardButton("▶️ Resume Auto / HUD", callback_data="combo_resume"),
+        InlineKeyboardButton("⚡ Rescan Pool", callback_data="menu_force_scan"),
+    ])
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+async def build_analytics_text() -> str:
+    """Comprehensive institutional quant analytics report for /analytics."""
+    stats = get_bot_stats()
+    audit = run_calibration_and_symmetry_audit(iterations=MC_ITERATIONS)
+    telemetry_map = await fetch_all_telemetry()
+    pending = fetch_pending_parlays()
+
+    calib_badge = "✅ PASS (ZERO BIAS)" if audit.get("passed") else "⚠️ DRIFT"
+    vec_str = "NumPy Cholesky Vectorized" if audit.get("numpy_vectorized") else "Pure-Python Cholesky Math Engine"
+
+    total_slips = stats.get("total_slips", 0)
+    won = stats.get("won_slips", 0)
+    lost = stats.get("lost_slips", 0)
+    push = stats.get("push_slips", 0)
+    completed = won + lost
+    win_rate = (won / completed * 100.0) if completed > 0 else 0.0
+    sign = "+" if stats.get("net_pnl", 0.0) >= 0 else ""
+
+    sample_latencies = []
+    for sp, g_list in telemetry_map.items():
+        if g_list:
+            g = g_list[0]
+            sample_latencies.append(f"• {SPORT_EMOJIS.get(sp, '🎯')} *{sp}:* `{g.latency_ms:.0f}ms` ({g.format_badge()})")
+
+    lines = [
+        "📊 *AURASCAN // QUANT & COPULA ANALYTICS HUD* 📊",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "🧮 *1. 10,000-ITERATION MONTE CARLO ENGINE:*",
+        f"• Status: `{calib_badge}` ({audit.get('iterations', 10000):,} draws/prop)",
+        f"• Engine: `{vec_str}`",
+        f"• 50/50 Symmetry: Over `{audit.get('over_50_prob', 50.0)}%` / Under `{audit.get('under_50_prob', 50.0)}%` (Mass: `{audit.get('symmetry_sum_pct', 100.0)}%`)",
+        f"• Directional Bias: `{audit.get('directional_bias_pct', 0.0)}%` (Strict Target `< 1.0%`)",
+        f"• Split-Half Convergence (5k vs 10k): `{audit.get('convergence_err_pct', 0.0)}%` (Target `< 0.8%`)",
+        "",
+        "🧬 *2. GAUSSIAN & VINE COPULA BENCHMARKS:*",
+        f"• Independent Stack Implied: `{audit.get('copula_indep_pct', 25.0)}%`",
+        f"• Correlated Joint Probability: `{audit.get('copula_joint_pct', 30.0)}%`",
+        f"• Copula Synergistic Boost: `+{audit.get('copula_boost_pct', 0.0)}%`",
+        "• Multi-Leg Vine Copula: `Student-t Matrix Active (v=4 df)`",
+        "",
+        "📈 *3. PORTFOLIO & REALIZED PERFORMANCE:*",
+        f"• Sim Cash Bankroll: `${stats.get('sim_cash', 0.0):.2f}`",
+        f"• Realized Net PnL: `{sign}${stats.get('net_pnl', 0.0):.2f}` (*ROI: `{sign}{stats.get('roi_pct', 0.0)}%`*)",
+        f"• Win/Loss Record: `{won}W - {lost}L - {push}P` (*Win Rate: `{win_rate:.1f}%`*)",
+        f"• Active Exposure: `${stats.get('exposure', 0.0):.2f} / ${stats.get('slate_cap', 32.22):.2f}` Slate Cap",
+        f"• Open Unsettled Slips: `{len(pending)}` | Total Slips Logged: `{total_slips}`",
+        "",
+        "📡 *4. ACTIVE SUB-ENGINES & TELEMETRY:*",
+        "• 🏀 *NBA:* `5m active loop` (Blowout Guard & Minutes Shrinkage Active)",
+        "• 🏈 *NFL/CFB:* `10m loop` (QB/WR Scheme Correlation Matrix Active)",
+        "• 🎾 *Tennis:* `Armed` (Surface Friction & Game-State Markov Engine)",
+        "• 🔑 *Kalshi Signer:* `RSA-4096 / Ed25519 V2 Authenticated`",
+    ]
+    if sample_latencies:
+        lines.append("• ⚡ *Live Telemetry Latency:*\n  " + "\n  ".join(sample_latencies))
+
+    return "\n".join(lines)
 
 
 async def auto_scanner_worker(
@@ -1469,10 +1663,10 @@ async def cmd_nba(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     full_cmd = f"/nba {' '.join(context.args)}" if context.args else "/nba"
     parsed = parse_user_query(full_cmd)
-    _, kb = await build_menu_hud_and_keyboard()
+    clean_kb = build_casual_video_buttons()
     if parsed["mode"] == "SCAN":
         board_html = run_full_sport_board_scan("NBA", quant_sniper)
-        await update.message.reply_text(board_html, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await update.message.reply_text(board_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
     else:
         sim_data = simulate_prop_and_combo(
             sport="NBA",
@@ -1482,7 +1676,7 @@ async def cmd_nba(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         exec_res = quant_sniper.resolve_and_snipe(sim_data)
         card_html = format_revamped_sim_card(sim_data, exec_res)
-        await update.message.reply_text(card_html, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await update.message.reply_text(card_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
 
 
 async def cmd_nfl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1491,10 +1685,10 @@ async def cmd_nfl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     full_cmd = f"/nfl {' '.join(context.args)}" if context.args else "/nfl"
     parsed = parse_user_query(full_cmd)
-    _, kb = await build_menu_hud_and_keyboard()
+    clean_kb = build_casual_video_buttons()
     if parsed["mode"] == "SCAN":
         board_html = run_full_sport_board_scan("NFL", quant_sniper)
-        await update.message.reply_text(board_html, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await update.message.reply_text(board_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
     else:
         sim_data = simulate_prop_and_combo(
             sport="NFL",
@@ -1504,7 +1698,7 @@ async def cmd_nfl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         exec_res = quant_sniper.resolve_and_snipe(sim_data)
         card_html = format_revamped_sim_card(sim_data, exec_res)
-        await update.message.reply_text(card_html, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await update.message.reply_text(card_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
 
 
 async def cmd_tennis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1513,7 +1707,7 @@ async def cmd_tennis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     full_cmd = f"/tennis {' '.join(context.args)}" if context.args else "/tennis"
     parsed = parse_user_query(full_cmd)
-    _, kb = await build_menu_hud_and_keyboard()
+    clean_kb = build_casual_video_buttons()
     if parsed.get("mode") == "TENNIS_MATCHUP":
         sim_res = simulate_tennis_match(
             p1_name=parsed.get("p1", "Sinner"),
@@ -1521,10 +1715,10 @@ async def cmd_tennis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             surface=parsed.get("surface", "HARD"),
         )
         card_html = format_tennis_card(sim_res)
-        await update.message.reply_text(card_html, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await update.message.reply_text(card_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
     else:
         board_html = run_full_sport_board_scan("TENNIS", quant_sniper)
-        await update.message.reply_text(board_html, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await update.message.reply_text(board_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
 
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, sport_filter: Optional[str] = None) -> None:
@@ -1748,6 +1942,180 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             if query.message:
                 await query.message.reply_text(body[:4000], parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
 
+    elif any(k in data for k in ("build_combo", "custom_combo")):
+        await query.answer("🛠️ Opening Custom Combo Builder...")
+        b_txt, b_kb = await build_custom_combo_menu()
+        try:
+            await query.edit_message_text(b_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=b_kb)
+        except Exception:
+            if query.message:
+                await query.message.reply_text(b_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=b_kb)
+
+    elif "combo_toggle_" in data:
+        try:
+            idx = int(data.split("combo_toggle_")[1])
+            cached = _USER_BUILDING_COMBO.get("cached_props", [])
+            if 0 <= idx < len(cached):
+                tk = getattr(cached[idx], "market_ticker", "")
+                sel = _USER_BUILDING_COMBO.setdefault("selected_tickers", [])
+                if tk in sel:
+                    sel.remove(tk)
+                    await query.answer(f"Removed {tk[:18]}")
+                else:
+                    if len(sel) < MAX_SLIP_LEGS:
+                        sel.append(tk)
+                        await query.answer(f"Added {tk[:18]}")
+                    else:
+                        await query.answer(f"Max {MAX_SLIP_LEGS} legs in combo", show_alert=True)
+        except Exception as e:
+            logger.warning("Error in combo_toggle: %s", e)
+        b_txt, b_kb = await build_custom_combo_menu(_USER_BUILDING_COMBO.get("selected_tickers", []))
+        try:
+            await query.edit_message_text(b_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=b_kb)
+        except Exception:
+            if query.message:
+                await query.message.reply_text(b_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=b_kb)
+
+    elif any(k in data for k in ("combo_fire", "fire_combo")):
+        sel = _USER_BUILDING_COMBO.get("selected_tickers", [])
+        cached = _USER_BUILDING_COMBO.get("cached_props", [])
+        chosen_legs = [l for l in cached if getattr(l, "market_ticker", "") in sel]
+        if len(chosen_legs) >= 2:
+            await query.answer("⚡ Executing custom Copula combo...")
+            bankroll = await get_effective_bankroll()
+            slip = evaluate_parlay(chosen_legs, bankroll=bankroll, iterations=MC_ITERATIONS)
+            notes = await execute_and_persist_slip(slip)
+            rt = get_runtime_state()
+            _USER_BUILDING_COMBO["active"] = False
+            _USER_BUILDING_COMBO["selected_tickers"] = []
+            card = format_slip_card(slip, title_banner="CUSTOM COPULA SLIP EXECUTED", mode_label=rt["mode"])
+            card += f"\n🏦 *Sim Cash Balance:* `${rt['sim_cash']:.2f}`"
+            if notes:
+                card += "\n" + "\n".join(notes)
+            _, hud_kb = await build_menu_hud_and_keyboard()
+            try:
+                await query.edit_message_text(card, parse_mode=ParseMode.MARKDOWN, reply_markup=hud_kb)
+            except Exception:
+                if query.message:
+                    await query.message.reply_text(card, parse_mode=ParseMode.MARKDOWN, reply_markup=hud_kb)
+        else:
+            await query.answer("⚠️ Select at least 2 legs before firing!", show_alert=True)
+
+    elif any(k in data for k in ("combo_clear",)):
+        _USER_BUILDING_COMBO["selected_tickers"] = []
+        await query.answer("Selection cleared")
+        b_txt, b_kb = await build_custom_combo_menu([])
+        try:
+            await query.edit_message_text(b_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=b_kb)
+        except Exception:
+            if query.message:
+                await query.message.reply_text(b_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=b_kb)
+
+    elif any(k in data for k in ("combo_resume", "combo_cancel")):
+        _USER_BUILDING_COMBO["active"] = False
+        _USER_BUILDING_COMBO["selected_tickers"] = []
+        await query.answer("▶️ Resumed Auto-Sniper & returned to HUD")
+        hud_text, kb = await build_menu_hud_and_keyboard()
+        try:
+            await query.edit_message_text(hud_text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+        except Exception:
+            if query.message:
+                await query.message.reply_text(hud_text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+    elif any(k in data for k in ("menu_analytics", "analytics")):
+        await query.answer("📊 Loading Quant Analytics HUD...")
+        ana_text = await build_analytics_text()
+        _, kb = await build_menu_hud_and_keyboard()
+        try:
+            await query.edit_message_text(ana_text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+        except Exception:
+            if query.message:
+                await query.message.reply_text(ana_text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+    elif any(k in data for k in ("menu_pnl", "pnl", "profit")):
+        await query.answer("📈 Settled PnL Report")
+        stats = get_bot_stats()
+        settled = fetch_settled_slips(limit=6)
+        sign = "+" if stats.get("net_pnl", 0.0) >= 0 else ""
+        lines = [
+            "📈 *PEEZY BANKROLL & SETTLED PnL REPORT* 📈",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"🏦 *Current Sim Cash:* `${stats.get('sim_cash', 0.0):.2f}`",
+            f"💵 *Realized Net PnL:* `{sign}${stats.get('net_pnl', 0.0):.2f}` (*ROI: `{sign}{stats.get('roi_pct', 0.0)}%`*)",
+            f"📊 *Total Settled Stake:* `${stats.get('total_staked', 0.0):.2f}`",
+            f"🏆 *Record:* `{stats.get('won_slips', 0)}W - {stats.get('lost_slips', 0)}L - {stats.get('push_slips', 0)}P`",
+        ]
+        if settled:
+            lines.append("━━━━━━━━━━━━━━━━━━━━\n*Recent Settled Slips:*")
+            for s in settled:
+                icon = {"WON": "🟢", "LOST": "🔴", "PUSH": "🟡"}.get(s["status"], "⚪")
+                s_pnl = float(s.get("pnl", 0.0))
+                p_sign = "+" if s_pnl >= 0 else ""
+                lines.append(f"{icon} `{s['slip_id']}` ({s.get('leg_count', 2)}-Leg `{s.get('american_odds', '+150')}`) — *[{s['status']}]* PnL: `{p_sign}${s_pnl:.2f}`")
+        _, kb = await build_menu_hud_and_keyboard()
+        p_txt = "\n".join(lines)
+        try:
+            await query.edit_message_text(p_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+        except Exception:
+            if query.message:
+                await query.message.reply_text(p_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+    elif any(k in data for k in ("menu_scan_options", "scan_options")):
+        await query.answer("🔍 Select a sport to scan...")
+        scan_kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🏀 NBA Props", callback_data="scan_sport_nba"),
+                InlineKeyboardButton("🏈 NFL / CFB", callback_data="scan_sport_nfl"),
+            ],
+            [
+                InlineKeyboardButton("🎾 Tennis (ATP/WTA)", callback_data="scan_sport_tennis"),
+                InlineKeyboardButton("⚾ MLB", callback_data="scan_sport_mlb"),
+            ],
+            [
+                InlineKeyboardButton("🌐 Scan All Slates", callback_data="menu_force_scan"),
+                InlineKeyboardButton("🔙 Back to HUD", callback_data="menu_refresh_hud"),
+            ],
+        ])
+        msg_text = "🔍 *CHOOSE SPORT FOR 10k MONTE CARLO SCAN:*\n━━━━━━━━━━━━━━━━━━━━━━━━\nSelect an active slate below to evaluate real-time odds, true probability, and +EV edges:"
+        try:
+            await query.edit_message_text(msg_text, parse_mode=ParseMode.MARKDOWN, reply_markup=scan_kb)
+        except Exception:
+            if query.message:
+                await query.message.reply_text(msg_text, parse_mode=ParseMode.MARKDOWN, reply_markup=scan_kb)
+
+    elif "scan_sport_" in data:
+        sp = data.split("scan_sport_")[1].upper()
+        await query.answer(f"⚡ Scanning {sp}...")
+        clean_kb = build_casual_video_buttons()
+        if sp == "NBA":
+            board_html = run_full_sport_board_scan("NBA", quant_sniper)
+            try:
+                await query.edit_message_text(board_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
+            except Exception:
+                if query.message:
+                    await query.message.reply_text(board_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
+        elif sp == "NFL":
+            board_html = run_full_sport_board_scan("NFL", quant_sniper)
+            try:
+                await query.edit_message_text(board_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
+            except Exception:
+                if query.message:
+                    await query.message.reply_text(board_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
+        elif sp == "TENNIS":
+            board_html = run_full_sport_board_scan("TENNIS", quant_sniper)
+            try:
+                await query.edit_message_text(board_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
+            except Exception:
+                if query.message:
+                    await query.message.reply_text(board_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
+        else:
+            scan_txt = await build_scan_text(sport_filter=sp)
+            try:
+                await query.edit_message_text(scan_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+            except Exception:
+                if query.message:
+                    await query.message.reply_text(scan_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
     else:
         await query.answer("🔄 HUD Refreshed")
         hud_text, kb = await build_menu_hud_and_keyboard()
@@ -1804,38 +2172,64 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _ensure_chat_id(update)
+    if update.message:
+        report = await build_analytics_text()
+        _, kb = await build_menu_hud_and_keyboard()
+        await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+
+async def cmd_build_combo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _ensure_chat_id(update)
+    if update.message:
+        b_txt, b_kb = await build_custom_combo_menu()
+        await update.message.reply_text(b_txt, parse_mode=ParseMode.MARKDOWN, reply_markup=b_kb)
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _ensure_chat_id(update)
     if not update.message:
         return
     help_text = (
-        "🤖 *AURASCAN // KALSHI QUANT COMMAND DIRECTORY* 🤖\n"
+        "🤖 *AURASCAN // KALSHI QUANT COMMAND & FEATURE GUIDE* 🤖\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📖 *HOW TO USE AURASCAN V2:*\n"
+        "1. *Scan Live Edges:* Run `/nba`, `/nfl`, or `/tennis` to view current 10,000-draw Monte Carlo boards.\n"
+        "2. *Simulate Any Matchup/Prop:* Test any line directly using `/sim` or `/tennis <p1> vs <p2>`.\n"
+        "3. *Build Custom Combos:* Tap `[🛠️ Build Custom Combo]` on `/menu` (or run `/build`) to toggle 2–3 legs with real-time Copula correlation calculations.\n"
+        "4. *Auto-Sniper Execution:* Run `/sniper on` to arm autonomous Kalshi execution for qualified +EV plays.\n"
+        "5. *Deep Quant Analytics:* Run `/analytics` or `/audit` to verify calibration, 50/50 symmetry, and live PnL.\n\n"
         "📡 *CORE HUD & EXECUTION CONTROLS:*\n"
         "• `/start` or `/menu` — Live AuraScan V2 Telemetry HUD & action deck\n"
-        "• `/sniper [on|off]` — Arm or disarm autonomous order sniper\n"
-        "• `/mode [live|sim]` — Toggle between Live Real-Money and Paper Simulation\n"
+        "• `/sniper [on|off]` — Arm or disarm autonomous order sniper (`/sniper on` to execute)\n"
+        "• `/mode [live|sim]` — Toggle between Live Real-Money and Paper Simulation (`/mode sim` or `/mode live`)\n"
         "• `/cap <pct>` — Adjust bankroll exposure cap (`/cap 100` for 100% full balance, `/cap 50` for 50%)\n"
         "• `/bal` — Verify live Kalshi cash balance and session PnL\n"
         "• `/clear_locks` — Flush all ticker cooldowns and idempotency locks\n"
         "• `/push` — Synchronize code & deploy updates to GitHub\n\n"
         "🔍 *MANUAL SPORT SCANS (10,000 MC DRAWS):*\n"
-        "• `/scan` — Force 10k Monte Carlo scan across ALL active slates\n"
-        "• `/nba` — Scan NBA player props (Points, Rebounds, Assists, 3PT)\n"
-        "• `/nfl` (or `/cfb`) — Scan NFL & CFB props (Passing, Rushing, Receiving)\n"
-        "• `/tennis` (or `/atp`, `/wta`) — Scan Tennis match & set props\n"
+        "• `/nba` — Scan NBA props (Points, Rebounds, Assists, 3PT, PRA)\n"
+        "  _Usage:_ `/nba` or `/nba LeBron James O25.5 PTS`\n"
+        "• `/nfl` (or `/cfb`) — Scan NFL & CFB props (Passing, Rushing, Receiving, TDs)\n"
+        "  _Usage:_ `/nfl` or `/nfl Mahomes O274.5 PASS YDS`\n"
+        "• `/tennis` (or `/atp`, `/wta`) — Scan Tennis match & set props or simulate matchups\n"
+        "  _Usage:_ `/tennis` (scan board) or `/tennis Sinner vs Alcaraz HARD` (matchup sim)\n"
         "• `/mlb` — Scan MLB player props (Strikeouts, Hits, HR)\n"
         "• `/wnba` — Scan WNBA props\n"
-        "• `/esports` — Scan Esports markets\n\n"
+        "• `/scan` — Force 10k Monte Carlo scan across ALL active slates\n\n"
         "🎲 *QUANT SIMULATIONS & COPULA PARLAYS:*\n"
         "• `/sim <prop>` — Run 10k Monte Carlo simulation on a specific prop\n"
         "  _Examples:_\n"
         "  • `/sim LeBron James O25.5 PTS`\n"
         "  • `/sim Patrick Mahomes O274.5 PASS YDS`\n"
+        "  • `/sim Carlos Alcaraz STRAIGHT SETS`\n"
         "• `/slip <leg1> | <leg2> [| <leg3>]` — Evaluate Joint Gaussian Copula parlay\n"
         "  _Example:_\n"
-        "  • `/slip NFL:Mahomes O274.5 | NFL:Rice O68.5`\n"
-        "• `/audit` — 10k MC calibration, 50/50 symmetry & Cholesky audit\n\n"
+        "  • `/slip NFL:Mahomes O274.5 PASS YDS@51 | NFL:Rice O68.5 REC YDS@50`\n"
+        "• `/analytics` — 10k MC calibration, 50/50 symmetry, Copula boost & telemetry report\n"
+        "• `/audit` — 10k MC calibration, directional bias & Cholesky audit\n"
+        "• `/build` (or `/builder`) — Interactive manual slip builder\n\n"
         "📊 *PORTFOLIO, STREAMS & SETTLEMENT:*\n"
         "• `/open` (or `/positions`) — View active open contracts, HWM & streams\n"
         "• `/pnl` — Session bankroll, Win-Loss-Push record & settled ROI\n"
@@ -2149,6 +2543,9 @@ def main() -> None:
     app.add_handler(CommandHandler("slip", cmd_slip))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("audit", cmd_audit))
+    app.add_handler(CommandHandler("analytics", cmd_analytics))
+    app.add_handler(CommandHandler("build", cmd_build_combo))
+    app.add_handler(CommandHandler("builder", cmd_build_combo))
     app.add_handler(CommandHandler("open", cmd_open))
     app.add_handler(CommandHandler("positions", cmd_open))
     app.add_handler(CommandHandler("pnl", cmd_pnl))

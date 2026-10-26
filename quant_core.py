@@ -28,6 +28,20 @@ except ImportError:
     pass
 
 try:
+    from clean_casual_core import (
+        is_real_live_game_contract,
+        format_video_style_single_card,
+        format_video_style_board_scan,
+        format_casual_video_slip,
+        get_active_teams_today,
+    )
+except ImportError:
+    is_real_live_game_contract = None  # type: ignore
+    format_video_style_single_card = None  # type: ignore
+    format_video_style_board_scan = None  # type: ignore
+    format_casual_video_slip = None  # type: ignore
+
+try:
     from vine_copula import simulate_multi_leg_parlay
 except ImportError:
     simulate_multi_leg_parlay = None  # type: ignore
@@ -807,10 +821,11 @@ class KalshiUnifiedSniper:
                                 m_title = (m.get("title") or ev_title).upper()
                                 m_sub = (m.get("subtitle") or "").upper()
                                 m_tkr = (m.get("ticker") or "").upper()
-                                # Drop politics, entertainment, and macro novelty markets from sports prop scans
+                                # Strict sports whitelist & anti-novelty filter (purges Blanchett, Luminate, etc.)
+                                if is_real_live_game_contract and not is_real_live_game_contract(m):
+                                    continue
                                 if any(exc in m_cat or exc in m_title or exc in m_sub or exc in m_tkr for exc in EXCLUDED_CATEGORIES):
                                     continue
-                                # Strictly validate hoops stats to purge retirement, headliner, and novelty lines
                                 if sport_u == "NBA" and not is_valid_hoops_market(m):
                                     continue
                                 tkr = m.get("ticker", "")
@@ -920,6 +935,8 @@ def _meter_bar(prob_pct: float, length: int = 10) -> str:
 
 
 def format_revamped_sim_card(sim: Dict[str, Any], exec_res: Dict[str, Any]) -> str:
+    if format_video_style_single_card:
+        return format_video_style_single_card(sim, exec_res)
     bar = _meter_bar(sim["true_prob"])
     c = sim["combo"]
     return (
@@ -930,11 +947,6 @@ def format_revamped_sim_card(sim: Dict[str, Any], exec_res: Dict[str, Any]) -> s
         f"🧬 <b>Archetype:</b> <code>{sim['arch']}</code>\n"
         f"🛡 <b>Matchup:</b> <code>vs. {sim['scheme']} ({sim['scheme_pct']:+.1f}%)</code>\n"
         f"🧠 <b>Coach Sim:</b> <i>{sim['coach_note']}</i>\n\n"
-        f"<pre>"
-        f"10K MONTE CARLO ({sim['family']})\n"
-        f"10% Flr   50% Med   90% Ceil   Mean±SD\n"
-        f" {sim['p10']:<9} {sim['p50']:<9} {sim['p90']:<9} {sim['mean']}±{sim['std']}"
-        f"</pre>\n"
         f"📊 <b>Edge:</b> <code>{bar}</code> <b>{sim['true_prob']}%</b>\n"
         f"🔥 <b>True EV Edge:</b> <code>+{sim['ev_edge']}%</code> (vs 50.0% Book)\n\n"
         f"🔗 <b>COPULA AUTO-COMBO (ρ = +{c['rho']:.2f})</b>\n"
@@ -994,6 +1006,9 @@ def get_active_teams_today(sport: str = "NBA") -> Set[str]:
     return active_teams
 
 
+_RECENT_SCAN_ROTATION_CACHE: Dict[str, float] = {}
+
+
 def run_full_sport_board_scan(
     sport: str,
     sniper: KalshiUnifiedSniper,
@@ -1049,15 +1064,47 @@ def run_full_sport_board_scan(
         )
 
     sims = []
+    now = time.time()
     for pk in board_players:
-        default_stat = "PTS" if sport_u == "NBA" else "REC_YDS"
-        s = simulate_prop_and_combo(sport_u, pk, default_stat)
-        if s["ev_edge"] > 0:
-            sims.append(s)
+        prof = PLAYER_REGISTRY.get(pk, {})
+        base_stats = list(prof.get("base", {}).keys())
+        if not base_stats:
+            base_stats = ["PTS", "REB", "AST", "3PM", "PRA"] if sport_u == "NBA" else ["REC_YDS", "PASS_YDS", "RUSH_YDS", "TD"]
 
-    sims.sort(key=lambda x: x["ev_edge"], reverse=True)
-    top_plays = sims[:4]
+        for st in base_stats:
+            s = simulate_prop_and_combo(sport_u, pk, st)
+            if s["ev_edge"] > 0:
+                cache_key = f"{pk}_{st}"
+                last_shown = _RECENT_SCAN_ROTATION_CACHE.get(cache_key, 0.0)
+                # Elite edges (>= 5.5% EV) always stay top priority
+                # For standard edges (< 5.5% EV), apply rotation decay if shown in last 180s so props rotate
+                is_monster_edge = s["ev_edge"] >= 5.5
+                time_since = now - last_shown
+                recency_penalty = 0.0
+                if not is_monster_edge and time_since < 180.0:
+                    recency_penalty = (180.0 - time_since) * 0.03
+
+                sort_score = s["ev_edge"] - recency_penalty
+                sims.append((sort_score, is_monster_edge, cache_key, s))
+
+    # Sort monster edges first, then highest adjusted rotation score
+    sims.sort(key=lambda x: (x[1], x[0]), reverse=True)
+
+    seen_players = set()
+    top_plays = []
+    for _, _, ckey, s in sims:
+        p_name = s["player"]
+        if p_name not in seen_players or len(top_plays) < 2:
+            seen_players.add(p_name)
+            top_plays.append(s)
+            _RECENT_SCAN_ROTATION_CACHE[ckey] = now
+            if len(top_plays) >= 4:
+                break
     live_kalshi_count = len(sniper.fetch_live_kalshi_markets(sport_u))
+
+    exec_res = sniper.resolve_and_snipe(top_plays[0], bankroll=bankroll) if top_plays else {}
+    if format_video_style_board_scan:
+        return format_video_style_board_scan(sport_u, top_plays, exec_res, bankroll=bankroll)
 
     lines = [
         f"📡 <b>PEZZY LIVE BOARD SCAN  •  {sport_u}</b>",
@@ -1077,12 +1124,10 @@ def run_full_sport_board_scan(
 
     # Auto-snipe the #1 highest EV play on the board
     if top_plays:
-        best = top_plays[0]
-        exec_res = sniper.resolve_and_snipe(best, bankroll=bankroll)
         lines.append(
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🎯 <b>TOP AUTO-SNIPE EXECUTION:</b>\n"
-            f"• Play: <code>{best['player']} {best['side']} {best['line']} {best['stat']}</code>\n"
+            f"• Play: <code>{top_plays[0]['player']} {top_plays[0]['side']} {top_plays[0]['line']} {top_plays[0]['stat']}</code>\n"
             f"• Status: <b>{exec_res['status']}</b> (<code>{exec_res['ticker']}</code>)\n"
             f"• Sizing: <code>{exec_res['contracts']}x @ {exec_res['limit_cents']}¢</code> — <i>{exec_res['note']}</i>"
         )
