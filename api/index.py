@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -72,18 +73,26 @@ class handler(BaseHTTPRequestHandler):
 
         if path in ("/api/state", "/api/live-wire", "/api/live", "/api/scores"):
             stats = get_bot_stats()
+            now = time.time()
+            last_t_ts = _WEB_CACHE.get("telemetry_ts", 0.0)
+            if (now - last_t_ts >= 10.0) or not _WEB_CACHE.get("telemetry"):
+                try:
+                    t_map = _run_coro(fetch_all_telemetry())
+                    all_games = []
+                    for sp, g_list in t_map.items():
+                        for g in g_list:
+                            all_games.append(g.to_dict())
+                    _WEB_CACHE["telemetry"] = all_games
+                    _WEB_CACHE["telemetry_ts"] = now
+                except Exception:
+                    pass
+
             if not _WEB_CACHE["props"]:
                 legs = _run_coro(scan_markets_with_telemetry())
                 _WEB_CACHE["props"] = legs
                 _WEB_CACHE["slips"] = build_optimal_parlays(
                     legs, min_legs=2, max_legs=3, bankroll=stats["sim_cash"]
                 )[:4]
-                t_map = _run_coro(fetch_all_telemetry())
-                _WEB_CACHE["telemetry"] = [
-                    {"sport": sp, "badge": g_list[0].format_badge()}
-                    for sp, g_list in t_map.items()
-                    if g_list
-                ]
             return self._send_json(
                 {
                     "ok": True,

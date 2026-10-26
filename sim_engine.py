@@ -1,11 +1,12 @@
 import math
 import random
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from config import MC_ITERATIONS
 from telemetry import GameTelemetry
+from sport_coaching_router import SportCoachingRouter
 
 try:
     import numpy as np
@@ -36,6 +37,7 @@ class PropSimResult:
     p90: float
     convergence_err: float
     telemetry_badge: str
+    coaching_notes: List[str] = field(default_factory=list)
 
 
 # =========================================================
@@ -1102,12 +1104,13 @@ def simulate_prop_leg(
     telemetry: Optional[GameTelemetry] = None,
     iterations: int = MC_ITERATIONS,
     prior_edge_boost: float = 0.0,
+    live_context: Optional[Dict[str, Any]] = None,
 ) -> PropSimResult:
     """
     Run a 10,000-iteration sport-specific & archetype-aware Monte Carlo simulation
-    conditioned on live ESPN game telemetry.
+    conditioned on live ESPN game telemetry and sport-specific coaching adjustments.
     """
-    _, eff_line = resolve_sport_stat_line(sport, player_prop, player_prop, line)
+    norm_stat, eff_line = resolve_sport_stat_line(sport, player_prop, player_prop, line)
     dist_family = classify_stat_distribution(sport, player_prop, eff_line)
     archetype, arch_cfg = classify_player_archetype(sport, player_prop, eff_line)
     sim_method = str(arch_cfg.get("sim_method", "Parametric Monte Carlo"))
@@ -1175,6 +1178,19 @@ def simulate_prop_leg(
         base_mean = max(0.3, eff_line + z_shift * std_est)
         expected_mean = max(0.3, base_mean * (0.75 + 0.25 * min(1.15, max(0.92, telem_factor))))
 
+    # Apply sport-specific in-game coaching tactical brain (NBA pace/foul, NFL script, MLB TTOP, NHL 6-on-5)
+    coaching_res = SportCoachingRouter.apply_sport_tactics(
+        sport=sport,
+        stat_type=norm_stat,
+        baseline_mean=expected_mean,
+        telemetry=telemetry,
+        live_context=live_context,
+        archetype=archetype,
+        player_name=player_prop,
+    )
+    expected_mean = coaching_res["adjusted_mean"]
+    coaching_notes = coaching_res.get("coaching_notes", [])
+
     samples_list = _draw_sport_archetype_samples(
         sport=sport,
         archetype=archetype,
@@ -1229,6 +1245,7 @@ def simulate_prop_leg(
         p90=round(p90, 2),
         convergence_err=round(convergence_err, 5),
         telemetry_badge=badge,
+        coaching_notes=coaching_notes,
     )
 
 

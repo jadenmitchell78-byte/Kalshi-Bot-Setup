@@ -51,9 +51,9 @@ SPORT_TO_STREAMED_CAT = {
 
 async def fetch_on_demand_stream(sport: str, query: str = "") -> Dict[str, Any]:
     """
-    Phase 3 On-Demand Stream Resolver (streamed.su / streamed.st / streamed.pk):
-    Fetches live match streams ONLY when a user clicks 'Watch Live' on a specific match/slip,
-    preventing global page lag and keeping video state isolated from live-wire odds polling.
+    Phase 3 Multi-Slot On-Demand Stream Resolver:
+    Queries multiple mirror endpoints and sources (Alpha, Delta, Bravo, Charlie)
+    to assemble multiple working stream slots, eliminating network errors and manifest parsing failures.
     """
     cat = SPORT_TO_STREAMED_CAT.get(sport.upper(), "basketball")
     cache_key = f"{cat}:{query.upper().strip()}"
@@ -61,7 +61,7 @@ async def fetch_on_demand_stream(sport: str, query: str = "") -> Dict[str, Any]:
     if cached:
         return cached
 
-    q_tokens = [t.lower() for t in query.replace("—", " ").split() if len(t) >= 3]
+    q_tokens = [t.lower() for t in query.replace("—", " ").replace("vs", " ").replace("@", " ").split() if len(t) >= 3]
 
     for base_url in STREAMED_MIRRORS:
         matches_url = f"{base_url}/matches/{cat}"
@@ -84,60 +84,87 @@ async def fetch_on_demand_stream(sport: str, query: str = "") -> Dict[str, Any]:
 
                     if chosen:
                         sources = chosen.get("sources") or []
-                        if sources:
-                            src_name = sources[0].get("source")
-                            src_id = sources[0].get("id")
-                            stream_url = f"{base_url}/stream/{src_name}/{src_id}"
-                            async with session.get(
-                                stream_url, timeout=aiohttp.ClientTimeout(total=4)
-                            ) as s_resp:
-                                if s_resp.status == 200:
-                                    streams = await s_resp.json()
-                                    if streams and isinstance(streams, list):
-                                        valid_streams = [
-                                            {
-                                                "source": src_name,
-                                                "hd": bool(st.get("hd", True)),
-                                                "language": st.get("language", "EN"),
-                                                "embed_url": st.get("embedUrl"),
-                                            }
-                                            for st in streams
-                                            if st.get("embedUrl")
-                                        ]
-                                        chosen_st = valid_streams[0] if valid_streams else None
-                                        if src_name == "delta" and len(valid_streams) > 1:
-                                            chosen_st = valid_streams[1]
+                        collected_slots = []
+                        primary_embed = ""
+                        primary_source = "alpha"
 
-                                        if chosen_st and chosen_st.get("embed_url"):
-                                            result = {
-                                                "ok": True,
-                                                "title": chosen.get("title", query or sport),
-                                                "sport": sport,
-                                                "source": src_name,
-                                                "embed_url": chosen_st["embed_url"],
-                                                "streams": valid_streams[:6],
-                                            }
-                                            _WEB_CACHE["streams_cache"][cache_key] = result
-                                            return result
+                        # Query up to 3 distinct stream sources for robust multi-slot failover
+                        for src in sources[:3]:
+                            src_name = src.get("source", "stream")
+                            src_id = src.get("id")
+                            if not src_id:
+                                continue
+                            try:
+                                stream_url = f"{base_url}/stream/{src_name}/{src_id}"
+                                async with session.get(
+                                    stream_url, timeout=aiohttp.ClientTimeout(total=3.5)
+                                ) as s_resp:
+                                    if s_resp.status == 200:
+                                        s_data = await s_resp.json()
+                                        if isinstance(s_data, list):
+                                            for st_idx, st in enumerate(s_data):
+                                                e_url = st.get("embedUrl")
+                                                if e_url:
+                                                    slot_num = len(collected_slots) + 1
+                                                    is_hls = ".m3u8" in e_url.lower()
+                                                    slot_info = {
+                                                        "slot": slot_num,
+                                                        "name": f"Slot {slot_num}: {src_name.upper()} #{st_idx+1}",
+                                                        "source": src_name,
+                                                        "hd": bool(st.get("hd", True)),
+                                                        "language": st.get("language", "EN"),
+                                                        "embed_url": e_url,
+                                                        "is_hls": is_hls,
+                                                    }
+                                                    collected_slots.append(slot_info)
+                                                    if not primary_embed:
+                                                        primary_embed = e_url
+                                                        primary_source = src_name
+                            except Exception:
+                                continue
+
+                        if collected_slots:
+                            # Add direct fallback slot
+                            fallback_watch = f"https://streamed.su/watch/{cat}"
+                            collected_slots.append({
+                                "slot": len(collected_slots) + 1,
+                                "name": f"Slot {len(collected_slots) + 1}: Direct Portal",
+                                "source": "direct",
+                                "hd": True,
+                                "language": "EN",
+                                "embed_url": fallback_watch,
+                                "is_hls": False,
+                            })
+
+                            result = {
+                                "ok": True,
+                                "title": chosen.get("title", query or f"{sport} Live"),
+                                "sport": sport,
+                                "source": primary_source,
+                                "embed_url": primary_embed or fallback_watch,
+                                "streams": collected_slots,
+                                "slots": collected_slots,
+                            }
+                            _WEB_CACHE["streams_cache"][cache_key] = result
+                            return result
         except Exception as exc:
-            logger.debug("Mirror %s lookup fallback for %s (%s): %s", base_url, sport, query, exc)
+            logger.debug("Mirror %s lookup fallback for %s: %s", base_url, sport, exc)
             continue
 
     fallback_embed = f"https://streamed.su/watch/{cat}"
+    fallback_slots = [
+        {"slot": 1, "name": "Slot 1: Main Feed HD", "source": "main", "hd": True, "embed_url": fallback_embed, "is_hls": False},
+        {"slot": 2, "name": "Slot 2: Mirror Portal", "source": "mirror", "hd": True, "embed_url": f"https://streamed.pk/watch/{cat}", "is_hls": False},
+        {"slot": 3, "name": "Slot 3: Backup ST", "source": "backup", "hd": True, "embed_url": f"https://streamed.st/watch/{cat}", "is_hls": False},
+    ]
     return {
         "ok": True,
-        "title": f"{sport} Live Feed • {query or 'Main Broadcast'}",
+        "title": f"{sport} Live Match • {query or 'Featured Board'}",
         "sport": sport,
-        "source": "streamed.pk",
+        "source": "multi-slot",
         "embed_url": fallback_embed,
-        "streams": [
-            {
-                "source": "alpha-hd",
-                "hd": True,
-                "language": "EN",
-                "embed_url": fallback_embed,
-            }
-        ],
+        "streams": fallback_slots,
+        "slots": fallback_slots,
     }
 
 
@@ -184,23 +211,34 @@ def create_web_app(
 
     async def handle_state(request: web.Request) -> web.Response:
         stats = get_bot_stats()
+        now = time.time()
+        last_t_ts = _WEB_CACHE.get("telemetry_ts", 0.0)
+
+        # Continually poll live ESPN scoreboards and telemetry every 10 seconds
+        if (now - last_t_ts >= 10.0) or not _WEB_CACHE.get("telemetry"):
+            try:
+                t_map = await fetch_all_telemetry()
+                all_games = []
+                for sp, g_list in t_map.items():
+                    for g in g_list:
+                        all_games.append(g.to_dict())
+                _WEB_CACHE["telemetry"] = all_games
+                _WEB_CACHE["telemetry_ts"] = now
+            except Exception as t_err:
+                logger.debug("Live scores polling notice: %s", t_err)
+
         if not _WEB_CACHE["props"]:
             legs = await scan_fn()
             _WEB_CACHE["props"] = legs
             _WEB_CACHE["slips"] = build_optimal_parlays(
                 legs, min_legs=2, max_legs=3, bankroll=stats["sim_cash"]
             )[:4]
-            t_map = await fetch_all_telemetry()
-            _WEB_CACHE["telemetry"] = [
-                {"sport": sp, "badge": g_list[0].format_badge()}
-                for sp, g_list in t_map.items()
-                if g_list
-            ]
 
         return web.json_response(
             {
                 "stats": stats,
                 "telemetry": _WEB_CACHE["telemetry"],
+                "games": _WEB_CACHE["telemetry"],
                 "props": [l.to_dict() for l in _WEB_CACHE["props"][:16]],
                 "slips": [serialize_slip(s) for s in _WEB_CACHE["slips"][:4]],
                 "open_slips": fetch_pending_parlays(),

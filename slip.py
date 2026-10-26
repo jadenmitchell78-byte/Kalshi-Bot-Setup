@@ -194,6 +194,7 @@ class SlipLeg:
     player_name: str = ""
     stat_type: str = ""
     created_ts: float = field(default_factory=time.time)
+    coaching_notes: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.market_url:

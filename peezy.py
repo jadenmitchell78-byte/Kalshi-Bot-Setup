@@ -83,8 +83,17 @@ from slip import (
 )
 from telemetry import fetch_all_telemetry
 from smart_placer import KalshiSmartPlacer
+from unified_kalshi_engine import unified_engine, FUTURES_SERIES_PREFIXES
+from quant_core import (
+    parse_user_query,
+    simulate_prop_and_combo,
+    format_revamped_sim_card,
+    run_full_sport_board_scan,
+    quant_sniper,
+)
 
 smart_placer = KalshiSmartPlacer(auth_header_fn=build_kalshi_auth_headers)
+unified_engine.auth_header_fn = build_kalshi_auth_headers
 
 logging.basicConfig(
     level=logging.INFO,
@@ -631,15 +640,17 @@ async def scan_markets_with_telemetry(sport_filter: Optional[str] = None) -> Lis
             except Exception:
                 break
 
-    # 5. Filter out banned prefixes, cups, and futures
+    # 5. Filter out banned prefixes, cups, while allowing macro futures (KXLEBRON, KXBASKETBALL, etc.)
     clean_raw_markets = []
     for m in raw_markets:
         tkr = str(m.get("ticker") or "").upper()
         tit = str(m.get("title") or "").upper()
         sub = str(m.get("subtitle") or "").upper()
         blob = f"{tkr} {tit} {sub}"
-        if any(b in tkr for b in BANNED_PREFIXES) or any(tok in blob for tok in FUTURES_OR_CUP_TOKENS):
-            continue
+        is_allowed_macro = any(pfx in tkr for pfx in FUTURES_SERIES_PREFIXES)
+        if not is_allowed_macro:
+            if any(b in tkr for b in BANNED_PREFIXES) or any(tok in blob for tok in FUTURES_OR_CUP_TOKENS):
+                continue
         clean_raw_markets.append(m)
     raw_markets = clean_raw_markets
 
@@ -828,6 +839,7 @@ async def build_menu_hud_and_keyboard() -> tuple[str, InlineKeyboardMarkup]:
         f"📺 *Active Bet Streams:* {stream_links_ready} Live Link{'s' if stream_links_ready != 1 else ''} Ready"
     )
 
+    webapp_url = os.getenv("PEEZY_WEBAPP_URL", "https://peezt-tv.vercel.app")
     keyboard = InlineKeyboardMarkup(
         [
             [
@@ -835,8 +847,15 @@ async def build_menu_hud_and_keyboard() -> tuple[str, InlineKeyboardMarkup]:
                 InlineKeyboardButton("⚡ Force Scan", callback_data="menu_force_scan"),
             ],
             [
+                InlineKeyboardButton("🔍 Scan by Sport", callback_data="menu_scan_options"),
+                InlineKeyboardButton("🛠️ Build Custom Combo", callback_data="menu_build_combo"),
+            ],
+            [
                 InlineKeyboardButton("📊 Status & Exposure", callback_data="menu_status"),
                 InlineKeyboardButton("📋 Open Positions", callback_data="menu_open_positions"),
+            ],
+            [
+                InlineKeyboardButton("📱 Open Analytics App", web_app={"url": webapp_url}),
             ],
             [
                 InlineKeyboardButton("🔓 Flush Locks", callback_data="menu_flush_locks"),
@@ -1436,24 +1455,44 @@ async def cmd_nba(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _ensure_chat_id(update)
     if not update.message:
         return
-    if context.args:
-        q = f"NBA:{' '.join(context.args)}"
-        report = await build_sim_text(q)
-        await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN)
+    full_cmd = f"/nba {' '.join(context.args)}" if context.args else "/nba"
+    parsed = parse_user_query(full_cmd)
+    _, kb = await build_menu_hud_and_keyboard()
+    if parsed["mode"] == "SCAN":
+        board_html = run_full_sport_board_scan("NBA", quant_sniper)
+        await update.message.reply_text(board_html, parse_mode=ParseMode.HTML, reply_markup=kb)
     else:
-        await cmd_scan(update, context, sport_filter="NBA")
+        sim_data = simulate_prop_and_combo(
+            sport="NBA",
+            player_key=parsed["player_key"],
+            stat=parsed["stat"],
+            line=parsed["line"],
+        )
+        exec_res = quant_sniper.resolve_and_snipe(sim_data)
+        card_html = format_revamped_sim_card(sim_data, exec_res)
+        await update.message.reply_text(card_html, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
 async def cmd_nfl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _ensure_chat_id(update)
     if not update.message:
         return
-    if context.args:
-        q = f"NFL:{' '.join(context.args)}"
-        report = await build_sim_text(q)
-        await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN)
+    full_cmd = f"/nfl {' '.join(context.args)}" if context.args else "/nfl"
+    parsed = parse_user_query(full_cmd)
+    _, kb = await build_menu_hud_and_keyboard()
+    if parsed["mode"] == "SCAN":
+        board_html = run_full_sport_board_scan("NFL", quant_sniper)
+        await update.message.reply_text(board_html, parse_mode=ParseMode.HTML, reply_markup=kb)
     else:
-        await cmd_scan(update, context, sport_filter="NFL")
+        sim_data = simulate_prop_and_combo(
+            sport="NFL",
+            player_key=parsed["player_key"],
+            stat=parsed["stat"],
+            line=parsed["line"],
+        )
+        exec_res = quant_sniper.resolve_and_snipe(sim_data)
+        card_html = format_revamped_sim_card(sim_data, exec_res)
+        await update.message.reply_text(card_html, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, sport_filter: Optional[str] = None) -> None:
@@ -1484,23 +1523,44 @@ async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     pending = fetch_pending_parlays()
     rt = get_runtime_state()
 
-    if not pending:
+    # Query live exchange portfolio positions
+    headers = build_kalshi_auth_headers("GET", "https://api.elections.kalshi.com/trade-api/v2/portfolio/positions")
+    kalshi_positions = unified_engine.get_portfolio_positions(headers)
+
+    lines = []
+    if kalshi_positions:
+        lines.append("🏛️ *ACTUAL KALSHI EXCHANGE HOLDINGS (Macro & Sports):*")
+        lines.append("━━━━━━━━━━━━━━━━━━━━")
+        for p in kalshi_positions[:8]:
+            ticker = p.get("ticker", "UNKNOWN")
+            pos_val = p.get("position", 0)
+            side_str = "YES" if pos_val > 0 else "NO"
+            count = abs(pos_val)
+            market_val = (p.get("market_value", 0) or 0) / 100.0
+            lines.append(
+                f"• `{ticker}`\n"
+                f"  Side: `{side_str} ({count} contracts)` | Market Value: `${market_val:.2f}`\n"
+            )
+        lines.append("━━━━━━━━━━━━━━━━━━━━\n")
+
+    if pending:
+        blocks = [format_db_slip_summary(s) for s in pending[:8]]
+        header = (
+            f"📂 *ACTIVE PARLAY SLIPS ({len(pending)} Open)*\n"
+            f"🏦 *Sim Cash:* `${rt['sim_cash']:.2f}` | *Mode:* `{rt['mode']}`\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+        )
+        lines.append(header + "\n\n".join(blocks))
+
+    if not lines:
         await update.message.reply_text(
-            f"📭 *No open slips in `picks.db`* (Sim Cash: `${rt['sim_cash']:.2f}`).\n"
+            f"📭 *No open positions or slips found* (Sim Cash: `${rt['sim_cash']:.2f}`).\n"
             "Use `/scan`, `/slip`, or `/auto on` to log new Copula parlays!",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
 
-    blocks = [format_db_slip_summary(s) for s in pending[:8]]
-    header = (
-        f"📂 *ACTIVE PARLAY SLIPS ({len(pending)} Open)*\n"
-        f"🏦 *Sim Cash:* `${rt['sim_cash']:.2f}` | *Mode:* `{rt['mode']}`\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-    )
-    await update.message.reply_text(
-        header + "\n\n".join(blocks), parse_mode=ParseMode.MARKDOWN
-    )
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
 async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

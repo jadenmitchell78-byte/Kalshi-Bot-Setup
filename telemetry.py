@@ -97,6 +97,31 @@ class GameTelemetry:
             f"[{status_str} | Pace {self.pace_multiplier:.2f}x]"
         )
 
+    def to_dict(self) -> Dict[str, Any]:
+        status_str = (
+            f"Q{self.period} {self.display_clock}"
+            if self.is_live
+            else ("FINAL" if self.is_final else "PRE-GAME")
+        )
+        return {
+            "event_id": self.event_id,
+            "sport": self.sport,
+            "matchup": self.matchup,
+            "home_team": self.home_team,
+            "away_team": self.away_team,
+            "home_score": self.home_score,
+            "away_score": self.away_score,
+            "period": self.period,
+            "display_clock": self.display_clock,
+            "status_label": status_str,
+            "is_live": self.is_live,
+            "is_final": self.is_final,
+            "pace_multiplier": round(self.pace_multiplier, 2),
+            "usage_boost": round(self.usage_boost, 2),
+            "score_diff": self.score_diff,
+            "badge": self.format_badge(),
+        }
+
 
 def _estimate_remaining_fraction(sport: str, period: int, clock_str: str, state: str) -> float:
     """Estimate fraction of regulation game remaining (0.0 to 1.0) from ESPN period & clock."""

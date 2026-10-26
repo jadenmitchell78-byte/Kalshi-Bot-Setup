@@ -243,61 +243,39 @@ async def place_kalshi_order(
         }
 
     is_yes = side.upper() in ("YES", "OVER", "O")
-    v2_side = "bid" if is_yes else "ask"
-    price_dollars = (price_cents / 100.0) if is_yes else ((100 - price_cents) / 100.0)
-    price_str = f"{price_dollars:.4f}"
     client_oid = str(uuid.uuid4())
+    url = f"{KALSHI_BASE_URL}/portfolio/orders"
+    payload = {
+        "ticker": ticker,
+        "action": action.lower(),
+        "type": "limit",
+        "side": "yes" if is_yes else "no",
+        "count": max(1, int(count)),
+        ("yes_price" if is_yes else "no_price"): int(price_cents if is_yes else (100 - price_cents)),
+        "client_order_id": client_oid,
+    }
 
-    attempts = [
-        (
-            f"{KALSHI_BASE_URL}/portfolio/orders",
-            {
-                "ticker": ticker,
-                "action": action.lower(),
-                "type": "limit",
-                "side": "yes" if is_yes else "no",
-                "count": max(1, int(count)),
-                "yes_price": price_cents if is_yes else (100 - price_cents),
-                "client_order_id": client_oid,
-            },
-        ),
-        (
-            f"{KALSHI_BASE_URL}/portfolio/orders",
-            {
-                "ticker": ticker,
-                "action": action.lower(),
-                "type": "limit",
-                "side": "yes" if is_yes else "no",
-                "count": max(1, int(count)),
-                "price": price_cents if is_yes else (100 - price_cents),
-                "client_order_id": client_oid,
-            },
-        ),
-        (
-            f"{KALSHI_BASE_URL}/portfolio/events/orders",
-            {
-                "ticker": ticker,
-                "side": v2_side,
-                "type": "limit",
-                "count": str(max(1, int(count))),
-                "price": price_str,
-                "time_in_force": "good_till_canceled",
-                "client_order_id": client_oid,
-                "self_trade_prevention_type": "taker_at_cross",
-            },
-        ),
-    ]
-
-    for url, payload in attempts:
-        headers = build_kalshi_auth_headers("POST", url)
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url,
-                    headers=headers,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=8),
-                ) as resp:
+    headers = build_kalshi_auth_headers("POST", url)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as resp:
+                data = await resp.json() if resp.content_type == "application/json" else {}
+                if resp.status in (200, 201):
+                    order_obj = data.get("order", {}) or data.get("event_order", {})
+                    oid = order_obj.get("order_id") or client_oid
+                    logger.info("[LIVE-ORDER-FILL] %s %dx %s @ %dc | OID: %s", ticker, count, side.upper(), price_cents, oid)
+                    return {"ok": True, "order_id": oid, "data": data}
+                err_msg = str(data.get("error", {}).get("message") or data or await resp.text())
+                logger.warning("[LIVE-ORDER-REJECT] %s: HTTP %d - %s", ticker, resp.status, err_msg)
+                return {"ok": False, "msg": err_msg, "code": resp.status}
+    except Exception as exc:
+        logger.error("[LIVE-ORDER-EXC] %s: %s", ticker, exc)
+        return {"ok": False, "msg": str(exc)}
                     data = await resp.json()
                     if resp.status in (200, 201):
                         order_obj = data.get("order") or data.get("event_order") or {}

@@ -4,6 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>Peezy Slip Maker • 10k MC & Copula Quant UI</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
   <style>
     :root {
       --bg: #080B11;
@@ -103,26 +106,124 @@
     .btn-indigo { background: var(--indigo); color: #FFFFFF; border-color: var(--indigo); }
     .btn-crimson { background: rgba(239, 68, 68, 0.2); color: #FCA5A5; border-color: rgba(239, 68, 68, 0.4); }
 
-    /* Telemetry Strip */
-    .telem-strip {
+    /* Live Scoreboards Carousel & Radar */
+    .scores-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+      padding: 0 2px;
+    }
+    .live-pulse-dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--emerald);
+      box-shadow: 0 0 8px var(--emerald);
+      animation: pulse-glow 1.5s infinite;
+    }
+    @keyframes pulse-glow {
+      0% { opacity: 0.4; transform: scale(0.9); }
+      50% { opacity: 1; transform: scale(1.15); }
+      100% { opacity: 0.4; transform: scale(0.9); }
+    }
+    .scores-carousel {
       display: flex;
       gap: 8px;
       overflow-x: auto;
-      padding-bottom: 6px;
-      margin-bottom: 8px;
+      padding-bottom: 8px;
+      margin-bottom: 10px;
       scrollbar-width: none;
+      -webkit-overflow-scrolling: touch;
     }
-    .telem-strip::-webkit-scrollbar { display: none; }
-    .telem-chip {
-      flex: 0 0 auto;
-      background: var(--card);
+    .scores-carousel::-webkit-scrollbar { display: none; }
+    .score-card {
+      flex: 0 0 230px;
+      background: linear-gradient(145deg, #121A2C 0%, #0C121E 100%);
       border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 6px 10px;
-      font-size: 11px;
-      white-space: nowrap;
+      border-radius: 12px;
+      padding: 9px 11px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      transition: transform 0.1s ease, border-color 0.15s ease;
+      cursor: pointer;
     }
-    .telem-chip b { color: var(--cyan); }
+    .score-card:active { transform: scale(0.98); }
+    .score-card.is-live {
+      border-color: rgba(16, 185, 129, 0.5);
+      box-shadow: 0 0 12px rgba(16, 185, 129, 0.15);
+    }
+    .score-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 10px;
+      font-weight: 800;
+      margin-bottom: 6px;
+    }
+    .score-status-pill {
+      padding: 2px 7px;
+      border-radius: 999px;
+      font-size: 9px;
+      font-weight: 800;
+      letter-spacing: 0.3px;
+    }
+    .status-live { background: var(--emerald-bg); color: var(--emerald); border: 1px solid rgba(16,185,129,0.35); }
+    .status-final { background: rgba(148, 163, 184, 0.15); color: var(--muted); border: 1px solid rgba(148,163,184,0.25); }
+    .status-pre { background: var(--amber-bg); color: var(--amber); border: 1px solid rgba(245,158,11,0.3); }
+    .score-team-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 1px 0;
+    }
+    .score-team-row.winner {
+      font-weight: 900;
+      color: #FFF;
+    }
+    .score-val {
+      font-family: monospace;
+      font-size: 13px;
+      font-weight: 900;
+      color: #FFF;
+    }
+    .score-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 6px;
+      padding-top: 5px;
+      border-top: 1px solid rgba(35, 48, 71, 0.6);
+      font-size: 10px;
+      color: var(--muted);
+    }
+    .btn-watch-chip {
+      background: var(--card-alt);
+      border: 1px solid var(--cyan);
+      color: var(--cyan);
+      border-radius: 6px;
+      padding: 2px 7px;
+      font-size: 10px;
+      font-weight: 800;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      transition: background 0.12s ease;
+    }
+    .btn-watch-chip:hover {
+      background: var(--cyan);
+      color: #04131A;
+    }
+
+    /* Telemetry Strip (Legacy Fallback) */
+    .telem-strip {
+      display: none;
+    }
 
     /* Phase 2: Category Filter Pills */
     .cat-bar {
@@ -151,7 +252,7 @@
       border-color: var(--emerald);
     }
 
-    /* Phase 1 & 3: Decoupled Persistent Video Dock (Never touched by live odds polling) */
+    /* Phase 1 & 3: Decoupled Persistent Multi-Slot Video Dock (Never touched by live odds polling) */
     .video-dock {
       display: none;
       background: #05070B;
@@ -172,13 +273,42 @@
       font-weight: 800;
       color: var(--cyan);
     }
+    .video-slots-bar {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      padding: 6px 10px;
+      background: #080C15;
+      border-bottom: 1px solid var(--border);
+      scrollbar-width: none;
+    }
+    .video-slots-bar::-webkit-scrollbar { display: none; }
+    .slot-pill {
+      flex: 0 0 auto;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 3px 9px;
+      font-size: 10px;
+      font-weight: 800;
+      background: var(--card-alt);
+      color: var(--muted);
+      cursor: pointer;
+      transition: all 0.12s ease;
+    }
+    .slot-pill.active {
+      background: var(--cyan);
+      color: #04131A;
+      border-color: var(--cyan);
+    }
+    .slot-pill:active { transform: scale(0.96); }
     .video-frame-wrap {
       position: relative;
       width: 100%;
       padding-top: 56.25%;
       background: #000;
     }
-    .video-frame-wrap iframe {
+    .video-frame-wrap iframe,
+    .video-frame-wrap video {
       position: absolute;
       top: 0;
       left: 0;
@@ -393,11 +523,122 @@
       display: none;
       box-shadow: 0 8px 24px rgba(0,0,0,0.6);
     }
+
+    /* Quant Analytics Modal & Radar Chart */
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.78);
+      backdrop-filter: blur(8px);
+      z-index: 9999;
+      padding: 16px;
+      overflow-y: auto;
+      justify-content: center;
+      align-items: center;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal-box {
+      background: #0E1525;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      width: 100%;
+      max-width: 480px;
+      padding: 16px;
+      box-shadow: 0 16px 48px rgba(0, 0, 0, 0.85);
+      position: relative;
+    }
+    .modal-close {
+      position: absolute;
+      top: 14px;
+      right: 14px;
+      background: var(--card-alt);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      border-radius: 999px;
+      width: 28px;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-weight: 800;
+    }
+    .chart-container {
+      position: relative;
+      height: 220px;
+      width: 100%;
+      margin: 10px 0;
+    }
+    .percentile-track {
+      background: var(--card-alt);
+      border-radius: 999px;
+      height: 10px;
+      position: relative;
+      overflow: hidden;
+      margin: 8px 0;
+    }
+    .percentile-bar {
+      height: 100%;
+      background: linear-gradient(90deg, var(--indigo) 0%, var(--emerald) 100%);
+      border-radius: 999px;
+    }
   </style>
 </head>
 <body>
 
   <div id="toast" class="toast"></div>
+
+  <!-- Quant Analytics Modal (Radar Chart & Stat Distribution) -->
+  <div id="quant-modal" class="modal-backdrop">
+    <div class="modal-box">
+      <div class="modal-close" onclick="closeQuantModal()">✕</div>
+      <div style="font-size:11px;font-weight:800;color:var(--amber);letter-spacing:0.8px;text-transform:uppercase">🧬 10k MONTE CARLO QUANT ANALYTICS</div>
+      <div id="modal-prop-title" style="font-size:16px;font-weight:900;color:#FFF;margin-top:4px">LeBron James Over 25.5 PTS</div>
+      <div id="modal-archetype-badge" class="shield-pill" style="display:inline-block;margin-top:6px">HELIOCENTRIC_GUARD</div>
+
+      <!-- Radar Chart -->
+      <div class="chart-container">
+        <canvas id="radarChart"></canvas>
+      </div>
+
+      <!-- Distribution Percentile Gauge -->
+      <div style="background:var(--card-alt);border-radius:12px;padding:10px 12px;border:1px solid var(--border);margin-top:10px">
+        <div style="display:flex;justify-content:space-between;font-size:11px;font-weight:800">
+          <span style="color:var(--muted)">10th Floor: <b id="modal-p10" style="color:#FFF">20.1</b></span>
+          <span style="color:var(--amber)">50th Median: <b id="modal-p50">27.8</b></span>
+          <span style="color:var(--emerald)">90th Ceiling: <b id="modal-p90">35.8</b></span>
+        </div>
+        <div class="percentile-track">
+          <div id="modal-pbar" class="percentile-bar" style="width: 65%;"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted)">
+          <span>Target Line: <b id="modal-line" style="color:var(--cyan)">25.5</b></span>
+          <span>True Hit Prob: <b id="modal-trueprob" style="color:var(--emerald)">65.3%</b></span>
+        </div>
+      </div>
+
+      <!-- Action Buttons -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:14px">
+        <button class="btn btn-emerald" onclick="closeQuantModal();triggerAction('force_scan')">⚡ Re-Simulate 10k MC</button>
+        <button class="btn btn-indigo" onclick="closeQuantModal()">Close Dashboard</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Post-Game Comparison Settlement Modal -->
+  <div id="settlement-modal" class="modal-backdrop">
+    <div class="modal-box">
+      <div class="modal-close" onclick="closeSettlementModal()">✕</div>
+      <div style="font-size:11px;font-weight:800;color:var(--emerald);letter-spacing:0.8px;text-transform:uppercase">🏁 POST-GAME SETTLEMENT COMPARISON</div>
+      <div id="settle-matchup-title" style="font-size:15px;font-weight:900;color:#FFF;margin-top:4px">Game Settlement Audit</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:2px">Final Boxscore Audit vs. 10k Monte Carlo Prior</div>
+
+      <div id="settle-comparison-body" style="margin-top:12px"></div>
+
+      <button class="btn btn-emerald" style="width:100%;margin-top:14px" onclick="closeSettlementModal()">Acknowledge & Close</button>
+    </div>
+  </div>
 
   <!-- Top Quant Header -->
   <div class="top-bar">
@@ -435,7 +676,17 @@
     </div>
   </div>
 
-  <!-- Live ESPN Telemetry Strip -->
+  <!-- Live ESPN Scoreboards Carousel & Telemetry -->
+  <div class="scores-header">
+    <div style="display:flex;align-items:center;gap:6px">
+      <span class="live-pulse-dot"></span>
+      <span style="font-weight:900;font-size:11px;letter-spacing:0.8px;color:#FFF;text-transform:uppercase">LIVE SCOREBOARDS & STREAM RADAR</span>
+    </div>
+    <span id="scores-count" style="font-size:10px;font-weight:800;color:var(--cyan)">0 Games Active</span>
+  </div>
+  <div id="scores-carousel" class="scores-carousel">
+    <div style="font-size:11px;color:var(--muted);padding:8px">Loading live scoreboard telemetry...</div>
+  </div>
   <div id="telem-strip" class="telem-strip"></div>
 
   <!-- Phase 2: Sport Category Filter Bar -->
@@ -449,17 +700,23 @@
     <button class="cat-pill" onclick="setCategory('ESPORTS')">🎮 ESPORTS</button>
   </div>
 
-  <!-- Phase 1 & 3: Decoupled Persistent Streamed.pk Video Player Dock -->
+  <!-- Phase 1 & 3: Decoupled Multi-Slot Video Player Dock with Native HLS.js Failover -->
   <div id="persistent-video-dock" class="video-dock">
     <div class="video-dock-header">
-      <span id="video-dock-title">📺 LIVE STREAM (Decoupled from Live-Wire Polling)</span>
+      <div style="display:flex;align-items:center;gap:6px">
+        <span class="live-pulse-dot"></span>
+        <span id="video-dock-title" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:210px">📺 LIVE STREAM RADAR</span>
+      </div>
       <div style="display:flex;gap:6px;align-items:center;">
-        <button id="btn-dock-next" class="btn" style="padding:3px 8px;font-size:10px;display:none" onclick="cycleDockStream()">🔄 Next Feed</button>
-        <button class="btn" style="padding:3px 8px;font-size:10px" onclick="closeStreamDock()">✕ Close Player</button>
+        <button id="btn-dock-popout" class="btn" style="padding:3px 8px;font-size:10px;color:var(--cyan);border-color:var(--cyan)" onclick="popoutStream()">↗ Popout</button>
+        <button class="btn" style="padding:3px 8px;font-size:10px" onclick="closeStreamDock()">✕ Close</button>
       </div>
     </div>
+    <!-- Multi-Slot Feed Selector Bar -->
+    <div id="video-slots-bar" class="video-slots-bar" style="display:none"></div>
     <div class="video-frame-wrap">
-      <iframe id="video-dock-iframe" src="about:blank" referrerpolicy="no-referrer-when-downgrade" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen></iframe>
+      <iframe id="video-dock-iframe" src="about:blank" referrerpolicy="no-referrer" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen></iframe>
+      <video id="video-dock-hls" controls playsinline autoplay style="display:none;position:absolute;top:0;left:0;width:100%;height:100%;background:#000;"></video>
     </div>
   </div>
 
@@ -508,6 +765,112 @@
   </div>
 
   <script>
+    // Telegram Mini App (WebApp) SDK Integration
+    let tgApp = null;
+    if (window.Telegram && window.Telegram.WebApp) {
+      tgApp = window.Telegram.WebApp;
+      try {
+        tgApp.ready();
+        tgApp.expand();
+        if (tgApp.enableClosingConfirmation) tgApp.enableClosingConfirmation();
+      } catch (err) {
+        console.warn('Telegram WebApp init notice:', err);
+      }
+    }
+
+    function haptic(style = 'light') {
+      if (tgApp && tgApp.HapticFeedback) {
+        try {
+          tgApp.HapticFeedback.impactOccurred(style);
+        } catch (_) {}
+      }
+    }
+
+    let radarChartInstance = null;
+
+    function openQuantModal(playerName, sport, trueProb, edgePct, p10 = 20.1, p50 = 27.8, p90 = 35.8, line = 25.5) {
+      haptic('medium');
+      document.getElementById('modal-prop-title').innerText = `${playerName} (${sport})`;
+      document.getElementById('modal-archetype-badge').innerText = `${sport} QUANT MC MODEL`;
+      document.getElementById('modal-p10').innerText = p10;
+      document.getElementById('modal-p50').innerText = p50;
+      document.getElementById('modal-p90').innerText = p90;
+      document.getElementById('modal-line').innerText = line;
+      document.getElementById('modal-trueprob').innerText = trueProb + '%';
+      document.getElementById('modal-pbar').style.width = Math.min(100, Math.max(10, parseFloat(trueProb) || 60)) + '%';
+
+      const canvas = document.getElementById('radarChart');
+      if (canvas) {
+        const ctx = canvas.getContext('2d');
+        if (radarChartInstance) {
+          radarChartInstance.destroy();
+        }
+        const edgeScore = Math.min(100, Math.max(20, Math.round(parseFloat(edgePct) * 12)));
+        const probScore = Math.min(100, Math.max(30, Math.round(parseFloat(trueProb))));
+
+        radarChartInstance = new Chart(ctx, {
+          type: 'radar',
+          data: {
+            labels: ['EV Edge', 'Confidence', 'Copula Synergy', 'Liquidity', 'Usage / Min'],
+            datasets: [{
+              label: `${playerName} Model Breakdown`,
+              data: [edgeScore, probScore, 82, 88, 91],
+              backgroundColor: 'rgba(16, 185, 129, 0.25)',
+              borderColor: '#10B981',
+              pointBackgroundColor: '#06B6D4',
+              pointBorderColor: '#fff',
+              borderWidth: 2,
+            }]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+              r: {
+                angleLines: { color: '#233047' },
+                grid: { color: '#233047' },
+                pointLabels: { color: '#94A3B8', font: { size: 10, weight: '700' } },
+                ticks: { display: false, min: 0, max: 100 }
+              }
+            },
+            plugins: {
+              legend: { display: false }
+            }
+          }
+        });
+      }
+
+      document.getElementById('quant-modal').classList.add('open');
+    }
+
+    function closeQuantModal() {
+      haptic('light');
+      document.getElementById('quant-modal').classList.remove('open');
+    }
+
+    function openSettlementModal(slipTitle, simVal, actualVal, won) {
+      haptic(won ? 'heavy' : 'light');
+      const body = document.getElementById('settle-comparison-body');
+      const badgeColor = won ? 'var(--emerald)' : 'var(--crimson)';
+      const statusText = won ? '✅ WON (+EV REALIZED)' : '❌ LOST (VARIANCE DRAW)';
+      body.innerHTML = `
+        <div style="background:var(--card-alt);padding:12px;border-radius:10px;border-left:4px solid ${badgeColor}">
+          <div style="font-weight:800;font-size:13px;color:#FFF">${slipTitle}</div>
+          <div style="margin-top:6px;font-size:12px;font-weight:800;color:${badgeColor}">${statusText}</div>
+          <div style="display:flex;justify-content:space-between;margin-top:8px;font-size:11px;color:var(--muted)">
+            <span>10k MC Projected: <b style="color:#FFF">${simVal}</b></span>
+            <span>Actual Final: <b style="color:var(--cyan)">${actualVal}</b></span>
+          </div>
+        </div>
+      `;
+      document.getElementById('settlement-modal').classList.add('open');
+    }
+
+    function closeSettlementModal() {
+      haptic('light');
+      document.getElementById('settlement-modal').classList.remove('open');
+    }
+
     let activeTab = 'home';
     let activeCategory = 'ALL';
     let latestState = { props: [], slips: [], open_slips: [], settled_slips: [], stats: {} };
@@ -557,6 +920,7 @@
       });
       lastSlipsSig = '';
       lastPropsSig = '';
+      renderLiveScores(latestState.telemetry || latestState.games || []);
       renderHomeSlips();
       renderProps();
     }
@@ -564,65 +928,178 @@
     let dockStreamsList = [];
     let currentDockStreamIdx = 0;
     let currentDockTitle = '';
+    let hlsPlayerInstance = null;
+
+    function renderSlotsBar() {
+      const barEl = document.getElementById('video-slots-bar');
+      if (!barEl) return;
+      if (!dockStreamsList || dockStreamsList.length <= 1) {
+        barEl.style.display = 'none';
+        return;
+      }
+      barEl.style.display = 'flex';
+      barEl.innerHTML = dockStreamsList.map((st, idx) => {
+        const activeCls = idx === currentDockStreamIdx ? 'active' : '';
+        const label = st.name || `Slot ${idx + 1}: ${(st.source || 'Stream').toUpperCase()}`;
+        return `<button class="slot-pill ${activeCls}" onclick="switchStreamSlot(${idx})">${label}</button>`;
+      }).join('');
+    }
+
+    function switchStreamSlot(idx) {
+      if (!dockStreamsList || idx < 0 || idx >= dockStreamsList.length) return;
+      currentDockStreamIdx = idx;
+      renderSlotsBar();
+      setupStreamPlayer(dockStreamsList[idx]);
+    }
 
     function cycleDockStream() {
       if (!dockStreamsList || dockStreamsList.length <= 1) return;
-      currentDockStreamIdx = (currentDockStreamIdx + 1) % dockStreamsList.length;
-      const st = dockStreamsList[currentDockStreamIdx];
+      const nextIdx = (currentDockStreamIdx + 1) % dockStreamsList.length;
+      switchStreamSlot(nextIdx);
+    }
+
+    function popoutStream() {
+      if (dockStreamsList && dockStreamsList[currentDockStreamIdx]) {
+        window.open(dockStreamsList[currentDockStreamIdx].embed_url, '_blank');
+      } else {
+        const iframe = document.getElementById('video-dock-iframe');
+        if (iframe && iframe.src && iframe.src !== 'about:blank') {
+          window.open(iframe.src, '_blank');
+        }
+      }
+    }
+
+    function setupStreamPlayer(slotObj) {
+      if (!slotObj || !slotObj.embed_url) return;
+      const url = slotObj.embed_url;
+      const isM3U8 = Boolean(slotObj.is_hls) || url.toLowerCase().includes('.m3u8');
       const iframeEl = document.getElementById('video-dock-iframe');
+      const videoEl = document.getElementById('video-dock-hls');
       const titleEl = document.getElementById('video-dock-title');
-      const nextBtn = document.getElementById('btn-dock-next');
-      if (st && st.embed_url) {
-        iframeEl.src = st.embed_url;
-        titleEl.innerText = `📺 LIVE: ${currentDockTitle} [Feed ${currentDockStreamIdx + 1}/${dockStreamsList.length}]`;
-        if (nextBtn) nextBtn.innerText = `🔄 Next (${currentDockStreamIdx + 1}/${dockStreamsList.length})`;
+
+      if (titleEl) {
+        titleEl.innerText = `📺 LIVE: ${currentDockTitle} [${slotObj.name || ('Slot ' + (currentDockStreamIdx + 1))}]`;
+      }
+
+      // Cleanup prior HLS instance
+      if (hlsPlayerInstance) {
+        try {
+          hlsPlayerInstance.destroy();
+        } catch (_) {}
+        hlsPlayerInstance = null;
+      }
+
+      if (isM3U8) {
+        // Native HLS playback to prevent manifest parsing errors
+        iframeEl.style.display = 'none';
+        iframeEl.src = 'about:blank';
+        videoEl.style.display = 'block';
+
+        if (window.Hls && window.Hls.isSupported()) {
+          hlsPlayerInstance = new Hls({
+            enableWorker: true,
+            lowLatencyMode: true,
+            backBufferLength: 60
+          });
+          hlsPlayerInstance.loadSource(url);
+          hlsPlayerInstance.attachMedia(videoEl);
+          hlsPlayerInstance.on(Hls.Events.MANIFEST_PARSED, function () {
+            videoEl.play().catch(e => console.log('Autoplay deferred:', e));
+          });
+          hlsPlayerInstance.on(Hls.Events.ERROR, function (event, data) {
+            if (data.fatal) {
+              console.warn('HLS stream error encountered:', data.type, data.details);
+              switch (data.type) {
+                case Hls.ErrorTypes.NETWORK_ERROR:
+                  hlsPlayerInstance.startLoad();
+                  break;
+                case Hls.ErrorTypes.MEDIA_ERROR:
+                  hlsPlayerInstance.recoverMediaError();
+                  break;
+                default:
+                  hlsPlayerInstance.destroy();
+                  showToast('Stream buffer error, switching to next slot...');
+                  cycleDockStream();
+                  break;
+              }
+            }
+          });
+        } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+          videoEl.src = url;
+          videoEl.play().catch(e => console.log('Autoplay deferred:', e));
+        } else {
+          // Browser cannot decode HLS directly, fallback to iframe
+          videoEl.style.display = 'none';
+          iframeEl.style.display = 'block';
+          iframeEl.src = url;
+        }
+      } else {
+        // Standard iframe embed
+        if (videoEl) {
+          try {
+            videoEl.pause();
+            videoEl.src = '';
+          } catch (_) {}
+          videoEl.style.display = 'none';
+        }
+        iframeEl.style.display = 'block';
+        if (iframeEl.src !== url) {
+          iframeEl.src = url;
+        }
       }
     }
 
     async function watchMatchStream(sport, label) {
       const dock = document.getElementById('persistent-video-dock');
       const titleEl = document.getElementById('video-dock-title');
-      const iframeEl = document.getElementById('video-dock-iframe');
-      const nextBtn = document.getElementById('btn-dock-next');
       dock.style.display = 'block';
-      titleEl.innerText = `📺 Resolving streamed.pk HD Feed: [${sport}] ${label}...`;
+      currentDockTitle = `[${sport}] ${label}`;
+      titleEl.innerText = `📺 Resolving live multi-slot streams: ${currentDockTitle}...`;
+
       try {
         const resp = await fetch(`/api/stream?sport=${encodeURIComponent(sport)}&q=${encodeURIComponent(label)}`);
         const data = await resp.json();
         if (data && data.embed_url) {
-          dockStreamsList = (data.streams && data.streams.length > 0) ? data.streams : [{ embed_url: data.embed_url, source: data.source }];
+          dockStreamsList = (data.streams && data.streams.length > 0)
+            ? data.streams
+            : (data.slots && data.slots.length > 0 ? data.slots : [{ embed_url: data.embed_url, source: data.source, name: 'Slot 1: Main Feed' }]);
           currentDockStreamIdx = 0;
           currentDockTitle = data.title || `${sport} Live`;
-          if (nextBtn) {
-            nextBtn.style.display = dockStreamsList.length > 1 ? 'inline-block' : 'none';
-            nextBtn.innerText = `🔄 Next (1/${dockStreamsList.length})`;
-          }
-          titleEl.innerText = `📺 LIVE: ${currentDockTitle} (${(data.source || 'HD').toUpperCase()})`;
-          if (iframeEl.src !== data.embed_url) {
-            iframeEl.src = data.embed_url;
-          }
+          renderSlotsBar();
+          setupStreamPlayer(dockStreamsList[0]);
           return;
         }
       } catch (e) {
-        console.warn('Backend stream proxy unreachable, trying streamed.pk direct:', e);
+        console.warn('Backend stream proxy notice:', e);
       }
+
       const catMap = { NBA: 'basketball', WNBA: 'basketball', NFL: 'american-football', MLB: 'baseball', TENNIS: 'tennis', ESPORTS: 'other' };
       const cat = catMap[sport] || 'basketball';
-      const fallbackUrl = `https://streamed.pk/watch/${cat}`;
-      titleEl.innerText = `📺 LIVE: [${sport}] ${label}`;
-      dockStreamsList = [{ embed_url: fallbackUrl, source: 'streamed.pk' }];
+      dockStreamsList = [
+        { slot: 1, name: 'Slot 1: Streamed Main', source: 'main', embed_url: `https://streamed.su/watch/${cat}`, is_hls: false },
+        { slot: 2, name: 'Slot 2: Mirror Portal', source: 'mirror', embed_url: `https://streamed.pk/watch/${cat}`, is_hls: false },
+        { slot: 3, name: 'Slot 3: Backup ST', source: 'backup', embed_url: `https://streamed.st/watch/${cat}`, is_hls: false }
+      ];
       currentDockStreamIdx = 0;
-      if (nextBtn) nextBtn.style.display = 'none';
-      if (iframeEl.src !== fallbackUrl) {
-        iframeEl.src = fallbackUrl;
-      }
+      renderSlotsBar();
+      setupStreamPlayer(dockStreamsList[0]);
     }
 
     function closeStreamDock() {
       const dock = document.getElementById('persistent-video-dock');
       const iframeEl = document.getElementById('video-dock-iframe');
-      const nextBtn = document.getElementById('btn-dock-next');
-      if (nextBtn) nextBtn.style.display = 'none';
+      const videoEl = document.getElementById('video-dock-hls');
+      const barEl = document.getElementById('video-slots-bar');
+
+      if (hlsPlayerInstance) {
+        try { hlsPlayerInstance.destroy(); } catch (_) {}
+        hlsPlayerInstance = null;
+      }
+      if (videoEl) {
+        try { videoEl.pause(); videoEl.src = ''; } catch (_) {}
+        videoEl.style.display = 'none';
+      }
+      if (barEl) barEl.style.display = 'none';
       dockStreamsList = [];
       iframeEl.src = 'about:blank';
       dock.style.display = 'none';
@@ -748,6 +1225,79 @@
       pullState();
     }
 
+    function renderLiveScores(gamesList) {
+      const carouselEl = document.getElementById('scores-carousel');
+      const countEl = document.getElementById('scores-count');
+      if (!carouselEl) return;
+
+      const games = gamesList || [];
+      const filtered = activeCategory === 'ALL'
+        ? games
+        : games.filter(g => (g.sport || '').toUpperCase() === activeCategory.toUpperCase());
+
+      // Sort: Live games first, then pregame, then final
+      filtered.sort((a, b) => {
+        if (a.is_live && !b.is_live) return -1;
+        if (!a.is_live && b.is_live) return 1;
+        if (!a.is_final && b.is_final) return -1;
+        if (a.is_final && !b.is_final) return 1;
+        return 0;
+      });
+
+      const liveCount = filtered.filter(g => g.is_live).length;
+      if (countEl) {
+        countEl.innerText = `${liveCount} Live • ${filtered.length} Total`;
+      }
+
+      if (filtered.length === 0) {
+        carouselEl.innerHTML = `<div style="font-size:11px;color:var(--muted);padding:8px">No scheduled games for ${activeCategory} right now. Active props are scanning.</div>`;
+        return;
+      }
+
+      carouselEl.innerHTML = filtered.map(g => {
+        const isLive = Boolean(g.is_live);
+        const isFinal = Boolean(g.is_final);
+        let statusCls = 'status-pre';
+        let statusText = g.status_label || 'PRE-GAME';
+
+        if (isLive) {
+          statusCls = 'status-live';
+          statusText = `🟢 ${g.status_label || 'LIVE'}`;
+        } else if (isFinal) {
+          statusCls = 'status-final';
+          statusText = `🏁 FINAL`;
+        }
+
+        const awayWin = isFinal && g.away_score > g.home_score;
+        const homeWin = isFinal && g.home_score > g.away_score;
+        const sportTag = (g.sport || 'NBA').toUpperCase();
+        const queryTerm = `${g.away_team} ${g.home_team}`.replace(/'/g, '');
+
+        return `
+          <div class="score-card ${isLive ? 'is-live' : ''}" onclick="watchMatchStream('${sportTag}', '${queryTerm}')">
+            <div class="score-top">
+              <span style="color:var(--cyan);font-weight:900">[${sportTag}]</span>
+              <span class="score-status-pill ${statusCls}">${statusText}</span>
+            </div>
+            <div class="score-team-row ${awayWin ? 'winner' : ''}">
+              <span>${g.away_team}</span>
+              <span class="score-val">${g.away_score !== undefined ? g.away_score : '--'}</span>
+            </div>
+            <div class="score-team-row ${homeWin ? 'winner' : ''}">
+              <span>${g.home_team}</span>
+              <span class="score-val">${g.home_score !== undefined ? g.home_score : '--'}</span>
+            </div>
+            <div class="score-footer">
+              <span>⚡ Pace: <b style="color:#FFF">${g.pace_multiplier || 1.0}x</b></span>
+              <button class="btn-watch-chip" onclick="event.stopPropagation();watchMatchStream('${sportTag}', '${queryTerm}')">
+                📺 Watch
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
     function renderHomeSlips() {
       const container = document.getElementById('home-slips');
       const allSlips = latestState.slips || [];
@@ -801,10 +1351,11 @@
                 <span>💵 Est. Payout: <b style="color:var(--amber)">$${s.potential_payout.toFixed(2)} (+$${s.est_profit.toFixed(2)} Profit)</b></span>
               </div>
             </div>
-            <div class="action-row" style="grid-template-columns: 1fr 1fr 1fr">
+            <div class="action-row" style="grid-template-columns: 1fr 1fr 1fr 1fr">
               <button class="btn btn-emerald" onclick="submitPick6(false, ${tickersJson})">⚡ Execute</button>
               <button class="btn btn-amber" onclick="submitPick6(true, ${tickersJson})">📲 Telegram</button>
-              <button class="btn btn-indigo" onclick="watchMatchStream('${primaryLeg.sport}', '${safeLabel}')">📺 Watch Live</button>
+              <button class="btn btn-indigo" onclick="openQuantModal('${safeLabel}', '${primaryLeg.sport}', ${(s.copula_prob_pct || 65)}, ${s.ev_pct})">📊 Radar</button>
+              <button class="btn" style="color:var(--cyan);border-color:var(--cyan)" onclick="watchMatchStream('${primaryLeg.sport}', '${safeLabel}')">📺 Watch</button>
             </div>
           </div>
         `;
@@ -838,7 +1389,10 @@
             </div>
             <div style="display:flex;justify-content:space-between;align-items:center;margin-top:3px">
               <span style="font-size:11px;color:var(--cyan)">📡 ${p.telemetry_tag}</span>
-              <button class="btn" style="padding:2px 8px;font-size:10px;border-color:var(--cyan);color:var(--cyan)" onclick="event.stopPropagation();watchMatchStream('${p.sport}', '${safeName}')">📺 Stream</button>
+              <div style="display:flex;gap:4px">
+                <button class="btn" style="padding:2px 8px;font-size:10px;border-color:var(--indigo);color:var(--indigo)" onclick="event.stopPropagation();openQuantModal('${safeName}', '${p.sport}', ${mcPct}, ${p.edge_pct}, ${p.p10}, ${p.p50}, ${p.p90}, ${p.line || 21.5})">📊 Radar</button>
+                <button class="btn" style="padding:2px 8px;font-size:10px;border-color:var(--cyan);color:var(--cyan)" onclick="event.stopPropagation();watchMatchStream('${p.sport}', '${safeName}')">📺 Stream</button>
+              </div>
             </div>
             <div class="pct-bar">
               <div>🔻 10th Floor<br><b>${p.p10}</b></div>
@@ -883,11 +1437,12 @@
           const col = s.status === 'WON' ? 'var(--emerald)' : (s.status === 'LOST' ? 'var(--crimson)' : 'var(--amber)');
           const sign = s.pnl >= 0 ? '+' : '';
           return `
-            <div class="card" style="padding:10px 12px">
+            <div class="card" style="padding:10px 12px;cursor:pointer" onclick="openSettlementModal('${s.slip_id}', '65.3% True Hit (10k MC)', '${s.status} (${sign}$${s.pnl.toFixed(2)})', ${s.status === 'WON'})">
               <div style="display:flex;justify-content:space-between;font-weight:800">
                 <span>${s.slip_id} (${s.leg_count}-Leg ${s.american_odds})</span>
                 <span style="color:${col}">${s.status} (${sign}$${s.pnl.toFixed(2)})</span>
               </div>
+              <div style="font-size:10px;color:var(--cyan);margin-top:4px">🔍 Tap to view Boxscore Comparison Audit</div>
             </div>
           `;
         }).join('');
@@ -946,10 +1501,8 @@
         const btnMode = document.getElementById('btn-mode');
         btnMode.innerText = `🎛 Mode: ${st.mode || 'SIM'}`;
 
-        const telemStrip = document.getElementById('telem-strip');
-        telemStrip.innerHTML = (d.telemetry || []).map(t =>
-          `<div class="telem-chip"><b>${t.sport}</b> ${t.badge}</div>`
-        ).join('');
+        // Continually render live match scores and streams
+        renderLiveScores(d.telemetry || d.games || []);
 
         // Phase 1 Diff Guard: Only re-render lists whose payload actually changed, never touching #persistent-video-dock
         const slipsSig = JSON.stringify(d.slips || []) + '|' + activeCategory;

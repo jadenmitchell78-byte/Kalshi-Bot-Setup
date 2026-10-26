@@ -62,6 +62,13 @@ from sim_engine import (
     run_calibration_and_symmetry_audit,
     PropSimResult,
 )
+from quant_core import (
+    parse_user_query,
+    simulate_prop_and_combo,
+    format_revamped_sim_card,
+    run_full_sport_board_scan,
+    quant_sniper,
+)
 from parlay import (
     ParlaySlip,
     evaluate_parlay,
@@ -82,6 +89,11 @@ from smart_placer import (
     parse_prop_command,
     TODAY_ACTIVE_NBA_TEAMS,
     TEAM_SCHEDULE_NOTES,
+)
+from unified_kalshi_engine import (
+    unified_engine,
+    UnifiedKalshiEngine,
+    FUTURES_SERIES_PREFIXES,
 )
 
 # ==========================================
@@ -604,13 +616,15 @@ def get_auth_headers(method: str, path: str) -> dict:
     }
 
 # ==========================================
-# SMART PLACING ENGINE (V2 OBI & MAKER LIMIT)
+# SMART PLACING ENGINE & UNIFIED DUAL-ENGINE
 # ==========================================
 smart_placer = KalshiSmartPlacer(
     key_id=KALSHI_KEY_ID,
     base_url=BASE_URL,
     auth_header_fn=get_auth_headers,
 )
+unified_engine.base_url = BASE_URL
+unified_engine.auth_header_fn = get_auth_headers
 
 # ==========================================
 # SQLITE TELEMETRY & SHARED BOT_STATE SYNC
@@ -984,6 +998,9 @@ def build_menu_hud_payload(show_slider: Optional[bool] = None, show_scan_panel: 
             {"text": "📊 Status & Exposure", "callback_data": "menu_status"},
         ],
         [
+            {"text": "📱 Open Analytics App", "web_app": {"url": os.getenv("PEEZY_WEBAPP_URL", "https://peezt-tv.vercel.app")}},
+        ],
+        [
             {"text": "📋 Open Positions", "callback_data": "menu_open_positions"},
             {"text": "📈 Settled PnL", "callback_data": "menu_pnl"},
         ],
@@ -1115,7 +1132,7 @@ def discover_telegram_chat_id() -> str:
     return TELEGRAM_CHAT_ID
 
 
-def notify_telegram(msg: str, reply_markup: dict = None, chat_id: str = None):
+def notify_telegram(msg: str, reply_markup: dict = None, chat_id: str = None, parse_mode: Optional[str] = None):
     if not TELEGRAM_BOT_TOKEN:
         return
     cid = chat_id or TELEGRAM_CHAT_ID or discover_telegram_chat_id()
@@ -1126,6 +1143,11 @@ def notify_telegram(msg: str, reply_markup: dict = None, chat_id: str = None):
         _save_chat_id(str(cid))
     if reply_markup is None:
         _, reply_markup = build_menu_hud_payload()
+
+    # Auto-detect HTML vs Markdown if not explicitly specified
+    eff_parse_mode = parse_mode
+    if not eff_parse_mode:
+        eff_parse_mode = "HTML" if any(tag in msg for tag in ("<b>", "<code>", "<i>", "<pre>", "<a>")) else "Markdown"
 
     # Split message into chunks if it exceeds Telegram's 4096 character limit
     max_chunk = 3900
@@ -1149,7 +1171,9 @@ def notify_telegram(msg: str, reply_markup: dict = None, chat_id: str = None):
     for idx, chunk in enumerate(chunks):
         is_last = (idx == len(chunks) - 1)
         kb = reply_markup if is_last else None
-        payload = {"chat_id": cid, "text": chunk, "parse_mode": "Markdown"}
+        payload = {"chat_id": cid, "text": chunk}
+        if eff_parse_mode:
+            payload["parse_mode"] = eff_parse_mode
         if kb:
             payload["reply_markup"] = kb
 
@@ -1160,8 +1184,8 @@ def notify_telegram(msg: str, reply_markup: dict = None, chat_id: str = None):
                 timeout=5,
             )
             if r.status_code != 200:
-                # If markdown entity parsing failed, sanitize tags and send plain text
-                clean_chunk = chunk.replace("*", "").replace("`", "").replace("_", "")
+                # If entity parsing failed, sanitize tags and fallback to plain text
+                clean_chunk = re.sub(r"<[^>]+>", "", chunk).replace("*", "").replace("`", "").replace("_", "")
                 payload_plain = {"chat_id": cid, "text": clean_chunk}
                 if kb:
                     payload_plain["reply_markup"] = kb
@@ -1453,15 +1477,17 @@ def fetch_all_open_markets(sport_filter: Optional[str] = None) -> list:
             d_copy["is_synthetic"] = True
             markets.append(d_copy)
 
-    # Final Guard: Strictly Daily/Live Games & Props (Zero cups, mid-season tourneys or futures)
+    # Final Guard: Daily/Live Games & Props + Macro Futures (Allows KXLEBRON, KXBASKETBALL, etc.)
     clean_markets = []
     for m in markets:
         tkr = str(m.get("ticker") or "").upper()
         tit = str(m.get("title") or "").upper()
         sub = str(m.get("subtitle") or "").upper()
         blob = f"{tkr} {tit} {sub}"
-        if any(b in tkr for b in BANNED_PREFIXES) or any(tok in blob for tok in FUTURES_OR_CUP_TOKENS):
-            continue
+        is_allowed_macro = any(pfx in tkr for pfx in FUTURES_SERIES_PREFIXES)
+        if not is_allowed_macro:
+            if any(b in tkr for b in BANNED_PREFIXES) or any(tok in blob for tok in FUTURES_OR_CUP_TOKENS):
+                continue
         clean_markets.append(m)
     return clean_markets
 
@@ -1816,6 +1842,7 @@ def run_monte_carlo_and_combo_pipeline(
                 ask_cents=p["ask_price_cents"],
                 volume_usd=max(100, p["volume"]),
                 market_url=p["market_url"],
+                coaching_notes=getattr(sim_res, "coaching_notes", []),
             )
             leg.raw_side = p["side"]
             leg.mc_mean = sim_res.mean_proj
@@ -2024,6 +2051,7 @@ def run_monte_carlo_and_combo_pipeline(
                     "mean": getattr(top_leg, "mc_mean", top_leg.line),
                     "std": getattr(top_leg, "mc_std", 1.5),
                     "mc_true": top_leg.mc_true_prob,
+                    "coaching_notes": getattr(top_leg, "coaching_notes", []),
                 })
 
     # Update diagnostics and DB state
@@ -2055,12 +2083,14 @@ def run_monte_carlo_and_combo_pipeline(
     if orders_executed:
         lines.append("🚨 *LIVE KALSHI ORDER EXECUTION RECEIPT* 🚨")
         for o in orders_executed:
+            tactical_line = f"  🧠 Tactical: _{o['coaching_notes'][0]}_\n" if o.get("coaching_notes") else ""
             lines.append(
                 f"• 📦 *BUY `{o['count']}x {o['side'].upper()}` @ `{o['price']}c`* (`${o['cost']:.2f}`)\n"
                 f"  📌 Market: `{o['ticker']}`\n"
                 f"  🏷 Contract: {o['prop']}\n"
                 f"  🎯 10k MC True: `{o['mc_true']*100:.1f}%` (Book `{o['price']}%`, *{o['ev']:+.1%} EV*)\n"
                 f"  📈 Dist: Mean `{o['mean']:.1f} ± {o['std']:.1f}` | P10: `{o['p10']:.1f}` | P50: `{o['p50']:.1f}` | P90: `{o['p90']:.1f}`\n"
+                f"{tactical_line}"
                 f"  🆔 Kalshi Order ID: `{o['order_id']}`\n"
             )
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━\n")
@@ -2260,6 +2290,57 @@ def build_status_exposure_text() -> str:
     )
 
 
+def format_rich_html_prop_card(leg, order_receipt: Optional[Dict[str, Any]] = None) -> str:
+    """
+    Format slick, high-end quant simulation card with HTML tags, visual percentile bars,
+    player badges, archetype chips, and checkmarks.
+    """
+    floor_10th = getattr(leg, 'p10', 0.0)
+    median_50th = getattr(leg, 'p50', 0.0)
+    ceiling_90th = getattr(leg, 'p90', 0.0)
+    line = getattr(leg, 'line', 0.0)
+    mean_proj = getattr(leg, 'mc_mean', line)
+    std_proj = getattr(leg, 'mc_std', 1.5)
+    true_prob = round(getattr(leg, 'mc_true_prob', 0.5) * 100.0, 1)
+    ev_edge = round(getattr(leg, 'ev_edge', 0.0) * 100.0, 2)
+    edge_sign = "+" if ev_edge >= 0 else ""
+
+    bar_filled = min(10, max(1, int(round(true_prob / 10.0))))
+    prob_bar = "▰" * bar_filled + "▱" * (10 - bar_filled)
+
+    sport_ico = SPORT_EMOJIS.get(str(getattr(leg, 'sport', 'NBA')).upper(), "🏀")
+    player_name = getattr(leg, 'player_name', '') or getattr(leg, 'player_prop', 'Player')
+    stat = getattr(leg, 'stat_type', '') or "Prop"
+    side = getattr(leg, 'side', 'OVER').upper()
+    archetype = getattr(leg, 'archetype', 'QUANT_HYBRID')
+
+    html = (
+        f"{sport_ico} <b>PEZZY QUANT SIMULATION</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏷 <b>Prop:</b> {player_name} {stat} <b>{side} {line}</b>\n"
+        f"🧬 <b>Archetype:</b> <code>{archetype}</code>\n\n"
+        f"📊 <b>Simulated Distribution Percentiles:</b>\n"
+        f"• 🔻 10th Floor: <code>{floor_10th}</code>\n"
+        f"• 🎯 50th Median: <code>{median_50th}</code> (Line: {line})\n"
+        f"• 🚀 90th Ceiling: <code>{ceiling_90th}</code>\n"
+        f"• 📈 Mean Projected: <code>{mean_proj:.1f} ± {std_proj:.1f}</code>\n\n"
+        f"[{prob_bar}] <b>{true_prob}% True Prob</b>\n"
+        f"🧠 <b>10k Monte Carlo True Prob:</b> <code>{true_prob}%</code>\n"
+        f"🔥 <b>True EV Edge:</b> <code>{edge_sign}{ev_edge}%</code> ✅"
+    )
+
+    c_notes = getattr(leg, "coaching_notes", [])
+    if c_notes:
+        html += f"\n\n🧠 <b>In-Game Coaching Brain:</b>\n• <i>{c_notes[0]}</i>"
+
+    if order_receipt:
+        html += (
+            f"\n\n🎯 <b>SMART SNIPER ORDER:</b> <code>{order_receipt.get('side', side).upper()} x{order_receipt.get('count', 1)} @ {order_receipt.get('price')}c</code>\n"
+            f"🆔 <b>Order ID:</b> <code>{order_receipt.get('order_id', '')}</code>"
+        )
+    return html
+
+
 def build_sim_text(query: str = "") -> str:
     """10,000-iteration Monte Carlo prop sim for /sim command."""
     if not query.strip():
@@ -2280,37 +2361,79 @@ def build_sim_text(query: str = "") -> str:
         sched_banner = f"⚠️ *{TEAM_SCHEDULE_NOTES[p_team]} — no live today-slate Kalshi prop exists.*\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
 
     try:
-        s_res = simulate_prop_leg(
-            ticker="MANUAL-SIM",
-            sport=sp,
-            player_prop=f"{p_player} {p_stat} {p_line}",
-            line=p_line,
-            side=p_side,
-            book_prob=0.50,
-            iterations=10000,
-        )
-        leg = SlipLeg(
-            market_ticker=f"{p_player.upper().replace(' ', '-')}-{p_stat.upper()}",
-            sport=sp,
-            player_prop=f"{p_player} {p_stat} ({p_side} {p_line})",
-            player_name=p_player,
-            stat_type=p_stat,
-            line=s_res.line,
-            side=s_res.side,
-            book_prob=s_res.book_prob,
-            mc_true_prob=s_res.mc_true_prob,
-            p10=s_res.p10,
-            p50=s_res.p50,
-            p90=s_res.p90,
-            mc_mean=s_res.mean_proj,
-            mc_std=s_res.std_proj,
-            dist_family=s_res.dist_family,
-            archetype=p_arch or s_res.archetype,
-            sim_method=s_res.sim_method,
-            telemetry_tag=s_res.telemetry_badge,
-            bid_cents=49,
-            ask_cents=51,
-        )
+        matched_m = unified_engine.smart_resolve_contract(clean_q)
+        if matched_m:
+            m_tkr = matched_m.get("ticker", "")
+            m_title = matched_m.get("title") or matched_m.get("subtitle") or m_tkr
+            yes_ask_c = _clean_price_cents(matched_m.get("yes_ask")) or _clean_price_cents(matched_m.get("last_price")) or 50
+            yes_bid_c = _clean_price_cents(matched_m.get("yes_bid")) or max(1, yes_ask_c - 2)
+            book_p = round(yes_ask_c / 100.0, 2)
+            s_res = simulate_prop_leg(
+                ticker=m_tkr,
+                sport=sp,
+                player_prop=m_title,
+                line=p_line,
+                side=p_side,
+                book_prob=book_p,
+                iterations=10000,
+            )
+            leg = SlipLeg(
+                market_ticker=m_tkr,
+                sport=sp,
+                player_prop=m_title,
+                player_name=p_player if len(p_player) < 30 else m_title[:30],
+                stat_type=p_stat,
+                line=s_res.line,
+                side=s_res.side,
+                book_prob=s_res.book_prob,
+                mc_true_prob=s_res.mc_true_prob,
+                p10=s_res.p10,
+                p50=s_res.p50,
+                p90=s_res.p90,
+                mc_mean=s_res.mean_proj,
+                mc_std=s_res.std_proj,
+                dist_family=s_res.dist_family,
+                archetype=p_arch or s_res.archetype,
+                sim_method=s_res.sim_method,
+                telemetry_tag=s_res.telemetry_badge,
+                bid_cents=yes_bid_c,
+                ask_cents=yes_ask_c,
+                market_url=f"https://kalshi.com/markets/{m_tkr.lower()}",
+                coaching_notes=getattr(s_res, "coaching_notes", []),
+            )
+        else:
+            s_res = simulate_prop_leg(
+                ticker="MANUAL-SIM",
+                sport=sp,
+                player_prop=f"{p_player} {p_stat} {p_line}",
+                line=p_line,
+                side=p_side,
+                book_prob=0.50,
+                iterations=10000,
+            )
+            leg = SlipLeg(
+                market_ticker=f"{p_player.upper().replace(' ', '-')}-{p_stat.upper()}",
+                sport=sp,
+                player_prop=f"{p_player} {p_stat} ({p_side} {p_line})",
+                player_name=p_player,
+                stat_type=p_stat,
+                line=s_res.line,
+                side=s_res.side,
+                book_prob=s_res.book_prob,
+                mc_true_prob=s_res.mc_true_prob,
+                p10=s_res.p10,
+                p50=s_res.p50,
+                p90=s_res.p90,
+                mc_mean=s_res.mean_proj,
+                mc_std=s_res.std_proj,
+                dist_family=s_res.dist_family,
+                archetype=p_arch or s_res.archetype,
+                sim_method=s_res.sim_method,
+                telemetry_tag=s_res.telemetry_badge,
+                bid_cents=49,
+                ask_cents=51,
+                coaching_notes=getattr(s_res, "coaching_notes", []),
+            )
     except Exception:
         leg = parse_manual_leg_token(clean_q, iterations=10000)
 
@@ -2444,6 +2567,15 @@ def build_sim_text(query: str = "") -> str:
             f"🎯 *Smart Sniper:* `DISARMED` (Send /sniper on to auto-route orders)"
         )
 
+    coaching_block = ""
+    c_notes = getattr(leg, "coaching_notes", [])
+    if c_notes:
+        coaching_block = (
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🧠 *In-Game Coaching Brain:*\n"
+            + "".join(f"• _{n}_\n" for n in c_notes)
+        )
+
     return (
         sched_banner
         + f"🎲 *10,000-ITERATION MONTE CARLO PROP SIM* 🎲\n"
@@ -2459,7 +2591,8 @@ def build_sim_text(query: str = "") -> str:
         f"• 🎯 *50th Percentile (Median):* `{leg.p50}` (Line: `{leg.line}`)\n"
         f"• 🚀 *90th Percentile (Ceiling):* `{leg.p90}`\n"
         f"• 📊 *Mean Projected:* `{proj_mean:.1f} ± {proj_std:.1f}`\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        + coaching_block
+        + f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"• 📊 *De-Vigged Book Prob:* `{round(leg.book_prob * 100.0, 1)}%` ({leg.american_odds})\n"
         f"• 🧠 *10k Monte Carlo True Prob:* `{round(leg.mc_true_prob * 100.0, 1)}%`\n"
         f"• 🔥 *True EV Edge:* `{edge_sign}{leg.edge_pct}%`\n"
@@ -2496,7 +2629,7 @@ def build_audit_report() -> str:
 
 
 def build_open_positions_report() -> tuple:
-    """Build open positions and active slips report for /open and /positions."""
+    """Build open positions and active slips report for /open and /positions, pulling live from Kalshi exchange."""
     slate_cap = get_dynamic_slate_cap()
     exp = get_current_exposure()
     pending = []
@@ -2514,9 +2647,33 @@ def build_open_positions_report() -> tuple:
     ]
 
     has_items = False
+
+    # 1. Pull real live portfolio positions from Kalshi Exchange API
+    kalshi_live_positions = []
+    try:
+        kalshi_live_positions = unified_engine.get_portfolio_positions(get_auth_headers("GET", "/trade-api/v2/portfolio/positions"))
+    except Exception:
+        kalshi_live_positions = []
+
+    if kalshi_live_positions:
+        has_items = True
+        lines.append("🏛️ *Actual Kalshi Exchange Holdings (Macro & Sports):*")
+        for p in kalshi_live_positions[:8]:
+            ticker = p.get("ticker", "UNKNOWN")
+            pos_val = p.get("position", 0)
+            side_str = "YES" if pos_val > 0 else "NO"
+            count = abs(pos_val)
+            market_val = (p.get("market_value", 0) or 0) / 100.0
+            fees = (p.get("fees_paid", 0) or 0) / 100.0
+            lines.append(
+                f"• `{ticker}`\n"
+                f"  📦 Side: `{side_str} ({count} contracts)` | Market Value: `${market_val:.2f}`\n"
+            )
+
+    # 2. Local In-Memory Scalper Positions
     if open_positions:
         has_items = True
-        lines.append("🎯 *Active Open Contracts:*")
+        lines.append("🎯 *Active Open In-Game Contracts:*")
         for tk, p in list(open_positions.items())[:6]:
             st = resolve_streamed_pk_for_position(
                 ticker=tk,
@@ -2676,6 +2833,7 @@ def build_help_commands_report() -> str:
         "• `/esports` — Scan Esports markets\n\n"
         "🎲 *QUANT SIMULATIONS & COPULA PARLAYS:*\n"
         "• `/sim <prop>` — Run 10k Monte Carlo simulation on a specific prop\n"
+        "• `/card <prop>` — Visual HTML simulation card with distribution progress bar\n"
         "  _Examples:_\n"
         "  • `/sim LeBron James O25.5 PTS`\n"
         "  • `/sim Patrick Mahomes O274.5 PASS YDS`\n"
@@ -3317,39 +3475,33 @@ async def telegram_notifier_and_command_loop():
                         else:
                             await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
 
-                    elif low.startswith(("/tennis", "/atp", "/wta", "tennis")):
-                        parts = clean_text.split(maxsplit=1)
-                        arg_str = parts[1].strip().lower() if len(parts) > 1 else ""
-                        if not arg_str or arg_str in ("props", "prop", "scan", "all", "slate", "live", "today", "board", "combos"):
-                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "TENNIS", True, target_cid)
+                    elif low.startswith(("/nba", "/nfl", "/mlb", "/nhl", "/tennis", "/atp", "/wta", "/wnba", "/esports", "/sim", "/card", "/htmlcard")):
+                        parsed = parse_user_query(clean_text)
+                        _, hud_kb = build_menu_hud_payload()
+                        if parsed["mode"] == "SCAN":
+                            board_html = run_full_sport_board_scan(parsed["sport"], quant_sniper, bankroll=live_kalshi_balance)
                             if target_cid:
-                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
+                                await asyncio.to_thread(notify_telegram, board_html, hud_kb, target_cid, "HTML")
                             else:
-                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
+                                await asyncio.to_thread(notify_telegram, board_html, hud_kb, None, "HTML")
                         else:
-                            rep_txt = await asyncio.to_thread(build_sim_text, f"TENNIS:{parts[1].strip()}")
-                            _, hud_kb = build_menu_hud_payload()
+                            sim_data = simulate_prop_and_combo(
+                                sport=parsed["sport"],
+                                player_key=parsed["player_key"],
+                                stat=parsed["stat"],
+                                line=parsed["line"],
+                            )
+                            exec_res = quant_sniper.resolve_and_snipe(
+                                sim_data,
+                                bankroll=live_kalshi_balance,
+                                sniper_on=SNIPER_ARMED,
+                                live_mode=LIVE_MODE,
+                            )
+                            card_html = format_revamped_sim_card(sim_data, exec_res)
                             if target_cid:
-                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
+                                await asyncio.to_thread(notify_telegram, card_html, hud_kb, target_cid, "HTML")
                             else:
-                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
-
-                    elif low.startswith(("/nba", "/basketball", "nba")):
-                        parts = clean_text.split(maxsplit=1)
-                        arg_str = parts[1].strip().lower() if len(parts) > 1 else ""
-                        if not arg_str or arg_str in ("props", "prop", "scan", "all", "slate", "live", "today", "board", "combos"):
-                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "NBA", True, target_cid)
-                            if target_cid:
-                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
-                            else:
-                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
-                        else:
-                            rep_txt = await asyncio.to_thread(build_sim_text, f"NBA:{parts[1].strip()}")
-                            _, hud_kb = build_menu_hud_payload()
-                            if target_cid:
-                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
-                            else:
-                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
+                                await asyncio.to_thread(notify_telegram, card_html, hud_kb, None, "HTML")
 
                     elif low.startswith(("/livesim", "/combos", "/liveboard")):
                         rep_txt, rep_kb = await asyncio.to_thread(build_live_nba_diagnostic_board, target_cid)
@@ -3357,83 +3509,6 @@ async def telegram_notifier_and_command_loop():
                             await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
                         else:
                             await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
-
-                    elif low.startswith(("/nfl", "/cfb", "/football", "nfl")):
-                        parts = clean_text.split(maxsplit=1)
-                        arg_str = parts[1].strip().lower() if len(parts) > 1 else ""
-                        if not arg_str or arg_str in ("props", "prop", "scan", "all", "slate", "live", "today", "board", "combos"):
-                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "NFL", True, target_cid)
-                            if target_cid:
-                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
-                            else:
-                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
-                        else:
-                            rep_txt = await asyncio.to_thread(build_sim_text, f"NFL:{parts[1].strip()}")
-                            _, hud_kb = build_menu_hud_payload()
-                            if target_cid:
-                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
-                            else:
-                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
-
-                    elif low.startswith(("/mlb", "/baseball", "mlb")):
-                        parts = clean_text.split(maxsplit=1)
-                        arg_str = parts[1].strip().lower() if len(parts) > 1 else ""
-                        if not arg_str or arg_str in ("props", "prop", "scan", "all", "slate", "live", "today", "board", "combos"):
-                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "MLB", True, target_cid)
-                            if target_cid:
-                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
-                            else:
-                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
-                        else:
-                            rep_txt = await asyncio.to_thread(build_sim_text, f"MLB:{parts[1].strip()}")
-                            _, hud_kb = build_menu_hud_payload()
-                            if target_cid:
-                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
-                            else:
-                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
-
-                    elif low.startswith(("/wnba", "wnba")):
-                        parts = clean_text.split(maxsplit=1)
-                        arg_str = parts[1].strip().lower() if len(parts) > 1 else ""
-                        if not arg_str or arg_str in ("props", "prop", "scan", "all", "slate", "live", "today", "board", "combos"):
-                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "WNBA", True, target_cid)
-                            if target_cid:
-                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
-                            else:
-                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
-                        else:
-                            rep_txt = await asyncio.to_thread(build_sim_text, f"WNBA:{parts[1].strip()}")
-                            _, hud_kb = build_menu_hud_payload()
-                            if target_cid:
-                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
-                            else:
-                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
-
-                    elif low.startswith(("/esports", "/gaming", "esports")):
-                        parts = clean_text.split(maxsplit=1)
-                        arg_str = parts[1].strip().lower() if len(parts) > 1 else ""
-                        if not arg_str or arg_str in ("props", "prop", "scan", "all", "slate", "live", "today", "board", "combos"):
-                            rep_txt, rep_kb = await asyncio.to_thread(run_monte_carlo_and_combo_pipeline, None, "ESPORTS", True, target_cid)
-                            if target_cid:
-                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid)
-                            else:
-                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
-                        else:
-                            rep_txt = await asyncio.to_thread(build_sim_text, f"ESPORTS:{parts[1].strip()}")
-                            _, hud_kb = build_menu_hud_payload()
-                            if target_cid:
-                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
-                            else:
-                                await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
-
-                    elif low.startswith("/sim"):
-                        sim_query = clean_text[4:].strip() if low.startswith("/sim") else ""
-                        rep_txt = await asyncio.to_thread(build_sim_text, sim_query)
-                        _, hud_kb = build_menu_hud_payload()
-                        if target_cid:
-                            await asyncio.to_thread(notify_telegram, rep_txt, hud_kb, target_cid)
-                        else:
-                            await asyncio.to_thread(notify_telegram, rep_txt, hud_kb)
 
                     elif low.startswith(("/slip", "/parlay", "/combo")):
                         parts = clean_text.split(maxsplit=1)
