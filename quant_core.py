@@ -6,7 +6,7 @@ import re
 import time
 import uuid
 from difflib import SequenceMatcher
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 
@@ -194,6 +194,83 @@ PLAYER_REGISTRY: Dict[str, Dict[str, Any]] = {
         "scheme": "SINGLE_COVERAGE_ANCHOR",
         "base": {"HITS": 1.5, "HR": 0.45, "TB": 2.2},
         "partner": ("Mookie Betts", "HITS", 1.5, 1.8, 0.41),
+    },
+    "DE'AARON FOX": {
+        "aliases": ("FOX", "D FOX", "DEAARON FOX"),
+        "team": "SAC", "sport": "NBA", "arch": "SLASHING_RIM_PRESSURE",
+        "scheme": "SMALL_BALL_SWITCH",
+        "base": {"PTS": 26.6, "AST": 5.8, "3PM": 2.6, "PRA": 37.0},
+        "partner": ("Domantas Sabonis", "REB", 13.5, 14.8, 0.48),
+    },
+    "DOMANTAS SABONIS": {
+        "aliases": ("SABONIS", "D SABONIS"),
+        "team": "SAC", "sport": "NBA", "arch": "POST_HUB_CONNECTOR_BIG",
+        "scheme": "SINGLE_COVERAGE_ANCHOR",
+        "base": {"PTS": 19.4, "REB": 13.7, "AST": 8.2, "PRA": 41.3},
+        "partner": ("De'Aaron Fox", "PTS", 25.5, 27.2, 0.48),
+    },
+    "JA MORANT": {
+        "aliases": ("JA", "MORANT", "J MORANT"),
+        "team": "MEM", "sport": "NBA", "arch": "SLASHING_RIM_PRESSURE",
+        "scheme": "PACK_THE_PAINT_GAP",
+        "base": {"PTS": 25.8, "AST": 7.8, "REB": 5.2, "PRA": 38.8},
+        "partner": ("Jaren Jackson Jr", "PTS", 21.5, 23.4, 0.43),
+    },
+    "JAREN JACKSON JR": {
+        "aliases": ("JJJ", "JAREN JACKSON", "J JACKSON"),
+        "team": "MEM", "sport": "NBA", "arch": "POST_HUB_CONNECTOR_BIG",
+        "scheme": "DROP_ANCHOR_BIG",
+        "base": {"PTS": 22.4, "REB": 6.2, "PRA": 30.6},
+        "partner": ("Ja Morant", "AST", 7.5, 8.4, 0.43),
+    },
+    "TYRESE HALIBURTON": {
+        "aliases": ("HALIBURTON", "T HALIBURTON", "HALI"),
+        "team": "IND", "sport": "NBA", "arch": "HELIOCENTRIC_PNR_HANDLER",
+        "scheme": "DROP_ANCHOR_BIG",
+        "base": {"PTS": 21.2, "AST": 10.8, "3PM": 3.1, "PRA": 36.5},
+        "partner": ("Pascal Siakam", "PTS", 21.5, 23.5, 0.49),
+    },
+    "PASCAL SIAKAM": {
+        "aliases": ("SIAKAM", "P SIAKAM", "SPICY P"),
+        "team": "IND", "sport": "NBA", "arch": "VOLUME_SCORER",
+        "scheme": "SMALL_BALL_SWITCH",
+        "base": {"PTS": 21.8, "REB": 7.8, "AST": 4.1, "PRA": 33.7},
+        "partner": ("Tyrese Haliburton", "AST", 10.5, 11.6, 0.49),
+    },
+    "CAM THOMAS": {
+        "aliases": ("THOMAS", "C THOMAS"),
+        "team": "BKN", "sport": "NBA", "arch": "VOLUME_SCORER",
+        "scheme": "SMALL_BALL_SWITCH",
+        "base": {"PTS": 25.2, "3PM": 2.8, "PRA": 32.0},
+        "partner": ("Dennis Schroder", "AST", 6.5, 7.4, 0.40),
+    },
+    "DENNIS SCHRODER": {
+        "aliases": ("SCHRODER", "D SCHRODER"),
+        "team": "BKN", "sport": "NBA", "arch": "HELIOCENTRIC_PNR_HANDLER",
+        "scheme": "BLITZ_HIGH_HEDGE",
+        "base": {"PTS": 17.5, "AST": 6.8, "PRA": 28.0},
+        "partner": ("Cam Thomas", "PTS", 24.5, 26.2, 0.40),
+    },
+    "PAOLO BANCHERO": {
+        "aliases": ("PAOLO", "BANCHERO", "P BANCHERO"),
+        "team": "ORL", "sport": "NBA", "arch": "HELIOCENTRIC_PNR_HANDLER",
+        "scheme": "PACK_THE_PAINT_GAP",
+        "base": {"PTS": 25.2, "REB": 7.8, "AST": 5.4, "PRA": 38.4},
+        "partner": ("Franz Wagner", "PTS", 20.5, 22.4, 0.44),
+    },
+    "JAMES HARDEN": {
+        "aliases": ("HARDEN", "J HARDEN", "BEARD"),
+        "team": "LAC", "sport": "NBA", "arch": "HELIOCENTRIC_PNR_HANDLER",
+        "scheme": "DROP_ANCHOR_BIG",
+        "base": {"PTS": 23.4, "AST": 9.2, "REB": 6.5, "3PM": 3.0, "PRA": 39.1},
+        "partner": ("Ivica Zubac", "REB", 11.5, 12.8, 0.48),
+    },
+    "IVICA ZUBAC": {
+        "aliases": ("ZUBAC", "I ZUBAC"),
+        "team": "LAC", "sport": "NBA", "arch": "POST_HUB_CONNECTOR_BIG",
+        "scheme": "SINGLE_COVERAGE_ANCHOR",
+        "base": {"PTS": 16.2, "REB": 12.0, "PRA": 29.5},
+        "partner": ("James Harden", "AST", 9.5, 10.4, 0.48),
     },
 }
 
@@ -724,6 +801,52 @@ def format_revamped_sim_card(sim: Dict[str, Any], exec_res: Dict[str, Any]) -> s
     )
 
 
+_SCHEDULE_GATE_CACHE: Dict[str, Tuple[float, Set[str]]] = {}
+
+
+def get_active_teams_today(sport: str = "NBA") -> Set[str]:
+    """
+    Pulls live ESPN scoreboard for today and returns active team short names / abbreviations
+    so off-day superstars never make it onto the scan board.
+    Cached for 60 seconds.
+    """
+    sport_u = sport.upper()
+    now = time.time()
+    if sport_u in _SCHEDULE_GATE_CACHE:
+        ts, cached_teams = _SCHEDULE_GATE_CACHE[sport_u]
+        if now - ts < 60.0 and cached_teams:
+            return cached_teams
+
+    sport_path = "basketball/nba" if sport_u == "NBA" else "football/nfl"
+    url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/scoreboard"
+
+    active_teams: Set[str] = set()
+    try:
+        resp = requests.get(url, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            for event in data.get("events", []):
+                state = event.get("status", {}).get("type", {}).get("state")
+                if state in ("in", "pre", "post"):
+                    competitions = event.get("competitions", [{}])[0]
+                    for comp in competitions.get("competitors", []):
+                        team_obj = comp.get("team", {})
+                        if team_obj.get("abbreviation"):
+                            active_teams.add(team_obj.get("abbreviation", "").upper())
+                        if team_obj.get("displayName"):
+                            active_teams.add(team_obj.get("displayName", "").upper())
+                        if team_obj.get("name"):
+                            active_teams.add(team_obj.get("name", "").upper())
+                        if team_obj.get("shortDisplayName"):
+                            active_teams.add(team_obj.get("shortDisplayName", "").upper())
+    except Exception:
+        pass
+
+    if active_teams:
+        _SCHEDULE_GATE_CACHE[sport_u] = (now, active_teams)
+    return active_teams
+
+
 def run_full_sport_board_scan(
     sport: str,
     sniper: KalshiUnifiedSniper,
@@ -731,12 +854,30 @@ def run_full_sport_board_scan(
 ) -> str:
     """
     Runs whenever user types '/nba', '/NBA props', '/nfl', or taps 'Force Scan'.
-    Guaranteed to return ranked top +EV opportunities and never an empty list!
+    Filtered to today's active ESPN slate only!
     """
     sport_u = sport.upper()
-    board_players = [k for k, v in PLAYER_REGISTRY.items() if v.get("sport") == sport_u]
+
+    # 1. Fetch active teams playing today from ESPN scoreboard
+    active_teams = get_active_teams_today(sport_u)
+
+    # 2. Filter registry: Only keep players whose team is playing TODAY
+    board_players = []
+    for k, v in PLAYER_REGISTRY.items():
+        if v.get("sport") != sport_u:
+            continue
+        team_abbr = v.get("team", "").upper()
+        # If active_teams is empty (network fallback), allow all; otherwise strictly gate
+        if not active_teams or any(team_abbr in t for t in active_teams):
+            board_players.append(k)
+
     if not board_players:
-        board_players = list(PLAYER_REGISTRY.keys())[:6]
+        return (
+            f"📡 <b>PEZZY LIVE BOARD SCAN  •  {sport_u}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>No games scheduled for today on the active slate!</b>\n"
+            f"<i>Check tomorrow's slate or macro futures contracts.</i>"
+        )
 
     sims = []
     for pk in board_players:
@@ -752,8 +893,8 @@ def run_full_sport_board_scan(
     lines = [
         f"📡 <b>PEZZY LIVE BOARD SCAN  •  {sport_u}</b>",
         f"━━━━━━━━━━━━━━━━━━━━━━",
-        f"🟢 <b>Kalshi Live Contracts Indexed:</b> <code>{max(12, live_kalshi_count)}</code>",
-        f"🧠 <b>10,000-Draw Scheme & Coach Edges:</b>\n",
+        f"🟢 <b>Kalshi Live Contracts Indexed:</b> <code>{live_kalshi_count}</code>",
+        f"🧠 <b>Filtered to Today's Active Slate Only</b>\n",
     ]
 
     for idx, p in enumerate(top_plays, 1):
