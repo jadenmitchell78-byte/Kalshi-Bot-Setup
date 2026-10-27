@@ -8,25 +8,40 @@ Smart Placing Engine for Kalshi V2:
 5. Smart Combo Basket Executor (Places Correlated Copula Legs Together)
 """
 
+import base64
+import datetime
+import json
+import math
 import os
 import re
-import time
-import uuid
-import json
-import base64
 import requests
+import time
+import traceback
+import uuid
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    HAS_CRYPTOGRAPHY = True
+except Exception:
+    HAS_CRYPTOGRAPHY = False
+
 # Clean Stat Alias Mapping (Strips stat words out of player names!)
 STAT_ALIASES = {
-    "3PTS": "3PM", "3PT": "3PM", "3PM": "3PM", "THREES": "3PM", "3S": "3PM",
+    "3PTS": "3PM", "3PT": "3PM", "3PM": "3PM", "THREE": "3PM", "THREES": "3PM", "3S": "3PM",
+    "3-POINTER": "3PM", "3-POINTERS": "3PM", "3POINTER": "3PM", "3POINTERS": "3PM",
     "PTS": "PTS", "POINTS": "PTS", "POINT": "PTS",
-    "REB": "REB", "REBS": "REB", "REBOUNDS": "REB",
-    "AST": "AST", "ASTS": "AST", "ASSISTS": "AST",
+    "REB": "REB", "REBS": "REB", "REBOUND": "REB", "REBOUNDS": "REB",
+    "AST": "AST", "ASTS": "AST", "ASSIST": "AST", "ASSISTS": "AST",
     "PRA": "PRA", "PR": "PR", "PA": "PA", "RA": "RA",
-    "K": "K", "STRIKEOUTS": "K", "SOG": "SOG",
+    "BLK": "BLK", "BLKS": "BLK", "BLOCK": "BLK", "BLOCKS": "BLK",
+    "STL": "STL", "STLS": "STL", "STEAL": "STL", "STEALS": "STL",
+    "TOV": "TOV", "TO": "TOV", "TURNOVER": "TOV", "TURNOVERS": "TOV",
+    "K": "K", "STRIKEOUTS": "K", "STRIKEOUT": "K", "SOG": "SOG",
     "REC_YDS": "REC_YDS", "RUSH_YDS": "RUSH_YDS", "PASS_YDS": "PASS_YDS",
     "TD": "TD", "TDS": "TD", "TOUCHDOWNS": "TD", "TOUCHDOWN": "TD",
 }
@@ -150,7 +165,13 @@ def parse_prop_command(raw_text: str, default_sport: str = "NBA") -> Dict[str, A
     elif cmd in ("SIM", "PROPS", "PROP"):
         idx = 1
 
-    remaining = tokens[idx:]
+    remaining = list(tokens[idx:])
+
+    # Strip command noise words from front of remaining tokens
+    COMMAND_NOISE = {"SCAN", "FIND", "SEARCH", "PROPS", "PROP", "CHECK", "SIM", "CARD", "BET", "LIVE", "BOARD", "SLATE", "NBA", "NFL", "MLB", "NHL", "TENNIS", "WNBA", "ALL"}
+    while remaining and remaining[0].upper() in COMMAND_NOISE:
+        remaining.pop(0)
+
     if not remaining:
         return {
             "sport": sport,
@@ -302,16 +323,7 @@ KALSHI_SERIES_PREFIXES: Dict[Tuple[str, str], List[str]] = {
     ("NHL", "SAVES"): ["KXNHLSAVES", "NHL"],
 }
 
-CURATED_FALLBACK_MARKETS: List[Dict[str, Any]] = [
-    {"ticker": "KXNBA-MIA-HERRO-O3P53PT", "title": "Tyler Herro Over 3.5 3PT Made", "category": "NBA", "floor_strike": 3.5},
-    {"ticker": "KXNBA-MIA-HERRO-O22P5PTS", "title": "Tyler Herro Over 22.5 Points", "category": "NBA", "floor_strike": 22.5},
-    {"ticker": "KXNBA-MIN-RANDLE-O23P5PTS", "title": "Julius Randle Over 23.5 Points", "category": "NBA", "floor_strike": 23.5},
-    {"ticker": "KXNBA-MIN-EDWARDS-O26P5PTS", "title": "Anthony Edwards Over 26.5 Points", "category": "NBA", "floor_strike": 26.5},
-    {"ticker": "KXNBA-LAL-LBJ-O25P5PTS", "title": "LeBron James Over 25.5 Points", "category": "NBA", "floor_strike": 25.5},
-    {"ticker": "KXNBA-GSW-CURRY-O4P53PT", "title": "Stephen Curry Over 4.5 3PT Made", "category": "NBA", "floor_strike": 4.5},
-    {"ticker": "KXNFL-KC-MAHOMES-O274P5PASS", "title": "Patrick Mahomes Over 274.5 Pass Yds", "category": "NFL", "floor_strike": 274.5},
-    {"ticker": "KXNFL-KC-RICE-O68P5REC", "title": "Rashee Rice Over 68.5 Rec Yds", "category": "NFL", "floor_strike": 68.5},
-]
+CURATED_FALLBACK_MARKETS: List[Dict[str, Any]] = []
 
 
 class KalshiSmartPlacer:
@@ -495,6 +507,36 @@ class KalshiSmartPlacer:
                 except Exception:
                     continue
 
+        # 3. Direct sweep across open markets (/trade-api/v2/markets?status=open&limit=200)
+        if len(collected) < 10:
+            cursor_p = None
+            for _ in range(4):
+                path = "/trade-api/v2/markets?status=open&limit=200"
+                if cursor_p:
+                    path += f"&cursor={cursor_p}"
+                try:
+                    resp = requests.get(self.base_url + path, headers=self.sign_headers("GET", path), timeout=5)
+                    if resp.status_code == 200:
+                        m_data = resp.json()
+                        m_list = m_data.get("markets", [])
+                        for m in m_list:
+                            if m.get("status") in ("active", "open"):
+                                tk = m.get("ticker", "")
+                                if tk and tk not in seen_tickers:
+                                    m_blob = f"{tk} {m.get('title', '')} {m.get('subtitle', '')} {m.get('category', '')}".upper()
+                                    if any(exc in m_blob for exc in EXCLUDED_CATEGORIES):
+                                        continue
+                                    if any(k in m_blob for k in keywords):
+                                        seen_tickers.add(tk)
+                                        collected.append(m)
+                        cursor_p = m_data.get("cursor")
+                        if not cursor_p or not m_list:
+                            break
+                    else:
+                        break
+                except Exception:
+                    break
+
         if collected:
             self.market_cache = collected
             self.last_cache_time = time.time()
@@ -505,9 +547,9 @@ class KalshiSmartPlacer:
     # -----------------------------------------------------------------
     def resolve_prop_ticker(self, sport: str, player_name: str, stat: str, target_line: float) -> Optional[Dict[str, Any]]:
         markets = self.refresh_active_sports_markets(sport, stat) or []
-        candidates = list(markets) + [c for c in CURATED_FALLBACK_MARKETS if c.get("category", "").upper() == sport.upper()]
-        if not candidates:
-            candidates = CURATED_FALLBACK_MARKETS
+        candidates = list(markets)
+        if CURATED_FALLBACK_MARKETS:
+            candidates += [c for c in CURATED_FALLBACK_MARKETS if c.get("category", "").upper() == sport.upper()]
 
         # Clean stat words out of player_name so 3pts/pts/reb never pollute last name!
         clean_words = [w for w in player_name.upper().replace("-", " ").replace(".", " ").split() if w not in STAT_ALIASES and w not in ("OVER", "UNDER", "O", "U", "PTS", "REB", "AST", "PRA", "3PT", "3PTS", "3PM")]
@@ -624,7 +666,7 @@ class KalshiSmartPlacer:
         sniper_on: bool = True,
         live_mode: bool = True,
         kelly_fraction: float = 0.25,
-        min_ev_gate: float = 2.5,
+        min_ev_gate: float = 1.5,
         existing_ticker: Optional[str] = None,
     ) -> Dict[str, Any]:
         if ev_edge_pct < min_ev_gate:
@@ -654,35 +696,10 @@ class KalshiSmartPlacer:
         q = 1.0 - p
         b = (100.0 - limit_cents) / float(max(1, limit_cents))  # Net profit odds per cent risked
         raw_kelly = max(0.0, (b * p - q) / b) if b > 0 else 0.0
-        eff_bankroll = bankroll_usd if bankroll_usd > 0 else 12.52
+        eff_bankroll = bankroll_usd if bankroll_usd > 0 else 32.22
         stake_usd = max(1.00, min(eff_bankroll * 0.40, round(eff_bankroll * max(0.08, raw_kelly) * kelly_fraction, 2)))
         contracts = max(1, min(10, int((stake_usd * 100) // max(1, limit_cents))))
         cost_usd = round((contracts * limit_cents) / 100.0, 2)
-
-        # Check Live Slate Schedule Gate for NBA
-        sched_alert = None
-        if sport.upper() == "NBA":
-            player_clean = player_name.upper().strip()
-            team_detected = None
-            for k, (c_name, t, _arch) in PLAYER_CANONICAL_MAP.items():
-                if k == player_clean or SequenceMatcher(None, player_clean, k).ratio() >= 0.80 or k in player_clean:
-                    team_detected = t
-                    break
-            if team_detected and team_detected in TEAM_SCHEDULE_NOTES and team_detected not in TODAY_ACTIVE_NBA_TEAMS:
-                sched_alert = TEAM_SCHEDULE_NOTES[team_detected]
-
-        if sched_alert:
-            return {
-                "status": "SIM_QUEUED",
-                "ticker": ticker,
-                "side": kalshi_side.upper(),
-                "contracts": contracts,
-                "limit_cents": limit_cents,
-                "cost_usd": cost_usd,
-                "style": "OFF_SLATE_PAPER",
-                "sched_alert": sched_alert,
-                "note": f"⚠️ {sched_alert} — live Kalshi order suppressed, paper simulated.",
-            }
 
         if not (sniper_on and live_mode):
             return {
@@ -724,6 +741,11 @@ class KalshiSmartPlacer:
             if resp.status_code in (200, 201):
                 order_data = resp.json().get("order") or resp.json().get("event_order") or {}
                 real_oid = order_data.get("order_id") or client_oid
+                try:
+                    from bot import notify_telegram
+                    notify_telegram(f"✅ AUTO-SNIPER ORDER PLACED: {ticker} | {contracts}x {kalshi_side.upper()} @ {limit_cents}¢ | Order ID: {real_oid}")
+                except Exception:
+                    pass
                 return {
                     "status": "PLACED",
                     "order_id": real_oid,
@@ -736,6 +758,11 @@ class KalshiSmartPlacer:
                     "note": pricing_note,
                 }
             err_msg = resp.text[:180]
+            try:
+                from bot import notify_telegram
+                notify_telegram(f"⚠️ AUTO-SNIPER ORDER REJECTED BY KALSHI [HTTP {resp.status_code}]: {resp.text} | Payload: {json.dumps(payload)}")
+            except Exception:
+                pass
             if "insufficient_balance" in err_msg.lower():
                 return {"status": "BALANCE_HELD", "code": resp.status_code, "reason": "Resting orders holding cash", "limit_cents": limit_cents, "contracts": contracts, "ticker": ticker}
             if "market_not_found" in err_msg.lower():
@@ -753,6 +780,11 @@ class KalshiSmartPlacer:
                 }
             return {"status": "API_REJECTED", "code": resp.status_code, "reason": err_msg, "limit_cents": limit_cents, "contracts": contracts, "ticker": ticker}
         except Exception as e:
+            try:
+                from bot import notify_telegram
+                notify_telegram(f"⚠️ AUTO-SNIPER ORDER REJECTED BY KALSHI [HTTP 500]: {e} | Payload: {json.dumps(payload)}")
+            except Exception:
+                pass
             return {"status": "ERROR", "reason": str(e), "limit_cents": limit_cents, "contracts": contracts, "ticker": ticker}
 
     # -----------------------------------------------------------------
@@ -787,7 +819,7 @@ class KalshiSmartPlacer:
                 sniper_on=sniper_on,
                 live_mode=live_mode,
                 kelly_fraction=synergy_kelly,
-                min_ev_gate=2.0,
+                min_ev_gate=1.5,
                 existing_ticker=leg.get("market_ticker") or leg.get("ticker"),
             )
             receipts.append(res)
@@ -923,3 +955,105 @@ class KalshiSmartPlacer:
             )
             results.append({"ticker": tk, "result": res})
         return results
+
+
+def get_live_kalshi_balance(base_url: str = "https://api.elections.kalshi.com") -> float:
+    """Query authentic Kalshi portfolio balance across election and external trade endpoints."""
+    endpoints = [
+        base_url,
+        "https://api.elections.kalshi.com",
+        "https://external-api.kalshi.com",
+        "https://trading-api.kalshi.com",
+    ]
+    seen = set()
+    for base in [u for u in endpoints if not (u in seen or seen.add(u))]:
+        path = "/trade-api/v2/portfolio/balance"
+        try:
+            from bot import get_auth_headers
+            headers = get_auth_headers("GET", path)
+            resp = requests.get(f"{base}{path}", headers=headers, timeout=5)
+            if resp.status_code == 200:
+                bal_cents = resp.json().get("balance", 0)
+                bal_dollars = round(bal_cents / 100.0, 2)
+                if bal_dollars > 0:
+                    return bal_dollars
+        except Exception:
+            continue
+    return 32.22
+
+
+def place_kalshi_order(
+    ticker: str,
+    action: str = "buy",
+    side: str = "yes",
+    count: int = 1,
+    price_cents: int = 50,
+    base_url: str = "https://api.elections.kalshi.com",
+) -> Dict[str, Any]:
+    """Execute live authenticated Kalshi limit order with instant Telegram notification."""
+    client_oid = str(uuid.uuid4())
+    is_yes = side.lower() in ("yes", "over", "o")
+    v2_side = "yes" if is_yes else "no"
+    price_field = "yes_price" if is_yes else "no_price"
+    price_val = int(price_cents if is_yes else (100 - price_cents))
+
+    payload = {
+        "ticker": ticker,
+        "action": action.lower(),
+        "side": v2_side,
+        "count": max(1, int(count)),
+        "type": "limit",
+        "client_order_id": client_oid,
+        price_field: price_val,
+    }
+
+    path = "/trade-api/v2/portfolio/orders"
+    endpoints = [
+        base_url,
+        "https://api.elections.kalshi.com",
+        "https://external-api.kalshi.com",
+    ]
+    seen = set()
+    for base in [u for u in endpoints if not (u in seen or seen.add(u))]:
+        try:
+            from bot import get_auth_headers
+            headers = get_auth_headers("POST", path)
+            resp = requests.post(
+                f"{base}{path}",
+                json=payload,
+                headers=headers,
+                timeout=8,
+            )
+            if resp.status_code in (200, 201):
+                order_data = resp.json().get("order") or resp.json().get("event_order") or {}
+                real_oid = order_data.get("order_id") or client_oid
+                try:
+                    from bot import notify_telegram
+                    notify_telegram(f"✅ AUTO-SNIPER ORDER PLACED: {ticker} | {count}x {v2_side.upper()} @ {price_cents}¢ | Order ID: {real_oid}")
+                except Exception:
+                    pass
+                return {
+                    "ok": True,
+                    "order_id": real_oid,
+                    "ticker": ticker,
+                    "side": v2_side,
+                    "count": count,
+                    "price_cents": price_cents,
+                    "status": "PLACED",
+                }
+            err_text = resp.text[:180]
+            try:
+                from bot import notify_telegram
+                notify_telegram(f"⚠️ AUTO-SNIPER ORDER REJECTED BY KALSHI [HTTP {resp.status_code}]: {resp.text} | Payload: {json.dumps(payload)}")
+            except Exception:
+                pass
+            return {"ok": False, "status_code": resp.status_code, "error": err_text, "payload": payload}
+        except Exception as exc:
+            try:
+                from bot import notify_telegram
+                notify_telegram(f"⚠️ AUTO-SNIPER ORDER REJECTED BY KALSHI [HTTP 500]: {exc} | Payload: {json.dumps(payload)}")
+            except Exception:
+                pass
+            return {"ok": False, "status_code": 500, "error": str(exc), "payload": payload}
+    return {"ok": False, "status_code": 500, "error": "All endpoints failed", "payload": payload}
+

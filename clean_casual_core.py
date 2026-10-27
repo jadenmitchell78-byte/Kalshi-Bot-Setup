@@ -1,12 +1,17 @@
+import datetime
+import json
+import math
 import re
-import time
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set, Tuple
 import requests
+import time
+import traceback
+import uuid
+from datetime import datetime as dt_cls, timezone
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # 1. STRICT WHITELIST: Only official Kalshi Sports Ticker Prefixes
 ALLOWED_SPORTS_PREFIXES = (
-    "KXNBA", "KXNFL", "KXMLB", "KXNHL", "KXTENNIS", "KXATP", "KXWTA", "KXNCAA"
+    "KXNBA", "KXNFL", "KXMLB", "KXNHL", "KXTENNIS", "KXATP", "KXWTA", "KXNCAA", "KXCFB", "KXSOCCER", "KXBOXING", "KXMMA", "KXUFC"
 )
 
 # Strictly ban futures, awards, music, and celebrity markets even if under sports series
@@ -56,10 +61,20 @@ def get_live_sport_schedule(sport: str = "NBA") -> Dict[str, Any]:
             for ev in events:
                 status_obj = ev.get("status", {})
                 status_type = status_obj.get("type", {})
-                state = status_type.get("state", "pre")  # 'pre', 'in', 'post'
-                detail = status_type.get("shortDetail") or status_type.get("detail") or ""
-                ev_date_raw = ev.get("date", "")
+                state = status_type.get("state", "pre").lower()  # 'pre', 'in', 'post'
+                detail = str(status_type.get("shortDetail") or status_type.get("detail") or "").upper()
+                type_name = str(status_type.get("name", "")).upper()
+                is_completed = bool(status_type.get("completed", False))
 
+                # STRICT GAME-STATE GATE: drop finished/final/postponed games
+                if is_completed or state == "post" or "FINAL" in detail or "FINAL" in type_name:
+                    continue
+                if "POSTPONED" in detail or "CANCELED" in detail:
+                    continue
+                if state not in ("pre", "in"):
+                    continue
+
+                ev_date_raw = ev.get("date", "")
                 game_time_str = _format_espn_game_time(ev_date_raw, detail, state)
 
                 comps = ev.get("competitions", [{}])[0]
@@ -113,8 +128,8 @@ def _format_espn_game_time(date_iso: str, detail: str, state: str) -> str:
     if state == "in":
         clock = detail if detail else "In Progress"
         return f"🔴 Live ({clock})"
-    if "FINAL" in detail.upper():
-        return f"🏁 Final ({now_dt.strftime('%b %d')})"
+    if "FINAL" in detail.upper() or state == "post":
+        return f"Pre-Game ({now_dt.strftime('%b %d')})"
 
     if date_iso:
         try:
@@ -214,6 +229,100 @@ def _prob_to_american(prob_dec: float) -> str:
     return f"-{int(round((p / (1.0 - p)) * 100))}"
 
 
+def format_pick_headline(p: dict, default_price: int = 50) -> str:
+    """
+    Formats a pick clearly specifying who/what to take:
+    - Player Prop:
+      🟢 TAKE: Myles Turner OVER 6.5 REB (YES @ 54¢)
+         🏟️ Matchup: IND @ NYK | 📊 Ticker: KXNBAREB-...
+    - Head-to-Head / Match Win / Moneyline:
+      🟢 TAKE: Daniil Medvedev ML — TO WIN (YES @ 58¢)
+         🏟️ Matchup: Djokovic vs Medvedev | 📊 Ticker: KXTENNIS-...
+    - Game Total / Spread:
+      🟢 TAKE: Over 224.5 Total Points (YES @ 52¢)
+         🏟️ Matchup: LAL @ PHX | 📊 Ticker: KXNBATOT-...
+    """
+    raw_price = p.get("limit_cents") or p.get("price")
+    if raw_price is None:
+        line_s = str(p.get("line", ""))
+        if "¢" in line_s:
+            try:
+                raw_price = int(re.sub(r"[^\d]", "", line_s))
+            except Exception:
+                raw_price = default_price
+        else:
+            raw_price = default_price
+    price_c = int(raw_price) if isinstance(raw_price, (int, float)) else default_price
+
+    raw_side = str(p.get("contract_side") or p.get("side") or "YES").upper()
+    contract_side = "NO" if raw_side in ("NO", "UNDER") else "YES"
+
+    stat = str(p.get("stat") or p.get("stat_type") or "PTS").upper()
+    side = str(p.get("side") or "OVER").upper()
+    line = p.get("line", "")
+    ticker = str(p.get("ticker") or "")
+    matchup = str(p.get("matchup") or "")
+    player = str(p.get("player") or p.get("player_name") or p.get("partner") or "")
+    target = str(p.get("target_pick") or p.get("subtitle") or p.get("yes_sub_title") or "")
+
+    # 1. Total / Spread check
+    is_total = any(k in stat for k in ("TOTAL", "SPREAD", "OVER/UNDER", "GAMES")) or "TOTAL" in player.upper()
+    
+    # 2. Moneyline / Match Win check
+    is_ml = (
+        stat in ("MATCH WIN", "MONEYLINE", "ML", "WIN", "HEAD TO HEAD")
+        or (" vs " in player.lower() and not any(k in stat for k in ("PTS", "REB", "AST", "3PM", "3PT", "PRA", "PASS", "RUSH", "REC", "K", "STRIKE")))
+    )
+
+    if is_total:
+        tot_side = "Over" if "OVER" in side or "YES" in side else "Under"
+        line_clean = str(line).replace("¢", "").strip()
+        unit_str = "Total Games" if "GAME" in stat else "Total Points"
+        header = f"🟢 <b>TAKE: {tot_side} {line_clean} {unit_str} ({contract_side} @ {price_c}¢)</b>"
+        clean_matchup = matchup if matchup and matchup != player else player
+
+    elif is_ml:
+        if target and target.upper() not in ("YES", "NO", "WIN / OVER"):
+            backed = target
+        elif " vs " in player:
+            parts = [x.strip() for x in re.split(r"\s+vs\.?\s+", player, flags=re.I)]
+            if side in ("AWAY", "2") and len(parts) > 1:
+                backed = parts[1]
+            else:
+                backed = parts[0]
+        else:
+            backed = player or "Winner"
+        backed = re.sub(r"\s*\([^)]*\)", "", backed).strip()
+        header = f"🟢 <b>TAKE: {backed} ML — TO WIN ({contract_side} @ {price_c}¢)</b>"
+        clean_matchup = matchup if matchup and matchup.upper() != backed.upper() else (player if " vs " in player.lower() else "")
+
+    else:
+        # Player Prop
+        player_clean = target if target and target.upper() not in ("YES", "NO") else player
+        player_clean = re.sub(r"\s*\([^)]*\)", "", player_clean).strip()
+        prop_side = "OVER" if side not in ("UNDER", "NO") else "UNDER"
+        line_clean = str(line).replace("¢", "").strip()
+        header = f"🟢 <b>TAKE: {player_clean} {prop_side} {line_clean} {stat} ({contract_side} @ {price_c}¢)</b>"
+        clean_matchup = matchup if matchup and matchup.upper() != player_clean.upper() else ""
+
+    detail_parts = []
+    if clean_matchup:
+        detail_parts.append(f"🏟️ Matchup: {clean_matchup}")
+    if ticker and not ticker.endswith("-LIVE") and ticker != "KXTENNIS-LIVE" and ticker != "N/A":
+        detail_parts.append(f"📊 Ticker: {ticker}")
+
+    detail_line = f"   {' | '.join(detail_parts)}" if detail_parts else ""
+    date_str = p.get("game_date")
+    date_line = f"   📅 <i>{date_str}</i>" if date_str else ""
+
+    components = [header]
+    if detail_line:
+        components.append(detail_line)
+    if date_line:
+        components.append(date_line)
+    return "\n".join(components)
+
+
 def format_video_style_single_card(sim: dict, exec_res: dict, bankroll: float = 23.55) -> str:
     """
     Produces the clean promo-video UI with exact game dates and a collapsible sharp math drawer.
@@ -229,39 +338,43 @@ def format_video_style_single_card(sim: dict, exec_res: dict, bankroll: float = 
 
     sp = sim.get("sport", "NBA")
     p_team = sim.get("team", "")
-    p_matchup = sim.get("matchup") or p_team
     p_date = sim.get("game_date") or get_prop_date_str(sp, p_team)
 
-    p_partner = c.get("partner", "Teammate")
-    p_side = c.get("side", "OVER")
-    p_line = c.get("line", 5.5)
-    p_stat = c.get("stat", "AST")
-    partner_team = c.get("team", p_team)
-    partner_matchup = c.get("matchup", p_matchup)
-    partner_date = c.get("game_date") or get_prop_date_str(sp, partner_team)
+    leg1_block = format_pick_headline(sim, default_price=exec_res.get("limit_cents", 50))
+    partner_sim = {
+        "player": c.get("partner", "Teammate"),
+        "side": c.get("side", "OVER"),
+        "line": c.get("line", 5.5),
+        "stat": c.get("stat", "AST"),
+        "team": c.get("team", p_team),
+        "matchup": c.get("matchup", sim.get("matchup", p_team)),
+        "game_date": c.get("game_date") or get_prop_date_str(sp, c.get("team", p_team)),
+        "ticker": c.get("ticker", ""),
+        "limit_cents": 50,
+        "contract_side": "YES",
+    }
+    leg2_block = format_pick_headline(partner_sim, default_price=50)
 
-    matchup_display1 = f" ({p_matchup})" if p_matchup else ""
-    matchup_display2 = f" ({partner_matchup})" if partner_matchup else ""
+    p_name = sim.get("target_pick") or sim.get("player", "Player")
 
     return (
         f"✅ <b>PREDICTIONS FOUND</b> ✅\n\n"
         f"🎟 <b>2-TEAM AUTO PARLAY</b>  •  <b>ODDS: {odds_str}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🟢 <b>{sim['player']}{matchup_display1}</b> — {sim['side']} {sim['line']} {sim['stat']}\n"
-        f"   📅 <i>{p_date}</i>\n"
-        f"🟢 <b>{p_partner}{matchup_display2}</b> — {p_side} {p_line} {p_stat}\n"
-        f"   📅 <i>{partner_date}</i>\n"
+        f"{leg1_block}\n"
+        f"{leg2_block}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"💵 <b>Stake:</b> <code>${stake:.2f}</code>  ➔  💰 <b>Payout:</b> <code>${payout:.2f}</code> (+${profit:.2f} Profit)\n"
         f"🔥 <b>AI Edge:</b> <code>+{sim.get('ev_edge', 0.0)}%</code>  |  {badge}\n\n"
-        f"<blockquote expandable>🧠 <b>Tap for AI Coach & 10k Sim Math</b>\n"
-        f"• {sim['player']}: {sim.get('true_prob', 50.0)}% True Prob (Proj: {sim.get('mean', sim['line'])} ± {sim.get('std', 1.5)})\n"
-        f"• Floor/Med/Ceil: {sim.get('p10', sim['line'])} / {sim.get('p50', sim['line'])} / {sim.get('p90', sim['line'])}\n"
+        f"<blockquote expandable>🧠 <b>Tap for AI Coach &amp; 10k Sim Math</b>\n"
+        f"• {p_name}: {sim.get('true_prob', 50.0)}% True Prob (Proj: {sim.get('mean', sim.get('line', ''))} ± {sim.get('std', 1.5)})\n"
+        f"• Floor/Med/Ceil: {sim.get('p10', sim.get('line', ''))} / {sim.get('p50', sim.get('line', ''))} / {sim.get('p90', sim.get('line', ''))}\n"
         f"• Game Date Verified: {p_date}\n"
         f"• Matchup: {sim.get('arch', 'QUANT_HYBRID')} vs {sim.get('scheme', 'BALANCED')} ({sim.get('scheme_pct', 0.0):+.1f}%)\n"
         f"• Coach Note: {sim.get('coach_note', 'Pace and usage favor over volume.')}\n"
         f"• Copula Boost: +{c.get('boost_pct', 1.5)}% (ρ = +{c.get('rho', 0.42):.2f})\n"
-        f"• Kalshi Ticker: {exec_res.get('ticker', 'STANDBY')} ({exec_res.get('contracts', 1)}x @ {exec_res.get('limit_cents', 50)}¢)</blockquote>"
+        f"• Top Anchor Snipe: {exec_res.get('ticker', 'N/A')} ({exec_res.get('contracts', 1)}x @ {exec_res.get('limit_cents', 50)}¢)\n"
+        f"• Execution Status: {status_str}</blockquote>"
     )
 
 
@@ -292,18 +405,15 @@ def format_video_style_board_scan(sport: str, top_plays: list, exec_res: dict, b
     profit = round(payout - stake, 2)
     avg_edge = round(sum(p.get("ev_edge", 0.0) for p in legs) / len(legs), 1)
 
-    leg_block = ""
+    leg_lines_list = []
     math_block = ""
     for p in legs:
-        team_str = p.get("matchup") or p.get("team") or ""
-        team_tag = f" ({team_str})" if team_str else ""
-        date_str = p.get("game_date") or get_prop_date_str(sport_u, p.get("team", ""))
-        leg_block += (
-            f"🟢 <b>{p['player']}{team_tag}</b> — {p['side']} {p['line']} {p['stat']}\n"
-            f"   📅 <i>{date_str}</i>\n"
-        )
-        math_block += f"• {p['player']} ({date_str}): {p.get('true_prob')}% ({p.get('mean', p['line'])} proj) | {p.get('coach_note', 'Edge confirmed')}\n"
+        leg_lines_list.append(format_pick_headline(p, default_price=p.get("limit_cents", 50)))
+        p_name = p.get("target_pick") or p.get("player", "Prop")
+        d_str = p.get("game_date") or ""
+        math_block += f"• {p_name} ({d_str}): {p.get('true_prob')}% ({p.get('mean', p.get('line', ''))} proj) | {p.get('coach_note', 'Edge confirmed')}\n"
 
+    leg_block = "\n".join(leg_lines_list)
     status_str = str(exec_res.get("status", "ARMED"))
     badge = "🟢 <b>BET PLACED AUTOMATICALLY</b>" if "PLACED" in status_str.upper() else "⚡ <b>AUTO-BET ARMED</b>"
 
@@ -311,13 +421,13 @@ def format_video_style_board_scan(sport: str, top_plays: list, exec_res: dict, b
         f"✅ <b>PREDICTIONS FOUND</b> ✅\n\n"
         f"🎟 <b>{len(legs)}-TEAM AUTO PARLAY</b>  •  <b>ODDS: {odds_str}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"{leg_block}"
+        f"{leg_block}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"💵 <b>Total Stake:</b> <code>${stake:.2f}</code>\n"
         f"💰 <b>Est. Payout:</b> <code>${payout:.2f}</code> (<b>+${profit:.2f} Profit</b>)\n"
         f"🔥 <b>Automated Edge:</b> <code>+{avg_edge}%</code>\n"
         f"{badge}\n\n"
-        f"<blockquote expandable>🧠 <b>Tap for 10k Sim & Kalshi Order Receipt</b>\n"
+        f"<blockquote expandable>🧠 <b>Tap for 10k Sim &amp; Kalshi Order Receipt</b>\n"
         f"{math_block}"
         f"• Schedule Source: ESPN Live Scoreboard ({today_label})\n"
         f"• Top Anchor Snipe: {exec_res.get('ticker', 'N/A')} ({exec_res.get('contracts', 1)}x @ {exec_res.get('limit_cents', 50)}¢)\n"
@@ -336,41 +446,63 @@ def format_casual_video_slip(legs: list, combo_data: dict, stake_usd: float, ord
     profit = round(payout - stake_usd, 2)
     edge_pct = round(combo_data.get("combo_ev", 24.5), 1)
 
-    leg_lines = ""
+    leg_lines_list = []
     math_drawer_lines = ""
     for leg in legs:
-        p_name = leg.get("player") or leg.get("player_name") or leg.get("player_prop") or "Player"
-        side = leg.get("side", "OVER")
-        line = leg.get("line", 0.0)
-        stat = leg.get("stat") or leg.get("stat_type") or "PTS"
-        sp = leg.get("sport") or "NBA"
-        tm = leg.get("team") or ""
-        matchup = leg.get("matchup") or tm
-        matchup_tag = f" ({matchup})" if matchup else ""
-        date_str = leg.get("game_date") or get_prop_date_str(sp, tm)
+        leg_lines_list.append(format_pick_headline(leg, default_price=leg.get("limit_cents", 50)))
+        p_name = leg.get("target_pick") or leg.get("player") or leg.get("player_name") or "Player"
+        d_str = leg.get("game_date") or ""
         true_p = leg.get("true_prob") or round(leg.get("mc_true_prob", 0.5) * 100, 1)
-        mean_v = leg.get("mean") or leg.get("mc_mean", line)
+        mean_v = leg.get("mean") or leg.get("mc_mean", leg.get("line", ""))
         c_note = leg.get("coach_note") or (leg.get("coaching_notes", ["Edge confirmed"])[0] if leg.get("coaching_notes") else "Edge confirmed")
+        math_drawer_lines += f"• {p_name} ({d_str}): {true_p}% True ({mean_v} proj) | {c_note}\n"
 
-        leg_lines += (
-            f"🟢 <b>{p_name}{matchup_tag}</b> — {side} {line} {stat}\n"
-            f"   📅 <i>{date_str}</i>\n"
-        )
-        math_drawer_lines += f"• {p_name} ({date_str}): {true_p}% True ({mean_v} proj) | {c_note}\n"
-
+    leg_lines = "\n".join(leg_lines_list)
     status_badge = "🟢 <b>BET PLACED AUTOMATICALLY</b>" if "PLACED" in order_status.upper() else "⚡ <b>AUTO-SNIPER ARMED</b>"
 
     return (
         f"✅ <b>PREDICTIONS FOUND</b> ✅\n\n"
         f"🎟 <b>{len(legs)}-TEAM AUTO PARLAY</b>  •  <b>ODDS: {odds_str}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"{leg_lines}"
+        f"{leg_lines}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"💵 <b>Stake:</b> <code>${stake_usd:.2f}</code>  ➔  💰 <b>Payout:</b> <code>${payout:.2f}</code> (+${profit:.2f})\n"
         f"🔥 <b>AI Edge:</b> <code>+{edge_pct}%</code>\n"
         f"{status_badge}\n\n"
-        f"<blockquote expandable>🧠 <b>Tap for AI Coach & 10k Sim Breakdown</b>\n"
+        f"<blockquote expandable>🧠 <b>Tap for AI Coach &amp; 10k Sim Breakdown</b>\n"
         f"{math_drawer_lines}"
         f"• Copula Correlation Boost: +{combo_data.get('boost_pct', 1.8)}%\n"
-        f"• Execution: {order_status}</blockquote>"
+        f"• Execution Status: {order_status}</blockquote>"
     )
+
+
+def build_casual_video_buttons(stream_url: str = "https://peezt-tv.vercel.app", as_ptb: bool = False) -> Any:
+    """
+    Returns the clean button layout matching the video UI:
+    [ 🟢 PLACE AUTO-BET ]  [ 📺 WATCH LIVE STREAM ]
+    [ ⚡ FORCE RESCAN ]    [ 🔙 MENU HUD ]
+    Supports both PTB InlineKeyboardMarkup and standard dict format.
+    """
+    rows_data = [
+        [
+            {"text": "🟢 PLACE AUTO-BET", "callback_data": "menu_force_scan"},
+            {"text": "📺 WATCH LIVE STREAM", "url": stream_url},
+        ],
+        [
+            {"text": "⚡ FORCE RESCAN", "callback_data": "menu_force_scan"},
+            {"text": "🔙 MENU HUD", "callback_data": "menu_refresh_hud"},
+        ],
+    ]
+    if as_ptb:
+        try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            return InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(btn["text"], callback_data=btn.get("callback_data"), url=btn.get("url"))
+                    for btn in row
+                ]
+                for row in rows_data
+            ])
+        except Exception:
+            pass
+    return {"inline_keyboard": rows_data}

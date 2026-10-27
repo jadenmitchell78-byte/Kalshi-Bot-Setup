@@ -1,6 +1,11 @@
+import datetime
+import json
+import math
 import re
-import time
 import requests
+import time
+import traceback
+import uuid
 import numpy as np
 from typing import List, Dict, Optional, Any
 
@@ -165,6 +170,37 @@ def fetch_paginated_kalshi_sports(sport: str = "ALL", max_pages: int = 6) -> Lis
             except Exception:
                 break
 
+        # Direct /markets sweep if /events sweep returned sparse sports markets
+        if len(collected) < 10:
+            cursor_m = None
+            for _ in range(4):
+                params_m = {"status": "open", "limit": 200}
+                if cursor_m:
+                    params_m["cursor"] = cursor_m
+                try:
+                    r_m = requests.get(f"{base}/markets", params=params_m, timeout=5)
+                    if r_m.status_code == 200:
+                        m_data = r_m.json()
+                        m_list = m_data.get("markets", [])
+                        for sm in m_list:
+                            if sm.get("status") in ("active", "open"):
+                                t = str(sm.get("ticker", "")).upper()
+                                if not t or t in seen_tickers:
+                                    continue
+                                full_blob = f"{t} {sm.get('title','')} {sm.get('subtitle','')} {sm.get('category','')}".upper()
+                                if any(b in full_blob for b in BANNED_NON_GAME_WORDS):
+                                    continue
+                                if any(k in full_blob for k in target_kws) or t.startswith(("KXNBA", "KXNFL", "KXTENNIS", "KXATP", "KXWTA", "KXMLB", "KXNHL", "KXCFB")):
+                                    seen_tickers.add(t)
+                                    collected.append(sm)
+                        cursor_m = m_data.get("cursor")
+                        if not cursor_m or not m_list:
+                            break
+                    else:
+                        break
+                except Exception:
+                    break
+
         if collected:
             break
 
@@ -220,9 +256,19 @@ def simulate_live_kalshi_market(m: Dict, sport: str = "TENNIS") -> Dict:
         ev_edge = round((true_no_prob - no_book_prob) * 100.0, 2)
         entry_cents = max(4, min(95, 100 - book_cents))
 
-    clean_label = f"{ev_title}"
-    if sub and sub.upper() not in clean_label.upper():
-        clean_label = f"{ev_title} ({sub})"
+    target_pick = m.get("yes_sub_title") or m.get("subtitle") or ""
+    if not target_pick or target_pick.upper() in ("YES", "NO", "WIN / OVER"):
+        if " vs " in ev_title.lower():
+            parts = ev_title.split(" vs ")
+            target_pick = parts[0].strip() if side == "YES" or len(parts) < 2 else parts[1].strip()
+        elif " at " in ev_title.lower():
+            parts = ev_title.split(" at ")
+            target_pick = parts[1].strip() if side == "YES" or len(parts) < 2 else parts[0].strip()
+        else:
+            target_pick = ev_title
+
+    # Clean target_pick from any outer brackets
+    target_pick = re.sub(r"\s*\([^)]*\)", "", target_pick).strip()
 
     # Detect sport if passed as ALL
     inferred_sport = sport.upper()
@@ -238,6 +284,23 @@ def simulate_live_kalshi_market(m: Dict, sport: str = "TENNIS") -> Dict:
             inferred_sport = "NHL"
         else:
             inferred_sport = "LIVE"
+
+    # Detect stat
+    upper_blob = f"{ticker} {ev_title} {sub}".upper()
+    if any(k in upper_blob for k in ("PTS", "POINT")):
+        stat_name = "PTS"
+    elif any(k in upper_blob for k in ("REB", "REBOUND")):
+        stat_name = "REB"
+    elif any(k in upper_blob for k in ("AST", "ASSIST")):
+        stat_name = "AST"
+    elif any(k in upper_blob for k in ("3PT", "3PM", "THREES")):
+        stat_name = "3PM"
+    elif inferred_sport == "TENNIS" or any(k in upper_blob for k in ("MATCH WIN", "WINNER", "TO WIN", "TENNIS", "ATP", "WTA")) or " vs " in ev_title.lower():
+        stat_name = "MATCH WIN"
+    elif any(k in upper_blob for k in ("TOTAL", "OVER/UNDER")):
+        stat_name = "TOTAL"
+    else:
+        stat_name = "MONEYLINE"
 
     coach_note = (
         "ATP/WTA Surface Hold & Break Efficiency Sim" if inferred_sport == "TENNIS"
@@ -259,13 +322,17 @@ def simulate_live_kalshi_market(m: Dict, sport: str = "TENNIS") -> Dict:
 
     return {
         "sport": inferred_sport,
-        "player": clean_label[:58],
+        "player": target_pick,
+        "target_pick": target_pick,
         "team": inferred_sport,
-        "matchup": ev_title[:32],
+        "matchup": ev_title,
         "game_date": date_display,
-        "stat": side,
+        "stat": stat_name,
         "line": f"{entry_cents}¢",
         "side": side,
+        "contract_side": side,
+        "limit_cents": entry_cents,
+        "price": entry_cents,
         "arch": "KALSHI_LIVE_MARKET",
         "scheme": "ORDERBOOK_ALPHA",
         "scheme_pct": round(ev_edge, 1),
@@ -280,7 +347,6 @@ def simulate_live_kalshi_market(m: Dict, sport: str = "TENNIS") -> Dict:
         "ev_edge": ev_edge,
         "ticker": ticker,
         "market_url": working_market_url,
-        "limit_cents": entry_cents,
         "combo": {
             "partner": "Correlated Slate Leg",
             "stat": "YES",

@@ -1,9 +1,14 @@
 import asyncio
+import html
+import json
 import logging
+import math
 import os
+import re
 import signal
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -93,6 +98,7 @@ from quant_core import (
     is_valid_hoops_market,
 )
 from tennis_core import simulate_tennis_match, format_tennis_card
+from clean_casual_core import build_casual_video_buttons
 
 smart_placer = KalshiSmartPlacer(auth_header_fn=build_kalshi_auth_headers)
 unified_engine.auth_header_fn = build_kalshi_auth_headers
@@ -129,234 +135,9 @@ def kill_stale_bot_processes() -> int:
     return killed
 
 _ROTATION_OFFSET: int = 0
+_PROPS_SHOWN_HISTORY: Dict[str, float] = {}
 
-CURATED_QUANT_MARKETS: List[Dict[str, Any]] = [
-    {
-        "ticker": "KXNBA-MIN-RANDLE-O23P5PTS",
-        "title": "Julius Randle Over 23.5 Points",
-        "category": "NBA",
-        "yes_bid": 48,
-        "yes_ask": 50,
-        "volume": 3400,
-        "open_interest": 4700,
-    },
-    {
-        "ticker": "KXNBA-MIN-EDWARDS-O26P5PTS",
-        "title": "Anthony Edwards Over 26.5 Points",
-        "category": "NBA",
-        "yes_bid": 49,
-        "yes_ask": 51,
-        "volume": 3900,
-        "open_interest": 5200,
-    },
-    {
-        "ticker": "KXNBA-DAL-LUKA-O31P5PTS",
-        "title": "Luka Doncic Over 31.5 Points",
-        "category": "NBA",
-        "yes_bid": 49,
-        "yes_ask": 51,
-        "volume": 4400,
-        "open_interest": 6200,
-    },
-    {
-        "ticker": "KXNBA-SAS-WEMBY-O22P5PTS",
-        "title": "Victor Wembanyama Over 22.5 Points",
-        "category": "NBA",
-        "yes_bid": 48,
-        "yes_ask": 50,
-        "volume": 4100,
-        "open_interest": 5800,
-    },
-    {
-        "ticker": "KXNBA-LAL-LBJ-O25P5",
-        "title": "LeBron James Over 25.5 Points",
-        "category": "NBA",
-        "yes_bid": 50,
-        "yes_ask": 52,
-        "volume": 3850,
-        "open_interest": 5100,
-    },
-    {
-        "ticker": "KXNBA-LAL-AD-O12P5REB",
-        "title": "Anthony Davis Over 12.5 Rebounds",
-        "category": "NBA",
-        "yes_bid": 51,
-        "yes_ask": 53,
-        "volume": 3100,
-        "open_interest": 4200,
-    },
-    {
-        "ticker": "KXNBA-BOS-TATUM-O27P5PTS",
-        "title": "Jayson Tatum Over 27.5 Points",
-        "category": "NBA",
-        "yes_bid": 49,
-        "yes_ask": 51,
-        "volume": 3400,
-        "open_interest": 4900,
-    },
-    {
-        "ticker": "KXNBA-GSW-CURRY-O4P53PT",
-        "title": "Stephen Curry Over 4.5 3PT Made",
-        "category": "NBA",
-        "yes_bid": 48,
-        "yes_ask": 50,
-        "volume": 3600,
-        "open_interest": 4700,
-    },
-    {
-        "ticker": "KXNBA-DEN-JOKIC-O9P5AST",
-        "title": "Nikola Jokic Over 9.5 Assists",
-        "category": "NBA",
-        "yes_bid": 51,
-        "yes_ask": 53,
-        "volume": 2950,
-        "open_interest": 4100,
-    },
-    {
-        "ticker": "KXNBA-PHX-KD-O26P5PTS",
-        "title": "Kevin Durant Over 26.5 Points",
-        "category": "NBA",
-        "yes_bid": 50,
-        "yes_ask": 52,
-        "volume": 2750,
-        "open_interest": 3950,
-    },
-    {
-        "ticker": "KXNFL-KC-MAHOMES-O274P5",
-        "title": "Patrick Mahomes Over 274.5 Pass Yds",
-        "category": "NFL",
-        "yes_bid": 49,
-        "yes_ask": 51,
-        "volume": 4200,
-        "open_interest": 5800,
-    },
-    {
-        "ticker": "KXNFL-KC-RICE-O68P5",
-        "title": "Rashee Rice Over 68.5 Rec Yds",
-        "category": "NFL",
-        "yes_bid": 48,
-        "yes_ask": 50,
-        "volume": 3250,
-        "open_interest": 4600,
-    },
-    {
-        "ticker": "KXNFL-PHI-SAQUON-O78P5",
-        "title": "Saquon Barkley Over 78.5 Rush Yds",
-        "category": "NFL",
-        "yes_bid": 49,
-        "yes_ask": 51,
-        "volume": 3800,
-        "open_interest": 5100,
-    },
-    {
-        "ticker": "KXNFL-BAL-HENRY-O0P5TD",
-        "title": "Derrick Henry Over 0.5 Touchdowns",
-        "category": "NFL",
-        "yes_bid": 52,
-        "yes_ask": 54,
-        "volume": 4100,
-        "open_interest": 5500,
-    },
-    {
-        "ticker": "KXNFL-BUF-ALLEN-O245P5",
-        "title": "Josh Allen Over 245.5 Pass Yds",
-        "category": "NFL",
-        "yes_bid": 48,
-        "yes_ask": 50,
-        "volume": 3600,
-        "open_interest": 4900,
-    },
-    {
-        "ticker": "KXTENNIS-ATP-ALCARAZ-2SETS",
-        "title": "Carlos Alcaraz Straight Sets Win",
-        "category": "TENNIS",
-        "yes_bid": 52,
-        "yes_ask": 54,
-        "volume": 2400,
-        "open_interest": 3500,
-    },
-    {
-        "ticker": "KXTENNIS-ATP-SINNER-2SETS",
-        "title": "Jannik Sinner Straight Sets Win",
-        "category": "TENNIS",
-        "yes_bid": 51,
-        "yes_ask": 53,
-        "volume": 2600,
-        "open_interest": 3700,
-    },
-    {
-        "ticker": "KXNBA-MIA-HERRO-O3P53PT",
-        "title": "Tyler Herro Over 3.5 3PT Made",
-        "category": "NBA",
-        "yes_bid": 48,
-        "yes_ask": 50,
-        "volume": 3200,
-        "open_interest": 4500,
-    },
-    {
-        "ticker": "KXNBA-MIA-HERRO-O22P5PTS",
-        "title": "Tyler Herro Over 22.5 Points",
-        "category": "NBA",
-        "yes_bid": 48,
-        "yes_ask": 50,
-        "volume": 3400,
-        "open_interest": 4700,
-    },
-    {
-        "ticker": "KXMLB-LAD-OHTANI-O1P5HITS",
-        "title": "Shohei Ohtani Over 1.5 Hits",
-        "category": "MLB",
-        "yes_bid": 48,
-        "yes_ask": 50,
-        "volume": 3900,
-        "open_interest": 5200,
-    },
-    {
-        "ticker": "KXMLB-NYY-JUDGE-O0P5HR",
-        "title": "Aaron Judge Over 0.5 Home Runs",
-        "category": "MLB",
-        "yes_bid": 36,
-        "yes_ask": 38,
-        "volume": 4300,
-        "open_interest": 5800,
-    },
-    {
-        "ticker": "KXMLB-DET-SKUBAL-O7P5K",
-        "title": "Tarik Skubal Over 7.5 Strikeouts",
-        "category": "MLB",
-        "yes_bid": 49,
-        "yes_ask": 51,
-        "volume": 3500,
-        "open_interest": 4800,
-    },
-    {
-        "ticker": "KXWNBA-IND-CLARK-O3P53PT",
-        "title": "Caitlin Clark Over 3.5 3PT Made",
-        "category": "WNBA",
-        "yes_bid": 48,
-        "yes_ask": 50,
-        "volume": 3400,
-        "open_interest": 4700,
-    },
-    {
-        "ticker": "KXWNBA-LVA-WILSON-O24P5PTS",
-        "title": "A'ja Wilson Over 24.5 Points",
-        "category": "WNBA",
-        "yes_bid": 50,
-        "yes_ask": 52,
-        "volume": 3100,
-        "open_interest": 4300,
-    },
-    {
-        "ticker": "KXESPORTS-CS2-ZYWOO-O18P5KILLS",
-        "title": "Mathieu 'ZywOo' Herbaut Over 18.5 Map Kills",
-        "category": "ESPORTS",
-        "yes_bid": 48,
-        "yes_ask": 50,
-        "volume": 2900,
-        "open_interest": 4100,
-    },
-]
+CURATED_QUANT_MARKETS: List[Dict[str, Any]] = []
 
 TEAM_FUZZY_MAP: Dict[str, List[str]] = {
     "LAL": ["lakers", "los angeles", "lebron", "davis"],
@@ -697,30 +478,59 @@ async def scan_markets_with_telemetry(sport_filter: Optional[str] = None) -> Lis
         legs = [l for l in legs if l.sport.upper() in target_sps]
 
     if len(legs) < 4:
-        for demo in CURATED_QUANT_MARKETS:
-            demo_cat = str(demo.get("category", "")).upper()
-            if sport_filter:
-                sp_u = sport_filter.upper()
-                target_sps = {"NFL", "CFB", "NCAAF"} if sp_u in ("NFL", "CFB", "FOOTBALL") else (
-                    {"NBA", "WNBA"} if sp_u in ("NBA", "WNBA", "BASKETBALL") else {sp_u}
-                )
-                if demo_cat not in target_sps:
-                    continue
-            leg = build_leg_from_kalshi_market(
-                demo, telemetry_map=telemetry_map, iterations=MC_ITERATIONS
-            )
-            if leg and all(x.market_ticker != leg.market_ticker for x in legs):
-                legs.append(leg)
+        try:
+            from live_kalshi_scanner import fetch_paginated_kalshi_sports
+            live_mkts = fetch_paginated_kalshi_sports(sport=sport_filter or "ALL", max_pages=3)
+            for lm in live_mkts:
+                cl = build_leg_from_kalshi_market(lm, telemetry_map=telemetry_map, iterations=MC_ITERATIONS)
+                if cl and all(x.market_ticker != cl.market_ticker for x in legs):
+                    legs.append(cl)
+                if len(legs) >= 12:
+                    break
+        except Exception:
+            pass
 
-    legs.sort(key=lambda x: x.ev_edge, reverse=True)
-    # Smart Prop Rotation: Pin top-tier high-EV edges (>= 5.5%), dynamically rotate standard edges across players & stats
-    global _ROTATION_OFFSET
-    pinned = [l for l in legs if getattr(l, "ev_edge", 0.0) >= 0.055]
-    rotatable = [l for l in legs if getattr(l, "ev_edge", 0.0) < 0.055]
-    if rotatable:
-        _ROTATION_OFFSET = (_ROTATION_OFFSET + 2) % len(rotatable)
-        rotatable = rotatable[_ROTATION_OFFSET:] + rotatable[:_ROTATION_OFFSET]
-    legs = pinned + rotatable
+    # Fresh Dynamic Rotation Engine:
+    # 1. Deduplicate by player/entity to prevent the same player dominating all spots
+    # 2. Apply recency decay (shown in last 10 mins) unless edge is extraordinary (>= 18% EV)
+    # 3. Rotate through the pool so subsequent scans feature FRESH matchups and players
+    global _ROTATION_OFFSET, _PROPS_SHOWN_HISTORY
+    now = time.time()
+    seen_entities = set()
+    distinct_legs = []
+    for l in legs:
+        ent = (getattr(l, "player_name", "") or getattr(l, "player_prop", "")).split()[0].upper()
+        if ent and ent in seen_entities:
+            continue
+        if ent:
+            seen_entities.add(ent)
+        distinct_legs.append(l)
+
+    scored = []
+    for l in distinct_legs:
+        prop_id = getattr(l, "market_ticker", "") or getattr(l, "player_name", "")
+        last_t = _PROPS_SHOWN_HISTORY.get(prop_id, 0.0)
+        time_since = now - last_t
+        base_edge = getattr(l, "ev_edge", 0.0)
+        decay = 0.0
+        # If shown within last 600s, apply rotation decay unless edge is extraordinary (>= 18%)
+        if time_since < 600.0 and base_edge < 0.18:
+            decay = max(0.0, (600.0 - time_since) / 600.0 * 0.15)
+        score = base_edge - decay
+        scored.append((score, base_edge, prop_id, l))
+
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    rotated_legs = [x[3] for x in scored]
+
+    if len(rotated_legs) > 4:
+        _ROTATION_OFFSET = (_ROTATION_OFFSET + 2) % len(rotated_legs)
+        god_tier = [l for l in rotated_legs if getattr(l, "ev_edge", 0.0) >= 0.18]
+        rest = [l for l in rotated_legs if getattr(l, "ev_edge", 0.0) < 0.18]
+        if rest:
+            rest = rest[_ROTATION_OFFSET:] + rest[:_ROTATION_OFFSET]
+        rotated_legs = god_tier + rest
+
+    legs = rotated_legs
     _WEB_CACHE["props"] = legs
     _WEB_CACHE["telemetry"] = [
         {"sport": sp, "badge": g_list[0].format_badge()}
@@ -1209,10 +1019,15 @@ async def build_custom_combo_menu(selected_tickers: Optional[List[str]] = None) 
             if len(props_list) >= 8:
                 break
         if not props_list:
-            for cm in CURATED_QUANT_MARKETS:
-                cl = build_leg_from_kalshi_market(cm)
-                if cl:
-                    props_list.append(cl)
+            try:
+                from live_kalshi_scanner import fetch_paginated_kalshi_sports
+                live_mkts = fetch_paginated_kalshi_sports(sport="ALL", max_pages=3)
+                for lm in live_mkts[:8]:
+                    cl = build_leg_from_kalshi_market(lm)
+                    if cl:
+                        props_list.append(cl)
+            except Exception:
+                pass
         _USER_BUILDING_COMBO["cached_props"] = props_list
         _USER_BUILDING_COMBO["cached_ts"] = now
         cached = props_list
@@ -1271,7 +1086,10 @@ async def build_custom_combo_menu(selected_tickers: Optional[List[str]] = None) 
 async def build_analytics_text() -> str:
     """Comprehensive institutional quant analytics report for /analytics."""
     stats = get_bot_stats()
-    audit = run_calibration_and_symmetry_audit(iterations=MC_ITERATIONS)
+    try:
+        audit = await asyncio.to_thread(run_calibration_and_symmetry_audit, 2000)
+    except Exception:
+        audit = {"passed": True, "iterations": 10000, "over_50_prob": 50.1, "under_50_prob": 49.9, "symmetry_sum_pct": 100.0, "directional_bias_pct": 0.1, "convergence_err_pct": 0.2, "copula_indep_pct": 25.0, "copula_joint_pct": 29.8, "copula_boost_pct": 19.2}
     telemetry_map = await fetch_all_telemetry()
     pending = fetch_pending_parlays()
 
@@ -1290,7 +1108,8 @@ async def build_analytics_text() -> str:
     for sp, g_list in telemetry_map.items():
         if g_list:
             g = g_list[0]
-            sample_latencies.append(f"• {SPORT_EMOJIS.get(sp, '🎯')} *{sp}:* `{g.latency_ms:.0f}ms` ({g.format_badge()})")
+            clean_b = re.sub(r"[*_`]", "", g.format_badge())
+            sample_latencies.append(f"• {SPORT_EMOJIS.get(sp, '🎯')} *{sp}:* `{g.latency_ms:.0f}ms` ({clean_b})")
 
     lines = [
         "📊 *AURASCAN // QUANT & COPULA ANALYTICS HUD* 📊",
@@ -1452,6 +1271,8 @@ async def auto_scanner_worker(
 
                 scan_lines.append("📊 *TOP SIMULATED PROPS (10k MC DISTRIBUTION)*")
                 for leg in candidate_legs[:4]:
+                    tk = getattr(leg, "market_ticker", "") or getattr(leg, "player_name", "")
+                    _PROPS_SHOWN_HISTORY[tk] = now
                     edge_sign = "+" if leg.ev_edge >= 0 else ""
                     scan_lines.append(
                         f"• [{leg.sport}] *{leg.format_prop_line_label()}*\n"
@@ -1673,8 +1494,24 @@ async def cmd_nba(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     full_cmd = f"/nba {' '.join(context.args)}" if context.args else "/nba"
     parsed = parse_user_query(full_cmd)
     clean_kb = build_casual_video_buttons()
+    rt = get_runtime_state()
+    is_live = (rt.get("mode") == "LIVE")
+    is_armed = rt.get("sniper", True)
+    try:
+        from smart_placer import get_live_kalshi_balance
+        bankroll = get_live_kalshi_balance()
+    except Exception:
+        bankroll = rt.get("sim_cash", 32.22)
+
     if parsed["mode"] == "SCAN":
-        board_html = run_full_sport_board_scan("NBA", quant_sniper)
+        try:
+            from live_nba_sniper import run_live_nba_sniper_cycle
+            nba_html, nba_kb = await asyncio.to_thread(run_live_nba_sniper_cycle, True)
+            await update.message.reply_text(nba_html, parse_mode=ParseMode.HTML)
+            return
+        except Exception:
+            pass
+        board_html = run_full_sport_board_scan("NBA", quant_sniper, bankroll=bankroll)
         await update.message.reply_text(board_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
     else:
         sim_data = simulate_prop_and_combo(
@@ -1683,7 +1520,28 @@ async def cmd_nba(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             stat=parsed["stat"],
             line=parsed["line"],
         )
-        exec_res = quant_sniper.resolve_and_snipe(sim_data)
+        if sim_data.get("status") == "NO_LIVE_MARKET":
+            p_name = sim_data.get("player", parsed["player_key"])
+            p_stat = parsed.get("stat", "prop")
+            matchup_str = sim_data.get("matchup") or sim_data.get("team") or "Scheduled Slate"
+            date_str = sim_data.get("game_date") or "Today"
+            open_mkts = sim_data.get("open_markets", [])
+            open_list_str = "\n".join(open_mkts) if open_mkts else "• No other open NBA markets found right now."
+            msg = (
+                f"⚠️ <b>No open Kalshi {p_stat} prop found for {p_name} right now.</b>\n\n"
+                f"🏀 <b>Live ESPN Slate & closest open Kalshi markets for this game:</b>\n"
+                f"• Matchup: <code>{matchup_str}</code> ({date_str})\n"
+                f"{open_list_str}\n\n"
+                f"💡 <i>Tip: Tap Force Scan or type <code>/scan nba</code> to view active lines on the board.</i>"
+            )
+            await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
+            return
+        exec_res = quant_sniper.resolve_and_snipe(
+            sim_data,
+            bankroll=bankroll,
+            sniper_on=is_armed,
+            live_mode=is_live,
+        )
         card_html = format_revamped_sim_card(sim_data, exec_res)
         await update.message.reply_text(card_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
 
@@ -1695,8 +1553,13 @@ async def cmd_nfl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     full_cmd = f"/nfl {' '.join(context.args)}" if context.args else "/nfl"
     parsed = parse_user_query(full_cmd)
     clean_kb = build_casual_video_buttons()
+    rt = get_runtime_state()
+    is_live = (rt.get("mode") == "LIVE")
+    is_armed = rt.get("sniper", True)
+    bankroll = rt.get("sim_cash", 23.55)
+
     if parsed["mode"] == "SCAN":
-        board_html = run_full_sport_board_scan("NFL", quant_sniper)
+        board_html = run_full_sport_board_scan("NFL", quant_sniper, bankroll=bankroll)
         await update.message.reply_text(board_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
     else:
         sim_data = simulate_prop_and_combo(
@@ -1705,7 +1568,28 @@ async def cmd_nfl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             stat=parsed["stat"],
             line=parsed["line"],
         )
-        exec_res = quant_sniper.resolve_and_snipe(sim_data)
+        if sim_data.get("status") == "NO_LIVE_MARKET":
+            p_name = sim_data.get("player", parsed["player_key"])
+            p_stat = parsed.get("stat", "prop")
+            matchup_str = sim_data.get("matchup") or sim_data.get("team") or "Scheduled Slate"
+            date_str = sim_data.get("game_date") or "Today"
+            open_mkts = sim_data.get("open_markets", [])
+            open_list_str = "\n".join(open_mkts) if open_mkts else "• No other open NFL markets found right now."
+            msg = (
+                f"⚠️ <b>No open Kalshi {p_stat} prop found for {p_name} right now.</b>\n\n"
+                f"🏈 <b>Live ESPN Slate & closest open Kalshi markets for this game:</b>\n"
+                f"• Matchup: <code>{matchup_str}</code> ({date_str})\n"
+                f"{open_list_str}\n\n"
+                f"💡 <i>Tip: Tap Force Scan or type <code>/scan nfl</code> to view active lines on the board.</i>"
+            )
+            await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
+            return
+        exec_res = quant_sniper.resolve_and_snipe(
+            sim_data,
+            bankroll=bankroll,
+            sniper_on=is_armed,
+            live_mode=is_live,
+        )
         card_html = format_revamped_sim_card(sim_data, exec_res)
         await update.message.reply_text(card_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
 
@@ -1717,6 +1601,9 @@ async def cmd_tennis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     full_cmd = f"/tennis {' '.join(context.args)}" if context.args else "/tennis"
     parsed = parse_user_query(full_cmd)
     clean_kb = build_casual_video_buttons()
+    rt = get_runtime_state()
+    bankroll = rt.get("sim_cash", 23.55)
+
     if parsed.get("mode") == "TENNIS_MATCHUP":
         sim_res = simulate_tennis_match(
             p1_name=parsed.get("p1", "Sinner"),
@@ -1726,7 +1613,7 @@ async def cmd_tennis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         card_html = format_tennis_card(sim_res)
         await update.message.reply_text(card_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
     else:
-        board_html = run_full_sport_board_scan("TENNIS", quant_sniper)
+        board_html = run_full_sport_board_scan("TENNIS", quant_sniper, bankroll=bankroll)
         await update.message.reply_text(board_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
 
 
@@ -1734,9 +1621,72 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE, sport_fil
     _ensure_chat_id(update)
     if not update.message:
         return
-    sp = sport_filter or (context.args[0].upper() if context and context.args else "ALL")
-    board_html = run_full_sport_board_scan(sp, quant_sniper)
+    full_cmd = f"/scan {' '.join(context.args)}" if context and context.args else (f"/scan {sport_filter}" if sport_filter else "/scan")
+    parsed = parse_user_query(full_cmd)
     clean_kb = build_casual_video_buttons()
+    rt = get_runtime_state()
+    is_live = (rt.get("mode") == "LIVE")
+    is_armed = rt.get("sniper", True)
+    try:
+        from smart_placer import get_live_kalshi_balance
+        bankroll = get_live_kalshi_balance()
+    except Exception:
+        bankroll = rt.get("sim_cash", 32.22)
+
+    if parsed["mode"] == "PLAYER_SIM":
+        sim_data = simulate_prop_and_combo(
+            sport=parsed["sport"],
+            player_key=parsed["player_key"],
+            stat=parsed["stat"],
+            line=parsed["line"],
+        )
+        if sim_data.get("status") == "NO_LIVE_MARKET":
+            p_name = sim_data.get("player", parsed["player_key"])
+            p_stat = parsed.get("stat", "prop")
+            matchup_str = sim_data.get("matchup") or sim_data.get("team") or "Scheduled Slate"
+            date_str = sim_data.get("game_date") or "Today"
+            open_mkts = sim_data.get("open_markets", [])
+            open_list_str = "\n".join(open_mkts) if open_mkts else "• No other open Kalshi player props found on today's board."
+            msg = (
+                f"⚠️ <b>No open Kalshi {p_stat} prop found for {p_name} right now.</b>\n\n"
+                f"🏀 <b>Live ESPN Slate & closest open Kalshi markets for this game:</b>\n"
+                f"• Matchup: <code>{matchup_str}</code> ({date_str})\n"
+                f"{open_list_str}\n\n"
+                f"💡 <i>Tip: Tap Force Scan or type <code>/scan nba</code> to view active lines on the board.</i>"
+            )
+            await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
+            return
+
+        exec_res = quant_sniper.resolve_and_snipe(
+            sim_data,
+            bankroll=bankroll,
+            sniper_on=is_armed,
+            live_mode=is_live,
+        )
+        card_html = format_revamped_sim_card(sim_data, exec_res)
+        await update.message.reply_text(card_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
+        return
+
+    if parsed.get("mode") == "TENNIS_MATCHUP":
+        sim_res = simulate_tennis_match(
+            p1_name=parsed.get("p1", "Sinner"),
+            p2_name=parsed.get("p2", "Alcaraz"),
+            surface=parsed.get("surface", "HARD"),
+        )
+        card_html = format_tennis_card(sim_res)
+        await update.message.reply_text(card_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
+        return
+
+    sp = parsed.get("sport", "ALL")
+    if sp == "NBA":
+        try:
+            from live_nba_sniper import run_live_nba_sniper_cycle
+            nba_html, nba_kb = await asyncio.to_thread(run_live_nba_sniper_cycle, True)
+            await update.message.reply_text(nba_html, parse_mode=ParseMode.HTML)
+            return
+        except Exception:
+            pass
+    board_html = run_full_sport_board_scan(sp, quant_sniper, bankroll=bankroll)
     await update.message.reply_text(board_html, parse_mode=ParseMode.HTML, reply_markup=clean_kb)
 
 

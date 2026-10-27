@@ -276,23 +276,6 @@ async def place_kalshi_order(
     except Exception as exc:
         logger.error("[LIVE-ORDER-EXC] %s: %s", ticker, exc)
         return {"ok": False, "msg": str(exc)}
-                    data = await resp.json()
-                    if resp.status in (200, 201):
-                        order_obj = data.get("order") or data.get("event_order") or {}
-                        return {
-                            "ok": True,
-                            "order_id": order_obj.get("order_id", client_oid),
-                            "msg": f"LIVE order placed: {count}x {'YES' if is_yes else 'NO'} {ticker} @ {price_cents}c",
-                        }
-                    if resp.status == 410:
-                        continue
-                    return {
-                        "ok": False,
-                        "msg": f"Kalshi order HTTP {resp.status}: {json.dumps(data)[:160]}",
-                    }
-        except Exception as exc:
-            logger.warning("Order post to %s failed: %s", url, exc)
-    return {"ok": False, "msg": "Failed order placement across endpoints"}
 
 
 async def generate_gemini_slip_insight(legs_summary: List[str], ev_pct: float) -> Optional[str]:

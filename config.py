@@ -31,7 +31,7 @@ ESPN_ENDPOINTS = {
 
 # Core Monte Carlo & Kelly Constants
 MC_ITERATIONS: int = int(os.getenv("MC_ITERATIONS", "10000"))
-MIN_EV_EDGE: float = float(os.getenv("MIN_EV_EDGE", "0.035"))        # 3.5% minimum edge
+MIN_EV_EDGE: float = float(os.getenv("MIN_EV_EDGE", "0.015"))        # 1.5% minimum edge
 HIGH_CONVICTION_EV_PCT: float = float(os.getenv("HIGH_CONVICTION_EV_PCT", "6.0"))
 MODERATE_EDGE_EV_PCT: float = float(os.getenv("MODERATE_EDGE_EV_PCT", "3.5"))
 KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.25"))   # Quarter-Kelly

@@ -5,8 +5,15 @@ Models surface physics (friction, bounce, speed) and tactical playstyle matchups
 using 10,000-draw Monte Carlo game & set state Markov chains.
 """
 
+import datetime
+import json
 import math
 import random
+import re
+import requests
+import time
+import traceback
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
