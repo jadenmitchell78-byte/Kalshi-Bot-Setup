@@ -1,5 +1,81 @@
 'use client';
-import React, { useState, useEffect } from 'react';
+import Hls from 'hls.js';
+import React, { useState, useEffect, useRef } from 'react';
+
+export function StreamPlayer({ streamUrl }: { streamUrl: string }) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const isHlsStream = Boolean(
+    streamUrl &&
+      (/\.m3u8(\?|$)/i.test(streamUrl) || streamUrl.toLowerCase().includes('m3u8'))
+  );
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !streamUrl || !isHlsStream) return;
+
+    let hls: Hls | null = null;
+    // HLS.js for standard browsers
+    if (Hls.isSupported()) {
+      hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: true,
+      });
+      hls.loadSource(streamUrl);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        video.play().catch(() => {});
+      });
+    }
+    // Native fallback for iOS/Safari
+    else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = streamUrl;
+      video.play().catch(() => {});
+    }
+
+    // CRITICAL FIX: This cleanup function destroys the old stream when you switch feeds
+    return () => {
+      if (hls) {
+        hls.destroy();
+      }
+      if (video) {
+        video.removeAttribute('src');
+        video.load();
+      }
+    };
+  }, [streamUrl, isHlsStream]);
+
+  if (!streamUrl) {
+    return (
+      <div className="w-full h-full bg-black flex items-center justify-center text-xs text-gray-400">
+        Select a live feed to start streaming
+      </div>
+    );
+  }
+
+  if (!isHlsStream) {
+    return (
+      <iframe
+        key={streamUrl}
+        src={streamUrl}
+        className="w-full h-full border-0 bg-black"
+        allow="accelerometer *; autoplay *; clipboard-write *; encrypted-media *; gyroscope *; picture-in-picture *; web-share *; fullscreen *"
+        allowFullScreen
+        referrerPolicy="no-referrer"
+      />
+    );
+  }
+
+  return (
+    <video
+      ref={videoRef}
+      controls
+      autoPlay
+      muted
+      playsInline
+      className="w-full h-full bg-black"
+    />
+  );
+}
 
 export default function WatchLiveWire({ streamUrl, activeLegs = [] }: { streamUrl: string; activeLegs?: any[] }) {
   const [secondsLeft, setSecondsLeft] = useState(600); // 10-min preview
@@ -36,15 +112,10 @@ export default function WatchLiveWire({ streamUrl, activeLegs = [] }: { streamUr
 
   return (
     <div className="w-full min-h-[100dvh] bg-[#0b0e14] text-white flex flex-col font-sans select-none">
-      {/* 1. TOP LIVE PLAYER (Sandboxed to block invisible mobile ad overlays!) */}
+      {/* 1. TOP LIVE PLAYER (HLS.js video + unsandboxed embed fallback with stream cleanup) */}
       <div className="relative w-full aspect-video bg-black sticky top-0 z-20 border-b border-emerald-500/20">
         {!isLocked ? (
-          <iframe
-            src={streamUrl}
-            className="w-full h-full border-0"
-            allow="autoplay; fullscreen"
-            sandbox="allow-scripts allow-same-origin"
-          />
+          <StreamPlayer streamUrl={streamUrl} />
         ) : (
           <div className="w-full h-full flex flex-col items-center justify-center bg-black/95 p-6 text-center">
             <span className="text-emerald-400 font-black text-xl mb-1">🔒 10-MIN PREVIEW ENDED</span>

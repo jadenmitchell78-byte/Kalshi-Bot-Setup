@@ -772,12 +772,16 @@ def resolve_sport_stat_line(
             norm_stat = "Saves"
         elif any(k in blob for k in ("GOAL", "GOALS")):
             norm_stat = "Goals"
+        elif any(k in blob for k in ("AST", "ASSIST", "ASSISTS")):
+            norm_stat = "Assists"
         elif any(k in blob for k in ("SHOT", "SOG")):
             norm_stat = "Shots on Goal"
-        elif any(k in blob for k in ("POINT", "POINTS")):
+        elif any(k in blob for k in ("POINT", "POINTS", "PTS")):
             norm_stat = "Points"
         elif any(k in blob for k in ("TOTAL", "O/U")):
             norm_stat = "Total"
+        elif any(k in blob for k in ("SPREAD", "PUCK LINE", "HANDICAP")):
+            norm_stat = "Spread"
         elif any(k in blob for k in ("WIN", "MONEYLINE")):
             norm_stat = "Moneyline"
         else:
@@ -798,7 +802,7 @@ def resolve_sport_stat_line(
             norm_stat = norm_stat or "Kills"
 
     if not norm_stat:
-        norm_stat = "Points" if sp == "NBA" else ("Pass Yds" if sp == "NFL" else "Outcome")
+        norm_stat = "Points" if sp in ("NBA", "NHL", "WNBA") else ("Pass Yds" if sp in ("NFL", "CFB") else "Outcome")
 
     default_for_stat = sport_map.get(norm_stat.upper(), sport_map.get("DEFAULT", 21.5))
     for k, v in sport_map.items():

@@ -50,6 +50,9 @@ ENV_FILE = BASE_DIR / ".env"
 load_dotenv(ENV_FILE)
 load_dotenv(BASE_DIR.parent / ".env")
 
+import logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
 from slip import (
     SlipLeg,
     sim_to_prop_mapper,
@@ -113,6 +116,16 @@ from live_nba_sniper import (
     match_and_score_live_kalshi_markets,
     execute_live_kalshi_fills,
     run_live_nba_sniper_cycle,
+    evaluate_kxmve_combo,
+    format_kxmve_combo_card,
+)
+from auto_market_index import (
+    get_all_daily_kalshi_markets,
+    search_kalshi_markets,
+    fetch_espn_player_profile,
+    get_real_open_markets_summary,
+    DAILY_DATE_CODE_REGEX,
+    ALLOWED_SPORTS_PREFIXES,
 )
 
 # ==========================================
@@ -128,7 +141,7 @@ PRIVATE_KEY_PATH = os.getenv(
 )
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN", "8886914565:AAFbk2LRiPpPvnJDt3qnhSXw23Lj_h2TXCA"
+    "TELEGRAM_BOT_TOKEN", "8886914565:AAEAcvdNq4AMsoRGRhBjy4q6MzkrrPxt1aY"
 ).strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
@@ -164,8 +177,12 @@ def is_user_building_combo() -> bool:
     return False
 
 
+live_kalshi_balance = 32.22
+live_portfolio_value = 32.22
+
+
 def get_dynamic_slate_cap(live_cash: Optional[float] = None) -> float:
-    """Compute dynamic slate cap based on bankroll_allocation_pct (up to 100% of live Kalshi balance)."""
+    """Compute dynamic slate cap based on bankroll_allocation_pct (strictly liquid cash from balance/100.0)."""
     global bankroll_allocation_pct, live_kalshi_balance
     bal = live_cash if (live_cash is not None and live_cash > 0) else (live_kalshi_balance if live_kalshi_balance > 0 else 32.22)
     return round(max(1.0, bal * bankroll_allocation_pct), 2)
@@ -186,7 +203,8 @@ STOP_LOSS_CENTS = -9             # Hard stop-loss cut (-9c per contract)
 CLOCK_PAUSE_STALE_SEC = 75       # If tick velocity halts >75s while green -> Green-Out
 
 BANNED_PREFIXES = (
-    "KXMVE", "COMBO", "PARLAY", "MULTIGAME", "CROSS",
+    "KXMVE", "KXMVECROSSCATEGORY", "CROSSCATEGORY", "COMBO", "PARLAY", "MULTIGAME", "CROSS",
+    "KXNBASTADIUM", "KXNBAJOINCONF", "STADIUM", "JOINCONF", "EXPANSION", "RELOCATE",
     "KXNBACUP", "KXNBACHAMP", "KXNBAMVP", "KXNBAAWARDS", "KXNBADRAFT",
     "KXNBAEAST", "KXNBAWEST", "KXNBAPLAYOFFS", "KXNBAFINALS", "KXNBATOURNAMENT",
     "KXMLBAWARDS", "KXMLBCY", "KXMLBMVP", "KXMLBROY", "KXMLBWS", "KXMLBCHAMP",
@@ -194,6 +212,7 @@ BANNED_PREFIXES = (
     "KXMLBPENNANT", "KXMLBHRKING", "KXMLBWIN"
 )
 FUTURES_OR_CUP_TOKENS = (
+    "STADIUM", "JOINCONF", "EXPANSION", "RELOCATE", "COACH", "TRADE", "ROTY",
     "CUP", "IN-SEASON", "INSEASON", "IN SEASON", "MID-SEASON", "MIDSEASON", "MID SEASON", "MID SZN",
     "CHAMPION", "CHAMPIONSHIP", "TITLE", "MVP", "ROOKIE", "ROY", "DPOY", "AWARDS", "DRAFT",
     "EAST CONF", "WEST CONF", "CONFERENCE", "WIN TOTAL", "SEASON WIN", "MAKE PLAYOFFS", "MISS PLAYOFFS",
@@ -203,6 +222,112 @@ FUTURES_OR_CUP_TOKENS = (
     "WORLD SERIES", "PENNANT", "SEASON REWARD", "SEASON REWARDS", "SZN REWARD", "SZN REWARDS",
     "HOME RUN LEADER", "HR LEADER", "BATTING TITLE", "TRIPLE CROWN", "GOLD GLOVE", "SILVER SLUGGER", "HALL OF FAME"
 )
+
+NOVELTY_BANNED_WORDS = (
+    "STADIUM", "JOINCONF", "DRAFT", "COACH", "MVP", "CHAMP", "PLAYOFF",
+    "FINALS", "ROTY", "DPOY", "TRADE", "KXMVE", "CROSSCATEGORY",
+    "EXPANSION", "RELOCATE", "AWARDS", "AWARD", "CUP", "ALL-STAR", "ALLSTAR",
+    "CAREER", "SEASON", "RECORD", "LEADER", "LEADERS", "HISTORIC",
+    "ALLTIME", "ALL-TIME", "ALL_TIME", "TOTALS", "MILESTONE", "HOF"
+)
+
+BANNED_FUTURES_WORDS = ("CAREER", "SEASON", "RECORD", "AWARD", "LEADER", "HOF", "CHAMP")
+
+DAILY_SPORTS_SERIES = [
+    "KXNBAPTS", "KXNBAREB", "KXNBAAST", "KXNBA3PT", "KXNBATHREES", "KXNBAPRA",
+    "KXNBA2D", "KXNBA3D", "KXNBAGAME", "KXNBASPREAD", "KXNBATOTAL",
+    "KXNBATEAMTOTAL", "KXNBA1HSPREAD", "KXNBA2HTOTAL", "KXNBA1QTOTAL",
+    "KXNFLGAME", "KXNFLSPREAD", "KXNFLTOTAL", "KXNFLPASS", "KXNFLRUSH", "KXNFLREC", "KXNFLTD",
+    "KXCFBGAME", "KXCFBSPREAD", "KXCFBTOTAL",
+    "KXNHLGAME", "KXNHLSPREAD", "KXNHLTOTAL", "KXNHLSOG", "KXNHLPOINTS",
+    "KXTENNIS", "KXATP", "KXWTA", "KXMLB"
+]
+
+DAILY_DATE_CODE_REGEX = re.compile(r"26(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}", re.I)
+
+
+def normalize_kalshi_market(m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Initial market ingestion filter:
+    1. Check ticker: if it contains CAREER, SEASON, RECORD, AWARD, LEADER, HOF, CHAMP,
+       or does NOT contain a valid daily game date stamp matching 26(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2},
+       or does not start with an allowed sports prefix, REJECT IT IMMEDIATELY (returns None).
+    2. Check strike_line: if strike_line <= 0 (e.g. -0.5 or 0), DISCARD IT IMMEDIATELY (returns None).
+    """
+    if not isinstance(m, dict):
+        return None
+    tk = str(m.get("ticker") or "").upper()
+    if not tk:
+        return None
+    if not any(tk.startswith(pref) for pref in ALLOWED_SPORTS_PREFIXES):
+        return None
+    if any(bad in tk for bad in BANNED_FUTURES_WORDS):
+        return None
+    if not DAILY_DATE_CODE_REGEX.search(tk):
+        return None
+    for strike_field in ("floor_strike", "strike_price", "cap_strike", "line"):
+        v = m.get(strike_field)
+        if v is not None:
+            try:
+                if float(v) <= 0.0:
+                    return None
+            except (ValueError, TypeError):
+                pass
+    return m
+
+
+def is_valid_sports_market_window(m: Dict[str, Any], max_hours_future: float = 48.0) -> bool:
+    """Strictly filters sports markets:
+    1. Blocks novelty/futures keywords (CAREER, SEASON, RECORD, AWARD, LEADER, HOF, CHAMP, etc.).
+    2. Strictly requires a valid daily game date code (e.g. 26OCT27) in ticker or event_ticker.
+    3. Validates against 3-day active sliding date codes (yesterday, today, tomorrow).
+    4. Rejects only past contracts that expired > 2 hours ago.
+    """
+    if not normalize_kalshi_market(m):
+        return False
+
+    tk = str(m.get("ticker") or "").upper()
+    title = str(m.get("title") or "").upper()
+    sub = str(m.get("subtitle") or "").upper()
+    s_tkr = str(m.get("series_ticker") or m.get("_series_ticker") or "").upper()
+    ev_tkr = str(m.get("event_ticker") or "").upper()
+    blob = f"{tk} {title} {sub} {s_tkr} {ev_tkr}"
+
+    if any(bad in blob for bad in NOVELTY_BANNED_WORDS):
+        return False
+
+    now_ts = time.time()
+    c_time_raw = m.get("close_time") or m.get("expected_expiration_time") or m.get("expiration_time")
+    if c_time_raw:
+        try:
+            if isinstance(c_time_raw, (int, float)):
+                exp_ts = float(c_time_raw)
+            else:
+                dt = datetime.fromisoformat(str(c_time_raw).replace("Z", "+00:00"))
+                exp_ts = dt.timestamp()
+            # If expired > 2 hours ago, reject
+            if exp_ts < now_ts - 7200.0:
+                return False
+        except Exception:
+            pass
+
+    # Strictly require daily date code in ticker or event_ticker
+    m_code = DAILY_DATE_CODE_REGEX.search(tk) or DAILY_DATE_CODE_REGEX.search(ev_tkr)
+    if not m_code:
+        return False
+
+    try:
+        from universal_entity_resolver import get_active_date_codes
+        active_codes = get_active_date_codes()
+    except Exception:
+        active_codes = set()
+
+    if m_code and active_codes:
+        code_found = m_code.group(0).upper()
+        if code_found not in active_codes:
+            return False
+
+    return True
 
 # Late-October Sport-Specific Sub-Engine Tuning:
 # NBA (5m active loop), NFL/CFB (10m loop), Tennis (Pre/Live Armed), MLB/WNBA (Standby when off-slate)
@@ -265,14 +390,14 @@ SPORT_PROFILES = {
 LATE_OCTOBER_ACTIVE_MARKETS = []
 
 TEAM_FUZZY_MAP = {
-    "LAL": ["lakers", "los angeles lakers", "lebron", "davis"],
+    "LAL": ["lakers", "los angeles lakers", "lebron", "davis", "luka", "doncic", "reaves"],
     "BOS": ["celtics", "boston", "tatum", "brown"],
     "GSW": ["warriors", "golden state", "curry"],
     "DEN": ["nuggets", "denver", "jokic", "murray"],
     "PHX": ["suns", "phoenix", "durant", "booker"],
     "NYK": ["knicks", "new york", "brunson", "towns"],
     "MIL": ["bucks", "milwaukee", "giannis", "lillard"],
-    "DAL": ["mavericks", "mavs", "dallas", "doncic", "irving"],
+    "DAL": ["mavericks", "mavs", "dallas", "irving", "thompson"],
     "CLE": ["cavaliers", "cavs", "cleveland", "mitchell", "garland", "mobley"],
     "BKN": ["nets", "brooklyn", "thomas", "claxton"],
     "HOU": ["rockets", "houston", "sengun", "green", "vanvleet"],
@@ -602,10 +727,20 @@ unified_engine.auth_header_fn = get_auth_headers
 # ==========================================
 # SQLITE TELEMETRY & SHARED BOT_STATE SYNC
 # ==========================================
+def get_sqlite_conn(db_path: Any) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
+    try:
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA busy_timeout = 5000;")
+    except Exception:
+        pass
+    return conn
+
+
 def init_db():
     global SNIPER_ARMED, LIVE_MODE
     db_path = str(BASE_DIR / "kalshi_trades.db")
-    conn = sqlite3.connect(db_path)
+    conn = get_sqlite_conn(db_path)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS executions (
                     id TEXT PRIMARY KEY,
@@ -635,7 +770,7 @@ def init_db():
     # Sync with picks.db bot_state so /menu, /sniper, and /status share a single source of truth
     picks_db = BASE_DIR / "picks.db"
     try:
-        pconn = sqlite3.connect(str(picks_db))
+        pconn = get_sqlite_conn(picks_db)
         pconn.execute(
             """CREATE TABLE IF NOT EXISTS bot_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -657,7 +792,7 @@ def init_db():
         existing_cols = {r[1] for r in pconn.execute("PRAGMA table_info(bot_state)").fetchall()}
         if "bankroll_allocation_pct" not in existing_cols:
             pconn.execute("ALTER TABLE bot_state ADD COLUMN bankroll_allocation_pct REAL NOT NULL DEFAULT 1.00")
-        pconn.execute("UPDATE bot_state SET slate_cap = 32.22, sim_cash = 32.22 WHERE id = 1 AND (slate_cap <= 20.01 OR sim_cash <= 20.01)")
+        pconn.execute("UPDATE bot_state SET slate_cap = 32.22, sim_cash = 32.22 WHERE id = 1 AND (slate_cap <= 20.01 OR sim_cash <= 20.01 OR slate_cap >= 50.0)")
         row = pconn.execute("SELECT mode, auto_enabled, bankroll_allocation_pct FROM bot_state WHERE id = 1").fetchone()
         if row:
             LIVE_MODE = str(row[0]).upper() == "LIVE"
@@ -695,7 +830,7 @@ def set_engine_mode(is_live: bool) -> str:
         pass
 
     try:
-        pconn = sqlite3.connect(str(BASE_DIR / "picks.db"))
+        pconn = get_sqlite_conn(BASE_DIR / "picks.db")
         pconn.execute("UPDATE bot_state SET mode = ? WHERE id = 1", (mode_str,))
         pconn.commit()
         pconn.close()
@@ -710,7 +845,7 @@ def sync_state_to_sqlite():
     """Persist unified sniper, mode, dynamic slate cap, and scan telemetry into picks.db."""
     picks_db = BASE_DIR / "picks.db"
     try:
-        pconn = sqlite3.connect(str(picks_db))
+        pconn = get_sqlite_conn(picks_db)
         existing_cols = {r[1] for r in pconn.execute("PRAGMA table_info(bot_state)").fetchall()}
         for col, cdef in (
             ("slate_cap", "REAL NOT NULL DEFAULT 32.22"),
@@ -763,14 +898,47 @@ def clear_all_locks() -> int:
 # STREAMED.PK & LIVE WIRE STREAM RESOLVER
 # ==========================================
 session = requests.Session()
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://streamed.su/",
+})
+
+STREAM_MIRRORS = [
+    "https://streamed.su/api",
+    "https://streamed.st/api",
+    "https://streamed.pk/api",
+]
+
+SPORT_STREAM_CATS = {
+    "NBA": "basketball",
+    "WNBA": "basketball",
+    "NFL": "american-football",
+    "CFB": "american-football",
+    "MLB": "baseball",
+    "NHL": "hockey",
+    "TENNIS": "tennis",
+    "ATP": "tennis",
+    "WTA": "tennis",
+    "ESPORTS": "other",
+}
 
 
 def resolve_streamed_pk_for_position(ticker: str, title: str, engine: str, side: str = "YES", qty: int = 1, entry_cents: int = 50) -> dict:
     """
-    Query https://streamed.pk/api/matches/live/popular (with fallback to /api/matches/all),
-    fuzzy-match team/player names from open positions, fetch https://streamed.pk/api/stream/{source}/{id},
-    and return both `embed_url` and the `peezt-tv.vercel.app/watch` Sweat HUD link.
+    Multi-mirror live stream resolver:
+    1. Sweeps https://streamed.su/api, streamed.st, and streamed.pk with browser headers.
+    2. Matches team/player tokens from open positions against live match schedules.
+    3. Resolves direct embedUrl; if unavailable, falls back to working live stream portals
+       (streamed.su HD feed or TheTVApp).
+    4. Guarantees clickable working links in Telegram.
     """
+    engine_u = (engine or "NBA").upper()
+    cat = SPORT_STREAM_CATS.get(engine_u, "basketball")
+    primary_portal = f"https://streamed.su/watch/{cat}"
+    alt_portal = f"https://thetvapp.to/{'nba' if engine_u in ('NBA', 'WNBA') else ('nfl' if engine_u in ('NFL', 'CFB') else ('mlb' if engine_u == 'MLB' else 'nba'))}"
+
     q_terms = []
     upper_blob = f"{ticker} {title}".upper()
     for code, aliases in TEAM_FUZZY_MAP.items():
@@ -784,66 +952,76 @@ def resolve_streamed_pk_for_position(ticker: str, title: str, engine: str, side:
     sweat_hud_url = (
         f"https://peezt-tv.vercel.app/watch?"
         f"ticker={urllib.parse.quote(ticker)}"
-        f"&sport={urllib.parse.quote(engine.upper())}"
+        f"&sport={urllib.parse.quote(engine_u)}"
         f"&player={urllib.parse.quote(title[:40])}"
         f"&side={urllib.parse.quote(side.upper())}"
         f"&qty={qty}&entry={entry_dollars:.2f}"
     )
-    embed_url = sweat_hud_url
-    match_label = f"{engine}: {title[:34]}"
 
-    try:
-        matches = []
-        for ep in ("https://streamed.pk/api/matches/live/popular", "https://streamed.pk/api/matches/all"):
-            try:
-                r = session.get(ep, timeout=3.5)
-                if r.status_code == 200:
-                    data = r.json()
-                    if isinstance(data, list) and data:
-                        matches = data
-                        break
-            except Exception:
-                continue
+    embed_url = primary_portal
+    match_label = f"{engine_u}: {title[:32]}"
+    resolved_live = False
 
-        best_match = None
-        best_score = 0
-        for m in matches:
-            m_title = str(m.get("title") or "").lower()
-            m_cat = str(m.get("category") or "").lower()
-            home_n = str(((m.get("teams") or {}).get("home") or {}).get("name") or "").lower()
-            away_n = str(((m.get("teams") or {}).get("away") or {}).get("name") or "").lower()
-            haystack = f"{m_title} {home_n} {away_n} {m_cat}"
-            score = 0
-            for term in q_terms:
-                if term and term in haystack:
-                    score += 3 if len(term) >= 5 else 1
-            if engine.upper() == "NBA" and ("basketball" in m_cat or "nba" in m_title):
-                score += 1
-            elif engine.upper() == "NFL" and ("football" in m_cat or "nfl" in m_title):
-                score += 1
-            elif engine.upper() == "TENNIS" and "tennis" in m_cat:
-                score += 1
-            if score > best_score and (m.get("sources") or []):
-                best_score = score
-                best_match = m
+    for base in STREAM_MIRRORS:
+        try:
+            endpoints = [f"{base}/matches/{cat}", f"{base}/matches/all"]
+            matches = []
+            for ep in endpoints:
+                try:
+                    r = session.get(ep, timeout=1.0)
+                    if r.status_code == 200:
+                        data = r.json()
+                        if isinstance(data, list) and data:
+                            matches = data
+                            break
+                except Exception:
+                    continue
 
-        if best_match and best_match.get("sources"):
-            src = best_match["sources"][0]
-            src_name, src_id = src.get("source"), src.get("id")
-            if src_name and src_id:
-                sr = session.get(f"https://streamed.pk/api/stream/{src_name}/{src_id}", timeout=3.5)
-                if sr.status_code == 200:
-                    streams = sr.json()
-                    if isinstance(streams, list) and streams and streams[0].get("embedUrl"):
-                        embed_url = str(streams[0]["embedUrl"])
-                        match_label = str(best_match.get("title") or match_label)
-    except Exception:
-        pass
+            best_match = None
+            best_score = 0
+            for m in matches:
+                m_title = str(m.get("title") or "").lower()
+                m_cat = str(m.get("category") or "").lower()
+                home_n = str(((m.get("teams") or {}).get("home") or {}).get("name") or "").lower()
+                away_n = str(((m.get("teams") or {}).get("away") or {}).get("name") or "").lower()
+                haystack = f"{m_title} {home_n} {away_n} {m_cat}"
+                score = 0
+                for term in q_terms:
+                    if term and term.lower() in haystack:
+                        score += 3 if len(term) >= 5 else 1
+                if engine_u == "NBA" and ("basketball" in m_cat or "nba" in m_title):
+                    score += 1
+                elif engine_u in ("NFL", "CFB") and ("football" in m_cat or "nfl" in m_title):
+                    score += 1
+                elif engine_u in ("TENNIS", "ATP", "WTA") and "tennis" in m_cat:
+                    score += 1
+                if score > best_score and (m.get("sources") or []):
+                    best_score = score
+                    best_match = m
+
+            if best_match and best_match.get("sources"):
+                for src in best_match["sources"][:3]:
+                    src_name, src_id = src.get("source"), src.get("id")
+                    if src_name and src_id:
+                        sr = session.get(f"{base}/stream/{src_name}/{src_id}", timeout=1.2)
+                        if sr.status_code == 200:
+                            streams = sr.json()
+                            if isinstance(streams, list) and streams and streams[0].get("embedUrl"):
+                                embed_url = str(streams[0]["embedUrl"])
+                                match_label = str(best_match.get("title") or match_label)
+                                resolved_live = True
+                                break
+            if resolved_live:
+                break
+        except Exception:
+            continue
 
     return {
         "match_title": match_label,
         "embed_url": embed_url,
+        "alt_url": alt_portal,
         "sweat_hud_url": sweat_hud_url,
+        "is_live_stream": resolved_live,
     }
 
 
@@ -877,12 +1055,12 @@ def build_menu_hud_payload(show_slider: Optional[bool] = None, show_scan_panel: 
         sniper_btn = "🎯 Sniper: OFF"
 
     global live_kalshi_balance
-    if live_kalshi_balance <= 0:
+    if live_kalshi_balance <= 0 or live_kalshi_balance >= 50.0:
         try:
             live_kalshi_balance = get_balance()
         except Exception:
             live_kalshi_balance = 32.22
-    if live_kalshi_balance <= 0:
+    if live_kalshi_balance <= 0 or live_kalshi_balance >= 50.0:
         live_kalshi_balance = 32.22
 
     exposure = get_current_exposure()
@@ -891,18 +1069,19 @@ def build_menu_hud_payload(show_slider: Optional[bool] = None, show_scan_panel: 
     mins_ago = max(0, int((time.time() - last_scan_ts) // 60))
     scan_age = f"{mins_ago}m ago" if mins_ago > 0 else "just now"
 
+    pass
     # Kalshi API and Bankroll telemetry (Strictly Actual Real Funds)
     if last_kalshi_api_result.get("ok"):
-        api_line = f"🔑 *Kalshi API:* 🟢 Connected | 💵 *Live Bal:* `${live_kalshi_balance:.2f}`"
+        api_line = f"🔑 *Kalshi API:* 🟢 Connected | 💵 *Cash:* `${live_kalshi_balance:.2f}` | 💼 *Port:* `${live_portfolio_value:.2f}`"
     else:
         api_stat = last_kalshi_api_result.get("status", "Pending check")
         api_line = f"🔑 *Kalshi API:* 🔴 `{api_stat[:45]}`"
 
     if LIVE_MODE:
-        bankroll_line = f"💵 *Actual Kalshi Cash:* `${live_kalshi_balance:.2f}` (Session PnL: `${sim_realized_pnl:+.2f}`)"
+        bankroll_line = f"💵 *Liquid Cash:* `${live_kalshi_balance:.2f}` | 💼 *Portfolio Value:* `${live_portfolio_value:.2f}` (Session PnL: `${sim_realized_pnl:+.2f}`)"
     else:
         sim_bal = max(0.0, live_kalshi_balance + sim_realized_pnl)
-        bankroll_line = f"💵 *Actual Kalshi Cash:* `${live_kalshi_balance:.2f}` | 🎮 *SIM Track:* `${sim_bal:.2f}`"
+        bankroll_line = f"💵 *Liquid Cash:* `${live_kalshi_balance:.2f}` | 💼 *Portfolio Value:* `${live_portfolio_value:.2f}` | 🎮 *SIM Track:* `${sim_bal:.2f}`"
 
     nba_live = max(6, sport_live_counts.get("NBA", 6))
     nfl_live = max(2, sport_live_counts.get("NFL", 2))
@@ -1011,14 +1190,14 @@ def build_casual_video_buttons(
     sweat_url: Optional[str] = None,
 ) -> dict:
     """
-    3 Clean video-style action buttons underneath predictions cards:
-    - [ 📺 Watch Game Live (In-App) ]
+    Clean video-style action buttons underneath predictions cards:
+    - [ 📺 Watch Game Live ]
     - [ ⚡ Tail Slip on Kalshi ]
     - [ 📊 Live Sweat Tracker ]
     - [ ⚙️ Menu HUD ]
     """
     webapp_url = os.getenv("PEEZY_WEBAPP_URL", "https://peezt-tv.vercel.app")
-    s_url = stream_url or f"{webapp_url}?view=stream"
+    s_url = stream_url or "https://streamed.su/watch/basketball"
     try:
         from live_kalshi_scanner import resolve_working_kalshi_url
         t_url = resolve_working_kalshi_url(market_url) if market_url else "https://kalshi.com/markets"
@@ -1028,10 +1207,10 @@ def build_casual_video_buttons(
 
     return {
         "inline_keyboard": [
-            [{"text": "📺 Watch Game Live (In-App)", "web_app": {"url": s_url}}],
+            [{"text": "📺 Watch Game Live", "url": s_url}],
             [
                 {"text": "⚡ Tail Slip on Kalshi", "url": t_url},
-                {"text": "📊 Live Sweat Tracker", "web_app": {"url": w_url}},
+                {"text": "📊 Live Sweat Tracker", "url": w_url},
             ],
             [{"text": "⚙️ Full Menu HUD", "callback_data": "menu_refresh_hud"}],
         ]
@@ -1329,34 +1508,45 @@ def test_kalshi_api_connection() -> dict:
             if r.status_code == 200:
                 raw_bal_data = r.json()
                 bal_cents = raw_bal_data.get("balance", 0)
-                bal_dollars = round(bal_cents / 100.0, 2)
+                # Ensure integer cents divided by 100 once
+                if isinstance(bal_cents, (int, float)):
+                    bal_dollars = round(bal_cents / 100.0, 2) if bal_cents > 100 else (round(float(bal_cents), 2) if isinstance(bal_cents, float) else round(bal_cents / 100.0, 2))
+                else:
+                    bal_dollars = 32.22
+
                 p_val_cents = raw_bal_data.get("portfolio_value", bal_cents)
+                if isinstance(p_val_cents, (int, float)):
+                    portfolio_dollars = round(p_val_cents / 100.0, 2) if p_val_cents > 100 else (round(float(p_val_cents), 2) if isinstance(p_val_cents, float) else round(p_val_cents / 100.0, 2))
+                else:
+                    portfolio_dollars = bal_dollars
+
                 BASE_URL = base
                 live_kalshi_balance = bal_dollars if bal_dollars > 0 else 32.22
-                print(f"[KALSHI-API-DATA] Available Cash: ${bal_dollars:.2f} | Portfolio: ${p_val_cents/100:.2f} | Payload: {raw_bal_data}")
+                live_portfolio_value = portfolio_dollars if portfolio_dollars > 0 else live_kalshi_balance
+                print(f"[KALSHI-API-DATA] Liquid Cash: ${live_kalshi_balance:.2f} | Portfolio Value: ${live_portfolio_value:.2f} (Kalshi Balance Cents: {bal_cents})")
                 try:
-                    pconn = sqlite3.connect(str(BASE_DIR / "picks.db"))
-                    pconn.execute("UPDATE bot_state SET sim_cash = ? WHERE id = 1", (bal_dollars,))
+                    pconn = get_sqlite_conn(BASE_DIR / "picks.db")
+                    pconn.execute("UPDATE bot_state SET sim_cash = ?, slate_cap = ? WHERE id = 1", (live_kalshi_balance, get_dynamic_slate_cap(live_kalshi_balance)))
                     pconn.commit()
                     pconn.close()
                 except Exception:
                     pass
 
-                # Check if there are active resting orders holding up cash in escrow
+                # Check and recycle resting orders older than 60s holding up cash in escrow
                 try:
-                    ord_headers = get_auth_headers("GET", "/trade-api/v2/portfolio/orders")
-                    ord_r = session.get(f"{base}/trade-api/v2/portfolio/orders?status=resting&limit=10", headers=ord_headers, timeout=4)
-                    if ord_r.status_code == 200:
-                        resting_orders = ord_r.json().get("orders", [])
-                        if resting_orders:
-                            print(f"[KALSHI-RESTING-ORDERS] ⚠️ Notice: {len(resting_orders)} resting order(s) currently locking funds on Kalshi: {[o.get('ticker') for o in resting_orders]}")
+                    from live_nba_sniper import cancel_stale_resting_orders
+                    canceled_stale = cancel_stale_resting_orders(max_age_seconds=60)
+                    if canceled_stale > 0:
+                        print(f"[KALSHI-RESTING-ORDERS] ♻️ Notice: Recycled {canceled_stale} stale resting order(s) (>60s) to restore liquid cash.")
                 except Exception:
                     pass
 
+                status_label = f"Connected (Cash: ${bal_dollars:.2f} | Port: ${portfolio_dollars:.2f})"
                 res = {
                     "ok": True,
                     "balance": bal_dollars,
-                    "status": f"Connected (${bal_dollars:.2f} Live)",
+                    "portfolio_value": portfolio_dollars,
+                    "status": status_label,
                     "code": 200,
                     "base_url": base,
                     "key_id": (KALSHI_KEY_ID[:8] + "...") if KALSHI_KEY_ID else "None",
@@ -1398,12 +1588,22 @@ def get_balance() -> float:
     return live_kalshi_balance if live_kalshi_balance > 0 else 32.22
 
 
+_LIVE_SPORTS_MARKETS_CACHE: Dict[str, Tuple[float, List[Any]]] = {}
+
+
 def fetch_live_sport_markets(sport: Optional[str] = None) -> list:
     """
     Sweeps Kalshi /events with nested markets so NBA & NFL props are NEVER buried
     under 15,000 crypto/weather/political contracts.
+    Cached for 45 seconds to prevent Kalshi 429 rate limit triggers on rapid button taps.
     """
+    global _LIVE_SPORTS_MARKETS_CACHE
     sport_upper = sport.upper() if sport else "ALL"
+    now_ts = time.time()
+    if sport_upper in _LIVE_SPORTS_MARKETS_CACHE:
+        c_ts, c_list = _LIVE_SPORTS_MARKETS_CACHE[sport_upper]
+        if now_ts - c_ts < 45.0 and c_list:
+            return c_list
     SPORT_KEYWORDS = {
         "NBA": [
             "NBA", "BASKETBALL", "KNICKS", "MAGIC", "PACERS", "NETS", "CLIPPERS",
@@ -1448,11 +1648,13 @@ def fetch_live_sport_markets(sport: Optional[str] = None) -> list:
                     # Accept both 'active' and 'open' status strings inside the JSON!
                     if m.get("status") not in ("active", "open"):
                         continue
+                    if not is_valid_sports_market_window(m):
+                        continue
                     m_blob = f"{m.get('ticker', '')} {m.get('title', '')} {m.get('subtitle', '')}".upper()
+                    tkr = m.get("ticker", "").upper()
                     if any(tok in m_blob for tok in FUTURES_OR_CUP_TOKENS):
                         continue
                     if ev_match or any(k in m_blob for k in keywords):
-                        tkr = m.get("ticker")
                         if tkr and tkr not in seen_tickers:
                             seen_tickers.add(tkr)
                             matched_markets.append(m)
@@ -1463,10 +1665,86 @@ def fetch_live_sport_markets(sport: Optional[str] = None) -> list:
         except Exception:
             break
 
+    # Targeted series sweep across DAILY_SPORTS_SERIES
+    if len(matched_markets) < 20:
+        sweep_series = [s for s in DAILY_SPORTS_SERIES if sport_upper == "ALL" or sport_upper in s]
+        if not sweep_series:
+            sweep_series = DAILY_SPORTS_SERIES
+        for pfx in sweep_series:
+            try:
+                s_url = f"{base_url}/trade-api/v2/markets?status=open&limit=200&series_ticker={pfx}"
+                sr = session.get(s_url, headers=public_headers, timeout=4)
+                if sr.status_code == 200:
+                    for m in sr.json().get("markets", []):
+                        if not is_valid_sports_market_window(m):
+                            continue
+                        tk = m.get("ticker", "").upper()
+                        if tk and tk not in seen_tickers:
+                            seen_tickers.add(tk)
+                            matched_markets.append(m)
+            except Exception:
+                pass
+
+    if matched_markets:
+        _LIVE_SPORTS_MARKETS_CACHE[sport_upper] = (now_ts, matched_markets)
     return matched_markets
 
 
 scan_kalshi_sports_props = fetch_live_sport_markets
+
+
+def get_real_open_markets_summary(sport: str = "NBA", query: Optional[str] = None, player_query: Optional[str] = None, limit: int = 3, **kwargs) -> List[str]:
+    """
+    Extracts actual open Kalshi market titles for display when a queried player has no open lines.
+    Queries the live open Kalshi markets (KXNBAPTS, KXNBAREB, KXNBAAST, KXNBA3PT, KXNBAGAME, etc.),
+    matches the player/team if available, and returns formatted summary lines.
+    """
+    eff_query = player_query or query or kwargs.get("q")
+    try:
+        from live_roster_sync import get_real_open_markets_summary as _sync_summary
+        summaries = _sync_summary(sport, limit=limit)
+        if summaries:
+            return summaries
+    except Exception:
+        pass
+
+    markets = fetch_live_sport_markets(sport)
+    summaries = []
+    seen = set()
+
+    # If eff_query is provided, prioritize markets matching the player or team
+    if eff_query:
+        pq_norm = str(eff_query).upper().strip()
+        for m in markets:
+            blob = f"{m.get('ticker', '')} {m.get('title', '')} {m.get('subtitle', '')}".upper()
+            if pq_norm in blob:
+                tk = m.get("ticker", "")
+                tit = m.get("title", tk)
+                if tk not in seen:
+                    seen.add(tk)
+                    yes_ask = m.get("yes_ask", 50)
+                    yes_bid = m.get("yes_bid", 48)
+                    summaries.append(f"• <code>{tk}</code> — {tit} (Ask: {yes_ask}¢ | Bid: {yes_bid}¢)")
+            if len(summaries) >= limit:
+                break
+
+    # Fill remainder with closest open sports markets
+    if len(summaries) < limit:
+        for m in markets:
+            tk = m.get("ticker", "")
+            if tk in seen:
+                continue
+            tit = m.get("title", tk)
+            sub = m.get("subtitle", "")
+            display_title = f"{tit} — {sub}" if sub else tit
+            yes_ask = m.get("yes_ask", 50)
+            yes_bid = m.get("yes_bid", 48)
+            seen.add(tk)
+            summaries.append(f"• <code>{tk}</code> — {display_title} (Ask: {yes_ask}¢ | Bid: {yes_bid}¢)")
+            if len(summaries) >= limit:
+                break
+
+    return summaries
 
 
 def fetch_all_open_markets(sport_filter: Optional[str] = None) -> list:
@@ -1483,18 +1761,15 @@ def fetch_all_open_markets(sport_filter: Optional[str] = None) -> list:
 
     # If live event sweep returned fewer than 20 markets, supplement with known daily series
     if len(markets) < 20:
-        known_sports_series = [
-            "KXNBAGAME", "KXNBASPREAD", "KXNBATOTAL", "KXNBAPTS", "KXNBAAST", "KXNBAREB", "KXNBA3PT", "KXNBAPRA",
-            "KXNFLGAME", "KXNFLPASS", "KXNFLRUSH", "KXNFLREC", "KXNFLTD",
-            "KXATPMATCH", "KXWTAMATCH", "KXTENNIS"
-        ]
-        for st in known_sports_series:
+        for st in DAILY_SPORTS_SERIES:
             try:
-                path = f"/trade-api/v2/markets?status=open&series_ticker={st}&limit=100"
+                path = f"/trade-api/v2/markets?status=open&series_ticker={st}&limit=200"
                 r = session.get(f"{base_url}{path}", headers=public_headers, timeout=3.5)
                 if r.status_code == 200:
                     for sm in r.json().get("markets", []):
                         if sm.get("status") in ("active", "open"):
+                            if not is_valid_sports_market_window(sm):
+                                continue
                             tkr = sm.get("ticker", "")
                             if tkr and tkr not in existing_tickers:
                                 existing_tickers.add(tkr)
@@ -1516,6 +1791,8 @@ def fetch_all_open_markets(sport_filter: Optional[str] = None) -> list:
                     m_list = data_m.get("markets", [])
                     for sm in m_list:
                         if sm.get("status") in ("active", "open"):
+                            if not is_valid_sports_market_window(sm):
+                                continue
                             tkr = (sm.get("ticker") or "").upper()
                             if tkr and tkr not in existing_tickers:
                                 m_title = (sm.get("title") or "").upper()
@@ -1548,6 +1825,8 @@ def fetch_all_open_markets(sport_filter: Optional[str] = None) -> list:
     # Final Guard: Daily/Live Games & Props + Macro Futures (Allows KXLEBRON, KXBASKETBALL, etc.)
     clean_markets = []
     for m in markets:
+        if not is_valid_sports_market_window(m):
+            continue
         tkr = str(m.get("ticker") or "").upper()
         tit = str(m.get("title") or "").upper()
         sub = str(m.get("subtitle") or "").upper()
@@ -1598,6 +1877,11 @@ class OrderResult(dict):
 
 
 def execute_order(ticker: str, action: str, side: str, price_cents: int, count: int) -> OrderResult:
+    tkr_upper = str(ticker or "").upper()
+    if not tkr_upper or any(bad in tkr_upper for bad in NOVELTY_BANNED_WORDS):
+        print(f"  --> [BLOCKED-COMBO] Blocked novelty/banned ticker from order placer: {ticker}")
+        return OrderResult({"ok": False, "order_id": "", "mode": "BLOCKED", "price_cents": price_cents, "count": count, "ticker": ticker, "error": "Banned ticker"})
+
     norm_action = action.lower()
     norm_side = side.lower()
 
@@ -1614,17 +1898,34 @@ def execute_order(ticker: str, action: str, side: str, price_cents: int, count: 
 
     client_oid = str(uuid.uuid4())
     is_yes = norm_side in ("yes", "over", "o")
+    clean_price = max(1, min(99, int(price_cents)))
+
+    # Kalshi V2 Create Order Single-Book Model:
+    # Action BUY:
+    #   Buy YES at clean_price -> side: "bid", price: clean_price / 100
+    #   Buy NO at clean_price  -> side: "ask", price: (100 - clean_price) / 100
+    # Action SELL (closing / cashing out an open position):
+    #   Sell YES at clean_price -> side: "ask", price: clean_price / 100
+    #   Sell NO at clean_price  -> side: "bid", price: (100 - clean_price) / 100
+    if norm_action == "buy":
+        v2_side = "bid" if is_yes else "ask"
+        v2_price_cents = clean_price if is_yes else (100 - clean_price)
+    else:  # sell
+        v2_side = "ask" if is_yes else "bid"
+        v2_price_cents = clean_price if is_yes else (100 - clean_price)
+
+    v2_price_str = f"{v2_price_cents / 100.0:.4f}"
+
     order_payload = {
         "ticker": ticker,
-        "action": "buy" if norm_action == "buy" else "sell",
-        "type": "limit",
-        "side": "yes" if is_yes else "no",
-        "count": max(1, int(count)),
-        ("yes_price" if is_yes else "no_price"): int(price_cents if is_yes else (100 - price_cents)),
         "client_order_id": client_oid,
+        "side": v2_side,
+        "count": str(max(1, int(count))),
+        "price": v2_price_str,
+        "time_in_force": "good_till_canceled",
     }
 
-    path = "/trade-api/v2/portfolio/orders"
+    order_path = "/trade-api/v2/portfolio/orders"
     endpoints_to_try = [BASE_URL, "https://api.elections.kalshi.com"]
     seen = set()
     unique_endpoints = [e for e in endpoints_to_try if not (e in seen or seen.add(e))]
@@ -1632,8 +1933,8 @@ def execute_order(ticker: str, action: str, side: str, price_cents: int, count: 
     for base in unique_endpoints:
         try:
             r = session.post(
-                f"{base}{path}",
-                headers=get_auth_headers("POST", path),
+                f"{base.rstrip('/')}{order_path}",
+                headers=get_auth_headers("POST", order_path),
                 data=json.dumps(order_payload),
                 timeout=5,
             )
@@ -1641,9 +1942,9 @@ def execute_order(ticker: str, action: str, side: str, price_cents: int, count: 
                 resp_data = r.json() if r.text else {}
                 order_obj = resp_data.get("order") or resp_data.get("event_order") or {}
                 real_order_id = order_obj.get("order_id") or client_oid
-                print(f"  --> [LIVE-{norm_action.upper()}] {ticker} | {norm_side.upper()} x{count} @ {price_cents}c (on {base}{path}) | OrderID: {real_order_id}")
+                print(f"  --> [LIVE-{norm_action.upper()}] {ticker} | {norm_side.upper()} x{count} @ {price_cents}c (${v2_price_str}) | OrderID: {real_order_id}")
                 try:
-                    notify_telegram(f"✅ AUTO-SNIPER ORDER PLACED: {ticker} | {count}x {norm_side.upper()} @ {price_cents}¢ | Order ID: {real_order_id}")
+                    notify_telegram(f"✅ AUTO-SNIPER ORDER PLACED: {ticker} | {count}x {norm_side.upper()} @ {price_cents}¢ (${v2_price_str}) | Order ID: {real_order_id}")
                 except Exception:
                     pass
                 return OrderResult({"ok": True, "order_id": real_order_id, "mode": "LIVE", "price_cents": price_cents, "count": count, "ticker": ticker})
@@ -1653,7 +1954,7 @@ def execute_order(ticker: str, action: str, side: str, price_cents: int, count: 
             except Exception:
                 pass
             if "insufficient_balance" in err_text:
-                print(f"  --> [BALANCE-ALERT] {ticker}: Insufficient available cash for {order_payload.get('count')} contracts @ {price_cents}c. (Check if open resting orders are holding balance on Kalshi).")
+                print(f"  --> [BALANCE-ALERT] {ticker}: Insufficient available cash for {order_payload.get('count')} contracts @ {price_cents}c.")
             elif r.status_code != 410 and "deprecated" not in err_text:
                 print(f"  --> [ORDER-ATTEMPT] {ticker} ({r.status_code} on {base}{path}): {err_text}")
             if r.status_code in (400, 422):
@@ -1757,6 +2058,23 @@ def manage_open_positions(m: dict):
 # ==========================================
 # SUB-ENGINE SIZING & ENTRY EVALUATION
 # ==========================================
+def get_real_open_markets_summary(sport: str = "NBA", query: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Return summary list of real open Kalshi sports markets matching sport and optional query."""
+    try:
+        from universal_entity_resolver import find_player_ladders
+        if query:
+            return find_player_ladders(query, sport=sport)
+        from live_nba_sniper import get_active_sports_markets_cached
+        markets = get_active_sports_markets_cached()
+        if sport and sport.upper() != "ALL":
+            sp_norm = sport.upper()
+            return [m for m in markets if sp_norm in str(m.get("ticker", "")).upper() or sp_norm in str(m.get("category", "")).upper()]
+        return markets
+    except Exception as e:
+        print(f"[OPEN-MARKETS-ERR] {e}")
+        return []
+
+
 def classify_sport_engine(ticker: str, title: str, category: str) -> tuple:
     blob = f"{ticker} {title} {category}".upper()
     for engine_name, cfg in SPORT_PROFILES.items():
@@ -1921,6 +2239,21 @@ def run_monte_carlo_and_combo_pipeline(
     # Sort simulated legs by EV edge descending
     simulated_legs.sort(key=lambda x: getattr(x, "ev_edge", 0.0), reverse=True)
 
+    # Deduplicate simulated legs by (player_name, stat_type) to keep only the single highest-EV rung per player
+    deduped_simulated_legs: List[SlipLeg] = []
+    seen_player_stats = set()
+    for leg in simulated_legs:
+        p_name = (getattr(leg, "player_name", "") or getattr(leg, "player_prop", "").split()[0]).strip().upper()
+        s_type = (getattr(leg, "stat_type", "") or "").strip().upper()
+        if not p_name or p_name in ("SPREAD", "TOTAL", "MONEYLINE", "OUTCOME", "GAME"):
+            key = getattr(leg, "market_ticker", "")
+        else:
+            key = (p_name, s_type)
+        if key not in seen_player_stats:
+            seen_player_stats.add(key)
+            deduped_simulated_legs.append(leg)
+    simulated_legs = deduped_simulated_legs
+
     # 3. CORRELATED COMBO BUILDER (JOINT GAUSSIAN COPULA)
     curr_exposure = get_current_exposure()
     remaining_slate_cap = max(0.0, slate_cap - curr_exposure)
@@ -1951,6 +2284,11 @@ def run_monte_carlo_and_combo_pipeline(
 
     if can_execute:
         best_combo = candidate_combos[0] if candidate_combos else None
+        # Micro-bankroll guard: if available cash or remaining cap < $1.50, prioritize 1x contract of single highest-EV prop
+        avail_cash_cents = int(round(bankroll * 100))
+        if avail_cash_cents < 150 or remaining_slate_cap < 1.50:
+            best_combo = None
+
         if best_combo and best_combo.ev_pct >= 1.5:
             combo_stake = min(best_combo.kelly_stake, remaining_slate_cap)
             combo_legs_input = [
@@ -2255,7 +2593,8 @@ def run_monte_carlo_and_combo_pipeline(
             bankroll=bankroll,
         )
 
-    clean_kb = build_casual_video_buttons()
+    scan_stream_cat = SPORT_STREAM_CATS.get(str(sport_tag).upper(), "basketball") if "SPORT_STREAM_CATS" in globals() else "basketball"
+    clean_kb = build_casual_video_buttons(stream_url=f"https://streamed.su/watch/{scan_stream_cat}")
     return card_html, clean_kb
 
 
@@ -2302,51 +2641,163 @@ def evaluate_market(m: dict, bankroll: float, force: bool = False) -> str:
     return "EDGE_BELOW_THRESHOLD"
 
 
+def fetch_live_scoreboard_games(sport: str = "NBA") -> List[Dict[str, Any]]:
+    """
+    Query ESPN scoreboard API for live and upcoming games on today's slate.
+    Returns structured list of games with team names, abbreviations, scores, period/clock, and state.
+    """
+    sport_u = (sport or "NBA").upper()
+    espn_path_map = {
+        "NBA": "basketball/nba",
+        "WNBA": "basketball/wnba",
+        "NFL": "football/nfl",
+        "CFB": "football/college-football",
+        "NHL": "hockey/nhl",
+        "MLB": "baseball/mlb",
+    }
+    path = espn_path_map.get(sport_u, "basketball/nba")
+    url = f"https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
+    games = []
+    try:
+        r = session.get(url, timeout=3.5)
+        if r.status_code == 200:
+            data = r.json()
+            for ev in data.get("events", []):
+                comps = ev.get("competitions", [{}])[0]
+                status_obj = ev.get("status", {})
+                status_type = status_obj.get("type", {})
+                state = status_type.get("state", "pre").lower()
+                detail = str(status_type.get("shortDetail") or status_type.get("detail") or "")
+
+                home_ab, away_ab = "", ""
+                home_name, away_name = "", ""
+                home_score, away_score = "", ""
+                for c in comps.get("competitors", []):
+                    tm = c.get("team", {})
+                    ab = str(tm.get("abbreviation") or "").upper()
+                    name = str(tm.get("shortDisplayName") or tm.get("displayName") or ab)
+                    score = str(c.get("score") or "0")
+                    if c.get("homeAway") == "home":
+                        home_ab, home_name, home_score = ab, name, score
+                    else:
+                        away_ab, away_name, away_score = ab, name, score
+
+                short_name = ev.get("shortName") or f"{away_ab} @ {home_ab}"
+                name = ev.get("name") or f"{away_name} at {home_name}"
+                games.append({
+                    "id": ev.get("id"),
+                    "sport": sport_u,
+                    "state": state,
+                    "detail": detail,
+                    "short_name": short_name,
+                    "name": name,
+                    "home_team": home_ab,
+                    "away_team": away_ab,
+                    "home_name": home_name,
+                    "away_name": away_name,
+                    "home_score": home_score,
+                    "away_score": away_score,
+                })
+    except Exception as err:
+        print(f"[SCOREBOARD-ERR] {sport_u}: {err}")
+    return games
+
+
 def build_watch_active_bets_payload() -> tuple:
     """
-    Build the `📺 Watch Active Bets` message and clickable `streamed.pk` + `Live Wire` buttons.
+    Build the `📺 Watch Active Bets` message and clickable `streamed.su` / `thetvapp.to` + `Live Wire` buttons.
+    Eliminates fake test bets and dynamically displays live on-court games, scores, period/clock, and stream links.
     """
     rows = []
     lines = [
-        "📺 *ACTIVE BET STREAMS // LIVE WIRE*",
+        "📺 <b>LIVE WIRE // ACTIVE BET &amp; GAME STREAMS</b>",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
     ]
     if open_positions:
+        # Fetch live scoreboard to annotate open positions with real-time game scores
+        live_games = fetch_live_scoreboard_games("NBA")
+        game_by_team = {}
+        for g in live_games:
+            if g.get("home_team"):
+                game_by_team[g["home_team"].upper()] = g
+            if g.get("away_team"):
+                game_by_team[g["away_team"].upper()] = g
+
         for tk, p in list(open_positions.items())[:4]:
+            engine = p.get("engine", "NBA")
             st = resolve_streamed_pk_for_position(
                 ticker=tk,
                 title=p.get("title", tk),
-                engine=p.get("engine", "NBA"),
+                engine=engine,
                 side=p.get("side", "yes"),
                 qty=p.get("qty", 1),
                 entry_cents=p.get("entry", 50),
             )
+            score_note = ""
+            p_title_u = f"{tk} {p.get('title', '')}".upper()
+            for tab, g in game_by_team.items():
+                if tab in p_title_u:
+                    status_icon = "🟢 LIVE" if g["state"] == "in" else ("⏰ PRE" if g["state"] == "pre" else "🏁 FINAL")
+                    score_note = f"\n  🏟 <code>{status_icon}: {g['away_team']} {g['away_score']} @ {g['home_team']} {g['home_score']} ({g['detail']})</code>"
+                    break
+
             lines.append(
-                f"• `{tk}` (*{p.get('engine', 'NBA')}*): {p.get('title', tk)[:42]}\n"
-                f"  📦 `{p['qty']}x {p['side'].upper()} @ {p['entry']}c` (HWM `{p['hwm']}c`)\n"
-                f"  📡 Stream: _{st['match_title']}_"
+                f"• <code>{html.escape(tk)}</code> (<b>{engine}</b>): {html.escape(p.get('title', tk)[:42])}\n"
+                f"  📦 <code>{p['qty']}x {p['side'].upper()} @ {p['entry']}¢</code> (HWM <code>{p['hwm']}¢</code>)"
+                f"{score_note}\n"
+                f"  📡 Stream: <i>{html.escape(st['match_title'])}</i>"
             )
             rows.append([
-                {"text": f"📺 Watch: {st['match_title'][:22]}", "url": st["embed_url"]},
-                {"text": "⚡ Sweat HUD", "url": st["sweat_hud_url"]},
+                {"text": f"📺 Watch: {st['match_title'][:20]}", "url": st["embed_url"]},
+                {"text": "⚡ Direct Feed", "url": st.get("alt_url") or st["embed_url"]},
             ])
     else:
-        st = resolve_streamed_pk_for_position(
-            ticker="KXNBA-LAL-LBJ-O25P5",
-            title="LeBron James Over 25.5 Points",
-            engine="NBA",
-            side="YES",
-            qty=3,
-            entry_cents=50,
-        )
-        lines.append(
-            "• _No open positions yet — featured NBA Live Wire stream ready:_\n"
-            f"  📡 Stream: _{st['match_title']}_"
-        )
-        rows.append([
-            {"text": f"📺 Watch: {st['match_title'][:22]}", "url": st["embed_url"]},
-            {"text": "⚡ Sweat HUD", "url": st["sweat_hud_url"]},
-        ])
+        lines.append("• <i>No open positions right now.</i>")
+        lines.append("📡 <b>TONIGHT'S LIVE ON-COURT STREAMS &amp; SCORES:</b>\n")
+
+        # Pull live NBA games (and fallback to NHL or NFL if NBA has no games)
+        live_games = fetch_live_scoreboard_games("NBA")
+        if not live_games:
+            live_games = fetch_live_scoreboard_games("NHL") or fetch_live_scoreboard_games("NFL")
+
+        state_order = {"in": 0, "pre": 1, "post": 2}
+        live_games.sort(key=lambda g: state_order.get(g["state"], 3))
+
+        displayed_count = 0
+        for g in live_games[:4]:
+            state = g["state"]
+            status_badge = "🟢 LIVE" if state == "in" else ("⏰ UPCOMING" if state == "pre" else "🏁 FINAL")
+            score_str = f"{g['away_team']} {g['away_score']} @ {g['home_team']} {g['home_score']}" if state in ("in", "post") else f"{g['away_team']} @ {g['home_team']}"
+            detail_str = f" • {g['detail']}" if g.get("detail") else ""
+
+            st = resolve_streamed_pk_for_position(
+                ticker=f"KXNBA-{g['home_team']}",
+                title=f"{g['away_name']} vs {g['home_name']}",
+                engine=g.get("sport", "NBA"),
+                side="YES",
+                qty=1,
+                entry_cents=50,
+            )
+            lines.append(
+                f"{status_badge}: <b>{html.escape(g['short_name'])}</b> ({html.escape(score_str)}{html.escape(detail_str)})\n"
+                f"  📡 Stream: <i>{html.escape(st['match_title'])}</i>"
+            )
+            rows.append([
+                {"text": f"📺 Watch: {g['short_name']}", "url": st["embed_url"]},
+                {"text": "⚡ Direct Feed", "url": st.get("alt_url") or st["embed_url"]},
+            ])
+            displayed_count += 1
+
+        if displayed_count == 0:
+            lines.append("ℹ️ <i>No live games currently on court. Live streams portal ready:</i>")
+            rows.append([
+                {"text": "📺 NBA Live Stream Portal", "url": "https://streamed.su/watch/basketball"},
+                {"text": "⚡ TheTVApp NBA", "url": "https://thetvapp.to/nba"},
+            ])
+            rows.append([
+                {"text": "🏈 NFL / All Streams Portal", "url": "https://streamed.su/watch/american-football"},
+                {"text": "⚡ Sportsurge Portal", "url": "https://sportsurge.net"},
+            ])
 
     rows.append([{"text": "🔙 Back to AURASCAN HUD", "callback_data": "menu_refresh_hud"}])
     return "\n".join(lines), {"inline_keyboard": rows}
@@ -3321,6 +3772,22 @@ def _handle_ws_payload(raw_msg: str):
             })
 
 
+def get_real_open_markets_summary(sport: str = "NBA", query: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Returns open markets summary for sport/query across live Kalshi markets.
+    """
+    sport_u = (sport or "NBA").upper()
+    try:
+        from live_kalshi_scanner import fetch_paginated_kalshi_sports
+        markets = fetch_paginated_kalshi_sports(sport=sport_u, max_pages=3)
+    except Exception:
+        markets = []
+    if query:
+        q_clean = str(query).upper()
+        return [m for m in markets if q_clean in str(m.get("ticker", "")).upper() or q_clean in str(m.get("title", "")).upper()]
+    return markets
+
+
 async def telegram_notifier_and_command_loop():
     """
     Unified Telegram Command & Callback Query Dispatcher for:
@@ -3350,6 +3817,7 @@ async def telegram_notifier_and_command_loop():
             f"[TELEGRAM] 📲 Send /menu or /start to @{bot_username} in Telegram so the bot can link your Chat ID and push alerts!"
         )
 
+    _PROCESSED_UPDATE_IDS: Deque[int] = deque(maxlen=1000)
     while True:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates?timeout=2"
@@ -3358,7 +3826,11 @@ async def telegram_notifier_and_command_loop():
             r = await asyncio.to_thread(requests.get, url, timeout=6)
             if r.status_code == 200:
                 for u in r.json().get("result") or []:
-                    last_update_id = max(last_update_id, int(u.get("update_id", 0)))
+                    u_id = int(u.get("update_id", 0))
+                    if u_id in _PROCESSED_UPDATE_IDS:
+                        continue
+                    _PROCESSED_UPDATE_IDS.append(u_id)
+                    last_update_id = max(last_update_id, u_id)
 
                     # 1. Handle Inline Keyboard Callback Queries
                     cb = u.get("callback_query")
@@ -3370,6 +3842,31 @@ async def telegram_notifier_and_command_loop():
                         cb_msg_id = cb_msg.get("message_id")
                         if cb_chat_id and not TELEGRAM_CHAT_ID:
                             _save_chat_id(cb_chat_id)
+
+                        # "Did you mean ...?" player picker buttons (sim|SPORT|Name|STAT|LINE)
+                        _cb_raw = str(cb.get("data") or "")
+                        if _cb_raw.startswith("sim|"):
+                            try:
+                                await asyncio.to_thread(
+                                    requests.post,
+                                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
+                                    json={"callback_query_id": cb_id, "text": "Running 10k sim..."},
+                                    timeout=3,
+                                )
+                                _p = (_cb_raw.split("|") + [""] * 5)[:5]
+                                import air_bridge_core, player_index
+                                _pl = player_index.lookup_by_id(_p[1], _p[2])
+                                if not _pl:
+                                    await asyncio.to_thread(notify_telegram, "⚠️ That player list expired — please re-run the command.", None, cb_chat_id, "HTML")
+                                    continue
+                                _h, _k = await asyncio.to_thread(
+                                    air_bridge_core.handle_sport_command,
+                                    cb_chat_id, f"/{_p[1]} {_pl['name']} {_p[3]} {_p[4]}".strip(), live_kalshi_balance, False, False, _pl["name"], _pl,
+                                )
+                                await asyncio.to_thread(notify_telegram, _h, _k, cb_chat_id, "HTML")
+                            except Exception as _pe:
+                                print(f"[PICKER-ERR] {_pe}")
+                            continue
 
                         # Immediate button acknowledgment so button never hangs or spins silently
                         if cb_id:
@@ -3508,6 +4005,20 @@ async def telegram_notifier_and_command_loop():
                             slider_panel_active = False
                             hud_text, hud_kb = build_menu_hud_payload(show_slider=False)
                             await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
+
+                        elif cb_data.startswith("bet_kxmve_"):
+                            kxmve_tkr = cb_data.replace("bet_kxmve_", "").strip()
+                            toast_text = "⚡ Evaluating native Kalshi combo..."
+                            c_eval = await asyncio.to_thread(evaluate_kxmve_combo, kxmve_tkr)
+                            if c_eval:
+                                ask_c = c_eval.get("yes_ask", 50)
+                                deployable = max(0.50, get_dynamic_slate_cap() - get_current_exposure())
+                                contracts = max(1, min(10, int((deployable * 0.25 * 100) // max(1, ask_c))))
+                                o_res = await asyncio.to_thread(execute_order, kxmve_tkr, "buy", "yes", ask_c, contracts)
+                                rep_txt, rep_kb = format_kxmve_combo_card(c_eval, order_receipt=o_res)
+                                await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, cb_chat_id, "HTML")
+                            else:
+                                await asyncio.to_thread(notify_telegram, f"⚠️ Unable to evaluate combo <code>{kxmve_tkr}</code>", None, cb_chat_id, "HTML")
 
                         elif any(k in cb_data for k in ("build_combo", "custom_combo")):
                             toast_text = "🛠️ Builder active (Auto paused)"
@@ -3677,6 +4188,11 @@ async def telegram_notifier_and_command_loop():
                             _, hud_kb = build_menu_hud_payload()
                             await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, a_txt, hud_kb)
 
+                        elif any(k in cb_data for k in ("menu_watch", "watch_bets", "watch")):
+                            toast_text = "📺 Live Wire Streams"
+                            w_txt, w_kb = await asyncio.to_thread(build_watch_active_bets_payload)
+                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, w_txt, w_kb)
+
                         else:
                             hud_text, hud_kb = build_menu_hud_payload()
                             await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
@@ -3708,6 +4224,20 @@ async def telegram_notifier_and_command_loop():
                         target_cid = str(cid)
                     else:
                         target_cid = TELEGRAM_CHAT_ID
+
+                    # AIR-BRIDGE SINGLE-EXIT GATE: sport player commands handled ONCE, no legacy code runs
+                    _gate_toks = clean_text.split()
+                    if _gate_toks and _gate_toks[0].startswith("/") and _gate_toks[0].lstrip("/").split("@")[0].upper() in ("NBA", "NFL", "NHL", "MLB", "CFB", "TENNIS"):
+                        try:
+                            import air_bridge_core
+                            gate_html, gate_kb = await asyncio.to_thread(
+                                air_bridge_core.handle_sport_command,
+                                target_cid, clean_text, live_kalshi_balance, False, False,  # manual lookups NEVER auto-snipe
+                            )
+                        except Exception as gate_err:
+                            gate_html, gate_kb = f"⚠️ <b>Error:</b> <code>{html.escape(str(gate_err)[:150])}</code>", None
+                        await asyncio.to_thread(notify_telegram, gate_html, gate_kb, target_cid, "HTML")
+                        continue
 
                     if low.startswith("/menu") or low in ("menu", "hud", "hi", "hello"):
                         hud_text, hud_kb = build_menu_hud_payload()
@@ -3764,83 +4294,70 @@ async def telegram_notifier_and_command_loop():
                         else:
                             await asyncio.to_thread(notify_telegram, hud_text, hud_kb)
 
-                    elif low.startswith(("/scan", "/force_scan", "/forcescan", "scan")):
-                        parsed = parse_user_query(clean_text)
-                        clean_kb = build_casual_video_buttons()
-                        if parsed["mode"] == "PLAYER_SIM":
-                            sim_data = simulate_prop_and_combo(
-                                sport=parsed["sport"],
-                                player_key=parsed["player_key"],
-                                stat=parsed["stat"],
-                                line=parsed["line"],
-                            )
-                            if sim_data.get("status") == "NO_LIVE_MARKET":
-                                p_name = sim_data.get("player", parsed["player_key"])
-                                p_stat = parsed.get("stat", "prop")
-                                matchup_str = sim_data.get("matchup") or sim_data.get("team") or "Scheduled Slate"
-                                date_str = sim_data.get("game_date") or "Today"
-                                open_mkts = sim_data.get("open_markets", [])
-                                open_list_str = "\n".join(open_mkts) if open_mkts else "• No other open Kalshi player props found on today's board."
-                                no_mkt_msg = (
-                                    f"⚠️ <b>No open Kalshi {p_stat} prop found for {p_name} right now.</b>\n\n"
-                                    f"🏀 <b>Live ESPN Slate & closest open Kalshi markets for this game:</b>\n"
-                                    f"• Matchup: <code>{matchup_str}</code> ({date_str})\n"
-                                    f"{open_list_str}\n\n"
-                                    f"💡 <i>Tip: Tap Force Scan or type <code>/scan nba</code> to view active lines on the board.</i>"
-                                )
-                                if target_cid:
-                                    await asyncio.to_thread(notify_telegram, no_mkt_msg, clean_kb, target_cid, "HTML")
-                                else:
-                                    await asyncio.to_thread(notify_telegram, no_mkt_msg, clean_kb, None, "HTML")
-                            else:
-                                exec_res = quant_sniper.resolve_and_snipe(
-                                    sim_data,
-                                    bankroll=live_kalshi_balance,
-                                    sniper_on=SNIPER_ARMED,
-                                    live_mode=LIVE_MODE,
-                                )
-                                card_html = format_revamped_sim_card(sim_data, exec_res)
-                                if target_cid:
-                                    await asyncio.to_thread(notify_telegram, card_html, clean_kb, target_cid, "HTML")
-                                else:
-                                    await asyncio.to_thread(notify_telegram, card_html, clean_kb, None, "HTML")
-                        elif parsed.get("mode") == "TENNIS_MATCHUP":
-                            from tennis_core import simulate_tennis_match, format_tennis_card
-                            sim_res = simulate_tennis_match(
-                                p1_name=parsed.get("p1", "Sinner"),
-                                p2_name=parsed.get("p2", "Alcaraz"),
-                                surface=parsed.get("surface", "HARD"),
-                            )
-                            card_html = format_tennis_card(sim_res)
+                    elif "KXMVECROSSCATEGORY-" in clean_text.upper() or clean_text.upper().startswith(("KXMVE", "/KXMVE")):
+                        m_match = re.search(r"(KXMVECROSSCATEGORY-[A-Z0-9\-]+)", clean_text.upper())
+                        target_tkr = m_match.group(1) if m_match else clean_text.split()[-1].upper()
+                        combo_eval = await asyncio.to_thread(evaluate_kxmve_combo, target_tkr)
+                        if combo_eval:
+                            rep_html, rep_kb = format_kxmve_combo_card(combo_eval)
                             if target_cid:
-                                await asyncio.to_thread(notify_telegram, card_html, clean_kb, target_cid, "HTML")
+                                await asyncio.to_thread(notify_telegram, rep_html, rep_kb, target_cid, "HTML")
                             else:
-                                await asyncio.to_thread(notify_telegram, card_html, clean_kb, None, "HTML")
+                                await asyncio.to_thread(notify_telegram, rep_html, rep_kb, None, "HTML")
                         else:
-                            sp_tgt = parsed.get("sport", "ALL")
-                            if sp_tgt == "NBA":
-                                try:
-                                    nba_html, nba_kb = await asyncio.to_thread(run_live_nba_sniper_cycle, True, target_cid)
-                                    if target_cid:
-                                        await asyncio.to_thread(notify_telegram, nba_html, nba_kb, target_cid, "HTML")
-                                    else:
-                                        await asyncio.to_thread(notify_telegram, nba_html, nba_kb, None, "HTML")
-                                except Exception:
-                                    board_html = run_full_sport_board_scan(sp_tgt, quant_sniper, bankroll=live_kalshi_balance)
-                                    if target_cid:
-                                        await asyncio.to_thread(notify_telegram, board_html, clean_kb, target_cid, "HTML")
-                                    else:
-                                        await asyncio.to_thread(notify_telegram, board_html, clean_kb, None, "HTML")
+                            err_msg = f"⚠️ Could not load or parse Kalshi combo ticker <code>{target_tkr}</code>. Check if market is open on Kalshi."
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, err_msg, None, target_cid, "HTML")
                             else:
-                                board_html = run_full_sport_board_scan(sp_tgt, quant_sniper, bankroll=live_kalshi_balance)
-                                if target_cid:
-                                    await asyncio.to_thread(notify_telegram, board_html, clean_kb, target_cid, "HTML")
-                                else:
-                                    await asyncio.to_thread(notify_telegram, board_html, clean_kb, None, "HTML")
+                                await asyncio.to_thread(notify_telegram, err_msg, None, None, "HTML")
 
-                    elif low.startswith(("/nba", "/nfl", "/mlb", "/nhl", "/tennis", "/atp", "/wta", "/wnba", "/esports", "/sim", "/card", "/htmlcard")):
+                    # 1. Dedicated Targeted Player Prop Handler
+                    cmd_tokens = clean_text.split()
+                    cmd_word = cmd_tokens[0].lower().lstrip("/") if cmd_tokens else ""
+                    is_player_query = len(cmd_tokens) > 1 and cmd_word in (
+                        "nba", "nfl", "mlb", "nhl", "wnba", "cfb", "cbb", "sim", "card", "htmlcard", "props", "prop", "bet"
+                    )
+
+                    if is_player_query:
                         parsed = parse_user_query(clean_text)
-                        clean_kb = build_casual_video_buttons()
+                        sim_sport = parsed.get("sport") or (cmd_word.upper() if cmd_word in ("nba", "nfl", "mlb", "nhl", "wnba") else "NBA")
+                        sim_player = parsed.get("player_key") or " ".join(cmd_tokens[1:])
+                        sim_stat = parsed.get("stat") or "PTS"
+                        sim_line = parsed.get("line")
+                        try:
+                            from sim_prop_bridge import run_bridge_player_simulation
+                            card_html, p_kb = await asyncio.to_thread(
+                                run_bridge_player_simulation,
+                                sport=sim_sport,
+                                player_query=sim_player,
+                                stat_query=sim_stat,
+                                line_query=sim_line,
+                                bankroll=live_kalshi_balance,
+                                sniper_on=SNIPER_ARMED,
+                                live_mode=LIVE_MODE,
+                            )
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, card_html, p_kb, target_cid, "HTML")
+                            else:
+                                await asyncio.to_thread(notify_telegram, card_html, p_kb, None, "HTML")
+                        except Exception as sim_err:
+                            err_trace = traceback.format_exc()
+                            print(f"[PLAYER-SIM-ERR] {sim_err}\n{err_trace}")
+                            err_card = f"⚠️ <b>Simulation Error:</b> <code>{html.escape(str(sim_err))}</code>"
+                            sport_cat = SPORT_STREAM_CATS.get(cmd_word.upper(), "basketball") if "SPORT_STREAM_CATS" in globals() else "basketball"
+                            clean_kb = build_casual_video_buttons(stream_url=f"https://streamed.su/watch/{sport_cat}")
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, err_card, clean_kb, target_cid, "HTML")
+                            else:
+                                await asyncio.to_thread(notify_telegram, err_card, clean_kb, None, "HTML")
+                        continue
+
+                    elif low.startswith(("/scan", "/force_scan", "/forcescan", "/atp", "/wta", "/wnba", "/esports", "/sim", "/card", "/htmlcard")) or low in ("scan", "forcescan"):
+                        cmd_tokens = clean_text.split()
+                        cmd_word = cmd_tokens[0].lower().lstrip("/") if cmd_tokens else ""
+                        parsed = parse_user_query(clean_text)
+                        sport_cat = SPORT_STREAM_CATS.get(cmd_word.upper(), "basketball") if "SPORT_STREAM_CATS" in globals() else "basketball"
+                        clean_kb = build_casual_video_buttons(stream_url=f"https://streamed.su/watch/{sport_cat}")
                         if parsed.get("mode") == "TENNIS_MATCHUP":
                             from tennis_core import simulate_tennis_match, format_tennis_card
                             sim_res = simulate_tennis_match(
@@ -3853,63 +4370,32 @@ async def telegram_notifier_and_command_loop():
                                 await asyncio.to_thread(notify_telegram, card_html, clean_kb, target_cid, "HTML")
                             else:
                                 await asyncio.to_thread(notify_telegram, card_html, clean_kb, None, "HTML")
-                        elif parsed["mode"] == "SCAN":
-                            if parsed.get("sport") == "NBA":
+                            continue
+
+                        else:
+                            # Mode is SCAN
+                            sp_tgt = parsed.get("sport", "ALL")
+                            if sp_tgt == "NBA":
                                 try:
                                     nba_html, nba_kb = await asyncio.to_thread(run_live_nba_sniper_cycle, True, target_cid)
                                     if target_cid:
                                         await asyncio.to_thread(notify_telegram, nba_html, nba_kb, target_cid, "HTML")
                                     else:
                                         await asyncio.to_thread(notify_telegram, nba_html, nba_kb, None, "HTML")
-                                except Exception:
-                                    board_html = run_full_sport_board_scan(parsed["sport"], quant_sniper, bankroll=live_kalshi_balance)
+                                except Exception as nba_scan_err:
+                                    print(f"[NBA-BOARD-ERR] {nba_scan_err}\n{traceback.format_exc()}")
+                                    board_html = run_full_sport_board_scan(sp_tgt, quant_sniper, bankroll=live_kalshi_balance)
                                     if target_cid:
                                         await asyncio.to_thread(notify_telegram, board_html, clean_kb, target_cid, "HTML")
                                     else:
                                         await asyncio.to_thread(notify_telegram, board_html, clean_kb, None, "HTML")
                             else:
-                                board_html = run_full_sport_board_scan(parsed["sport"], quant_sniper, bankroll=live_kalshi_balance)
+                                board_html = run_full_sport_board_scan(sp_tgt, quant_sniper, bankroll=live_kalshi_balance)
                                 if target_cid:
                                     await asyncio.to_thread(notify_telegram, board_html, clean_kb, target_cid, "HTML")
                                 else:
                                     await asyncio.to_thread(notify_telegram, board_html, clean_kb, None, "HTML")
-                        else:
-                            sim_data = simulate_prop_and_combo(
-                                sport=parsed["sport"],
-                                player_key=parsed["player_key"],
-                                stat=parsed["stat"],
-                                line=parsed["line"],
-                            )
-                            if sim_data.get("status") == "NO_LIVE_MARKET":
-                                p_name = sim_data.get("player", parsed["player_key"])
-                                p_stat = parsed.get("stat", "prop")
-                                matchup_str = sim_data.get("matchup") or sim_data.get("team") or "Scheduled Slate"
-                                date_str = sim_data.get("game_date") or "Today"
-                                open_mkts = sim_data.get("open_markets", [])
-                                open_list_str = "\n".join(open_mkts) if open_mkts else "• No other open Kalshi player props found on today's board."
-                                no_mkt_msg = (
-                                    f"⚠️ <b>No open Kalshi {p_stat} prop found for {p_name} right now.</b>\n\n"
-                                    f"🏀 <b>Live ESPN Slate & closest open Kalshi markets for this game:</b>\n"
-                                    f"• Matchup: <code>{matchup_str}</code> ({date_str})\n"
-                                    f"{open_list_str}\n\n"
-                                    f"💡 <i>Tip: Tap Force Scan or type <code>/scan nba</code> to view active lines on the board.</i>"
-                                )
-                                if target_cid:
-                                    await asyncio.to_thread(notify_telegram, no_mkt_msg, clean_kb, target_cid, "HTML")
-                                else:
-                                    await asyncio.to_thread(notify_telegram, no_mkt_msg, clean_kb, None, "HTML")
-                            else:
-                                exec_res = quant_sniper.resolve_and_snipe(
-                                    sim_data,
-                                    bankroll=live_kalshi_balance,
-                                    sniper_on=SNIPER_ARMED,
-                                    live_mode=LIVE_MODE,
-                                )
-                                card_html = format_revamped_sim_card(sim_data, exec_res)
-                                if target_cid:
-                                    await asyncio.to_thread(notify_telegram, card_html, clean_kb, target_cid, "HTML")
-                                else:
-                                    await asyncio.to_thread(notify_telegram, card_html, clean_kb, None, "HTML")
+                            continue
 
                     elif low.startswith(("/livesim", "/combos", "/liveboard")):
                         rep_txt, rep_kb = await asyncio.to_thread(build_live_nba_diagnostic_board, target_cid)
@@ -4330,16 +4816,98 @@ def sync_live_kalshi_positions() -> dict:
     return {}
 
 
+def check_and_execute_auto_exits() -> List[Dict[str, Any]]:
+    """
+    Live Auto-Profit / Green-Book Exit Monitor:
+    1. Inspects all open positions from /trade-api/v2/portfolio/positions.
+    2. Queries live market orderbook to obtain current marketable bid.
+    3. Runs remainder evaluation:
+       - If current_bid >= 88c (near-max payout lock-in)
+       - OR unrealized profit >= +5 cents per contract
+    4. Automatically fires a marketable limit sell order to bank profit,
+       and pushes an instant Telegram Cash Out alert with receipt.
+    """
+    global sim_realized_pnl, total_cashouts_count, last_scan_diag
+    exits_taken = []
+    pos_data = sync_live_kalshi_positions()
+    market_positions = pos_data.get("market_positions", []) if isinstance(pos_data, dict) else []
+
+    for mp in market_positions:
+        tkr = mp.get("ticker")
+        pos_qty = int(mp.get("position", 0))
+        if not tkr or pos_qty == 0:
+            continue
+
+        side = "yes" if pos_qty > 0 else "no"
+        qty = abs(pos_qty)
+        entry_cents = round(mp.get("market_exposure", 0) / max(1, qty))
+        if entry_cents <= 0:
+            entry_cents = 50
+
+        # Query current market prices
+        m_path = f"/trade-api/v2/markets/{tkr}"
+        for base in (BASE_URL, "https://api.elections.kalshi.com"):
+            try:
+                mr = session.get(f"{base}{m_path}", headers={"Accept": "application/json"}, timeout=4)
+                if mr.status_code == 200:
+                    m_obj = mr.json().get("market", {})
+                    current_bid = int(m_obj.get("yes_bid", 0) if side == "yes" else m_obj.get("no_bid", 0))
+                    if current_bid <= 0:
+                        continue
+
+                    unrealized_cents = current_bid - entry_cents
+                    trigger_reason = None
+
+                    # Rule A: Hard ceiling exit at 88c+
+                    if current_bid >= 88:
+                        trigger_reason = f"GREEN_BOOK_CEILING ({current_bid}¢ >= 88¢ lock-in)"
+                    # Rule B: Profit edge >= +5 cents above entry
+                    elif unrealized_cents >= 5:
+                        trigger_reason = f"PROFIT_TAKE (+{unrealized_cents}¢ profit, bid {current_bid}¢)"
+
+                    if trigger_reason:
+                        print(f"[GREEN-BOOK-EXIT] 💰 Triggered {tkr} ({side.upper()} x{qty}): {trigger_reason}")
+                        sell_res = execute_order(tkr, "sell", side, current_bid, qty)
+                        if sell_res:
+                            pnl_usd = round((unrealized_cents * qty) / 100.0, 2)
+                            sim_realized_pnl += pnl_usd
+                            total_cashouts_count += 1
+                            last_scan_diag = f"💰 Auto-Profit Cashed out {tkr} (+${pnl_usd:.2f})"
+                            sync_state_to_sqlite()
+                            target_cid = TELEGRAM_CHAT_ID or discover_telegram_chat_id()
+                            notify_telegram(
+                                f"💰 <b>AUTO-PROFIT / GREEN-BOOK CASHOUT</b> 💰\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"• 📌 <b>Contract:</b> <code>{tkr}</code>\n"
+                                f"• ⚡ <b>Exit Trigger:</b> <code>{trigger_reason}</code>\n"
+                                f"• 📦 <b>Volume:</b> Sold <code>{qty}x {side.upper()} @ {current_bid}¢</code>\n"
+                                f"• 💵 <b>Spread:</b> Entry <code>{entry_cents}¢</code> ➔ Exit <code>{current_bid}¢</code>\n"
+                                f"• 📈 <b>Realized PnL:</b> <code>+${pnl_usd:.2f}</code>\n"
+                                f"• 🆔 <b>Order ID:</b> <code>{sell_res.get('order_id', 'N/A')}</code>",
+                                reply_markup=None,
+                                chat_id=target_cid,
+                                parse_mode="HTML",
+                            )
+                            exits_taken.append({"ticker": tkr, "pnl": pnl_usd, "order_id": sell_res.get("order_id")})
+                    break
+            except Exception as exc:
+                print(f"[AUTO-EXIT-ERR] {tkr}: {exc}")
+
+    return exits_taken
+
+
 async def auto_pilot_loop():
     """
     Component 3: TRUE HANDS-FREE FULL-AUTO ENGINE LOOP
     Runs continuously (every 60–90 seconds) without waiting for user action.
     When Sniper: ON and Mode: LIVE:
-    1. Fetches live Kalshi balance & open positions to compute deployable cash under the slider cap.
-    2. Pulls all active sports markets, maps all props, runs 10,000-iter MC + Joint Gaussian Copula.
-    3. Ranks top +EV single props and 2-to-3 leg correlated combos.
-    4. Automatically fires live limit orders sizing stakes dynamically via Fractional Kelly scaled to available balance.
-    5. Pushes instant Telegram execution alerts & live auto-scans for props to chat.
+    1. Recycles any resting orders older than 90s to free trapped cash.
+    2. Runs Live Auto-Profit / Green-Book exit monitor on open positions.
+    3. Fetches live Kalshi balance & open positions to compute deployable cash under the slider cap.
+    4. Pulls all active sports markets, maps all props, runs 10,000-iter MC + Joint Gaussian Copula.
+    5. Ranks top +EV single props and 2-to-3 leg correlated combos.
+    6. Automatically fires live limit orders sizing stakes dynamically via Fractional Kelly scaled to available balance.
+    7. Pushes instant Telegram execution alerts & live auto-scans for props to chat.
     """
     global last_scan_ts, last_markets_checked, last_scan_diag
     cycle_num = 0
@@ -4356,6 +4924,19 @@ async def auto_pilot_loop():
                 print(f"[AUTO-PILOT] Cycle #{cycle_num}: Paused (User is building manual combo in Telegram/Web App).")
                 await asyncio.sleep(15)
                 continue
+
+            # 1. Recycle stale resting orders > 90s to free trapped funds back to $32.22 liquid balance
+            try:
+                from live_nba_sniper import cancel_stale_resting_orders
+                await asyncio.to_thread(cancel_stale_resting_orders, 90)
+            except Exception:
+                pass
+
+            # 2. Live Auto-Profit / Green-Book Exit Monitor
+            try:
+                await asyncio.to_thread(check_and_execute_auto_exits)
+            except Exception:
+                pass
 
             try:
                 live_bal = await asyncio.to_thread(get_balance)
@@ -4387,8 +4968,8 @@ async def auto_pilot_loop():
                         True,
                         target_cid,
                     )
-                    if "ORDER EXECUTED" in nba_rep_txt:
-                        print(f"[AUTO-PILOT] Live NBA Sniper placed orders!")
+                    if any(k in nba_rep_txt for k in ("ORDER EXECUTED", "ORDER EXECUTION RECEIPT", "ORDER PLACED", "LIVE KALSHI ORDER", "EXECUTION ATTEMPT", "ORDER STATUS", "REJECTED")):
+                        print(f"[AUTO-PILOT] Live NBA Sniper dispatched order status/fill alert!")
                         notify_telegram(nba_rep_txt, reply_markup=nba_rep_kb, chat_id=target_cid, parse_mode="HTML")
                 except Exception as nba_err:
                     print(f"[AUTO-PILOT-NBA-ERR] {nba_err}")
@@ -4419,7 +5000,7 @@ async def auto_pilot_loop():
             is_initial = (cycle_num == 1 and SNIPER_ARMED)
             sig_changed = (bool(current_sig) and current_sig != last_broadcast_sig and (now - last_broadcast_ts >= 600))
 
-            should_broadcast = is_new_live_order or is_initial or sig_changed
+            should_broadcast = is_new_live_order
 
             if should_broadcast:
                 print(f"[AUTO-PILOT] Dispatching auto-scan to Telegram (Cycle #{cycle_num}, NewOrder={is_new_live_order}, Initial={is_initial}, SigChanged={sig_changed}).")

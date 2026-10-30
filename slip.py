@@ -28,16 +28,19 @@ from telemetry import GameTelemetry, match_telemetry_for_prop
 from clean_casual_core import get_prop_date_str, is_real_live_game_contract
 
 BANNED_PREFIXES = (
-    "KXMVE", "COMBO", "PARLAY", "MULTIGAME", "CROSS",
+    "KXMVE", "KXMVECROSSCATEGORY", "CROSSCATEGORY", "COMBO", "PARLAY", "MULTIGAME", "CROSS",
+    "KXNBASTADIUM", "KXNBAJOINCONF", "STADIUM", "JOINCONF", "EXPANSION", "RELOCATE",
     "KXNBACUP", "KXNBACHAMP", "KXNBAMVP", "KXNBAAWARDS", "KXNBADRAFT",
     "KXNBAEAST", "KXNBAWEST", "KXNBAPLAYOFFS", "KXNBAFINALS", "KXNBATOURNAMENT",
     "KXMLBAWARDS", "KXMLBCY", "KXMLBMVP", "KXMLBROY", "KXMLBWS", "KXMLBCHAMP",
     "KXMLBDEBUT", "KXMLBDEBUTS", "KXMLBDRAFT", "KXMLBSEASON", "KXMLBHOF",
-    "KXMLBPENNANT", "KXMLBHRKING", "KXMLBWIN"
+    "KXMLBPENNANT", "KXMLBHRKING", "KXMLBWIN",
+    "KXNFLCAREER", "CAREER", "SEASON", "RECORD", "AWARD", "LEADER", "HISTORIC", "HOF", "CHAMP"
 )
 FUTURES_OR_CUP_TOKENS = (
+    "STADIUM", "JOINCONF", "EXPANSION", "RELOCATE", "COACH", "TRADE", "ROTY",
     "CUP", "IN-SEASON", "INSEASON", "IN SEASON", "MID-SEASON", "MIDSEASON", "MID SEASON", "MID SZN",
-    "CHAMPION", "CHAMPIONSHIP", "TITLE", "MVP", "ROOKIE", "ROY", "DPOY", "AWARDS", "DRAFT",
+    "CHAMPION", "CHAMPIONSHIP", "TITLE", "MVP", "ROOKIE", "ROY", "DPOY", "AWARDS", "AWARD", "DRAFT",
     "EAST CONF", "WEST CONF", "CONFERENCE", "WIN TOTAL", "SEASON WIN", "MAKE PLAYOFFS", "MISS PLAYOFFS",
     "FINALS", "BRACKET", "TOURNAMENT", "TOURNEY", "EMIRATES", "ALL-STAR", "ALL STAR", "DIVISION", "STANDINGS",
     "SEASON-LONG", "SEASON LONG", "FUTURES", "FUTURE", "SEED",
@@ -46,8 +49,10 @@ FUTURES_OR_CUP_TOKENS = (
     "HOME RUN LEADER", "HR LEADER", "BATTING TITLE", "TRIPLE CROWN", "GOLD GLOVE", "SILVER SLUGGER", "HALL OF FAME",
     "RETIRE", "RETIREMENT", "ANNOUNCE", "OWNER", "OWNERSHIP", "HEADLINER",
     "HALFTIME", "MAJORITY", "PRESIDENT", "ELECT", "SELECT", "TRADED", "SIGN",
-    "COACH OF THE YEAR", "EXECUTIVE"
+    "COACH OF THE YEAR", "EXECUTIVE",
+    "CAREER", "SEASON", "RECORD", "LEADER", "LEADERS", "HISTORIC", "ALLTIME", "ALL-TIME", "ALL_TIME", "TOTALS", "MILESTONE", "HOF", "CHAMP"
 )
+DAILY_DATE_CODE_REGEX = re.compile(r"\d{2}(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}", re.I)
 EXCLUDED_CATEGORIES = (
     "POLITICS", "POP CULTURE", "FINANCIAL", "CRYPTO", "WEATHER",
     "ENTERTAINMENT", "ELECTIONS", "NEWS", "MACRO", "GOVERNMENT",
@@ -109,6 +114,14 @@ SPORT_PROFILES: Dict[str, Dict[str, Any]] = {
         "loop_label": "5m loop",
         "active_october": True,
     },
+    "NHL": {
+        "keywords": ("NHL", "KXNHL", "HOCKEY", "GOALS", "ASSISTS", "POINTS", "SOG", "SAVES", "SHOTS"),
+        "max_spread": 6,
+        "min_ev": 0.03,
+        "swing_trigger": 5,
+        "loop_label": "5m loop",
+        "active_october": True,
+    },
 }
 
 _MARKET_HISTORY: Dict[str, Deque[Dict[str, float]]] = {}
@@ -163,6 +176,10 @@ SPORT_PATTERNS = {
     ),
     "ESPORTS": re.compile(
         r"(ESPORTS|KXESPORTS|KXCS2|KXLOL|KXVAL|CS2|VALORANT|LOL|DOTA|COD|NAVI|FAZE|VITALITY|SPIRIT|G2|T1|GENG|SENTINELS|FNATIC|ZYWOO|DONK|M0NESY|FAKER|CHOVY|TENZ|ASPAS|KILLS|HEADSHOTS|MAPS)",
+        re.IGNORECASE,
+    ),
+    "NHL": re.compile(
+        r"(NHL|KXNHL|HOCKEY|CANADIENS|HURRICANES|OILERS|AVALANCHE|MAPLE\s*LEAFS|RANGERS|BRUINS|GOLDEN\s*KNIGHTS|STARS|PANTHERS|LIGHTNING|PREDATORS|KRAKEN|CANUCKS|JETS|DEVILS|ISLANDERS|CAPITALS|RED\s*WINGS|PENGUINS|SENATORS|SABRES|FLYERS|BLUE\s*JACKETS|BLACKHAWKS|BLUES|WILD|COYOTES|MCDAVID|MACKINNON|MATTHEWS|KUCHEROV|AHO|EVANS|GOALS|SOG|SAVES)",
         re.IGNORECASE,
     ),
 }
@@ -381,6 +398,8 @@ def detect_sport(ticker: str, title: str = "") -> str:
     if any(exc in combined for exc in EXCLUDED_CATEGORIES):
         return "EXCLUDED"
     tk = ticker.upper()
+    if tk.startswith("KXNHL") or "NHL" in tk or "HOCKEY" in tk:
+        return "NHL"
     if tk.startswith("KXNBA") or "NBA" in tk:
         return "NBA"
     if tk.startswith(("KXNFL", "KXCFB")) or "NFL" in tk or "CFB" in tk:
@@ -394,10 +413,12 @@ def detect_sport(ticker: str, title: str = "") -> str:
     if tk.startswith(("KXESPORTS", "KXCS2", "KXLOL", "KXVAL")) or "ESPORTS" in tk:
         return "ESPORTS"
 
-    for sport in ("ESPORTS", "WNBA", "NBA", "NFL", "MLB", "TENNIS"):
+    for sport in ("ESPORTS", "WNBA", "NBA", "NFL", "NHL", "MLB", "TENNIS"):
         if SPORT_PATTERNS[sport].search(combined):
             return sport
 
+    if any(k in combined for k in ("GOAL", "GOALS", "SOG", "SAVES", "HOCKEY", "NHL", "PUCK", "STANLEY")):
+        return "NHL"
     if any(k in combined for k in (
         "PTS", "POINTS", "REB", "REBOUNDS", "AST", "ASSISTS", "3PT", "PRA",
         "LAKERS", "CELTICS", "WARRIORS", "BUCKS", "NUGGETS", "SUNS", "KNICKS", "BASKETBALL",
@@ -503,15 +524,35 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
     category = str(market.get("category") or "").strip()
     text = f"{title} {subtitle}".strip() or ticker
 
-    combined_blob = f"{ticker} {title} {subtitle} {category}".upper()
+    ev_tkr = str(market.get("event_ticker") or "").upper()
+    combined_blob = f"{ticker} {title} {subtitle} {category} {ev_tkr}".upper()
 
     # Drop politics, entertainment, crypto, weather, and macro novelty markets
     if any(exc in combined_blob for exc in EXCLUDED_CATEGORIES):
         return []
 
+    # Strictly require daily game date code in ticker or event_ticker (blocks career/season futures)
+    if not (DAILY_DATE_CODE_REGEX.search(ticker) or DAILY_DATE_CODE_REGEX.search(ev_tkr)):
+        return []
+
     # User priority: Strictly daily/live game lines & player props (filter out cups, mid-season tourneys & futures)
     if any(tok in combined_blob for tok in FUTURES_OR_CUP_TOKENS):
         return []
+
+    # Drop long-term novelty futures > 48 hours in the future
+    c_time_raw = market.get("close_time") or market.get("expected_expiration_time") or market.get("expiration_time")
+    if c_time_raw:
+        try:
+            if isinstance(c_time_raw, (int, float)):
+                exp_ts = float(c_time_raw)
+            else:
+                dt_val = datetime.fromisoformat(str(c_time_raw).replace("Z", "+00:00"))
+                exp_ts = dt_val.timestamp()
+            now_ts = time.time()
+            if exp_ts > now_ts + (48.0 * 3600.0) or exp_ts < now_ts - 7200.0:
+                return []
+        except Exception:
+            pass
 
     # 1. Sport Detection
     sport = detect_sport(ticker, text)
@@ -524,7 +565,9 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
                 break
     if sport == "GENERAL":
         # Fallback by league or keywords
-        if "KXNBA" in combined_blob or "BASKETBALL" in combined_blob or "PTS" in combined_blob:
+        if "KXNHL" in combined_blob or "NHL" in combined_blob or "HOCKEY" in combined_blob:
+            sport = "NHL"
+        elif "KXNBA" in combined_blob or "BASKETBALL" in combined_blob or "PTS" in combined_blob:
             sport = "NBA"
         elif "KXNFL" in combined_blob or "KXCFB" in combined_blob or "FOOTBALL" in combined_blob or "TD" in combined_blob:
             sport = "NFL"
@@ -536,6 +579,9 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
             return []  # Drop unclassified non-sports contracts
 
     # 2. Line extraction: floor_strike, strike_price, cap_strike, ticker regex, text regex
+    # Strip commas so milestones like 14,000+ are never parsed as 000 -> -0.5
+    clean_text_no_commas = text.replace(",", "")
+
     line_val: Optional[float] = None
     extracted_stat = ""
 
@@ -563,7 +609,7 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
         except ValueError:
             pass
 
-    match = PROP_LINE_REGEX.search(text)
+    match = PROP_LINE_REGEX.search(clean_text_no_commas)
     if match and match.group("line"):
         try:
             fv = float(match.group("line"))
@@ -574,12 +620,18 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
         except ValueError:
             pass
 
+    # Guard: Hard-reject strike lines <= 0 (e.g. -0.5 or 0)
+    if line_val is not None and line_val <= 0:
+        return []
+
     player_name, stat_label = _split_player_and_stat(text if text != ticker else title, line_val)
     if not extracted_stat or extracted_stat == "Prop":
         extracted_stat = stat_label
 
     # 3. Sport & Stat Line Resolution (strictly accurate lines per sport!)
     detected_stat, line_val = resolve_sport_stat_line(sport, extracted_stat, combined_blob, line_val)
+    if line_val <= 0:
+        return []
 
     if not player_name or player_name == text or len(player_name) > 35:
         cleaned_title = title.split(":")[0].replace("Will ", "").replace("?", "").strip()
@@ -587,33 +639,33 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     date_str = get_prop_date_str(sport, player_name, market=market)
 
-    # 4. Robust Price Parsing (cents)
+    # 4. Robust Price Parsing (cents) — NEVER default missing/zero ask to 50¢
     yes_ask = _clean_price_cents(market.get("yes_ask"))
     yes_bid = _clean_price_cents(market.get("yes_bid"))
     no_ask = _clean_price_cents(market.get("no_ask"))
     no_bid = _clean_price_cents(market.get("no_bid"))
     last_price = _clean_price_cents(market.get("last_price"))
 
-    if yes_ask <= 0 and last_price > 0:
+    if yes_ask <= 0 and last_price > 0 and 2 <= last_price <= 97:
         yes_ask = last_price
     if yes_bid <= 0 and yes_ask > 2:
         yes_bid = max(1, yes_ask - 2)
-    if no_ask <= 0 and yes_bid > 0:
+    if no_ask <= 0 and yes_bid > 0 and 2 <= (100 - yes_bid) <= 97:
         no_ask = 100 - yes_bid
-    if no_bid <= 0 and yes_ask > 0:
+    if no_bid <= 0 and yes_ask > 0 and 2 <= (100 - yes_ask) <= 97:
         no_bid = 100 - yes_ask
-    if yes_ask <= 0:
-        yes_ask = 50
-    if no_ask <= 0:
-        no_ask = 100 - yes_ask if yes_ask > 0 else 50
-    if yes_bid <= 0:
+    if yes_bid <= 0 and yes_ask > 0:
         yes_bid = max(1, yes_ask - 3)
-    if no_bid <= 0:
+    if no_bid <= 0 and no_ask > 0:
         no_bid = max(1, no_ask - 3)
 
+    # Skip market if neither side has a valid tradeable ask price
+    if not (2 <= yes_ask <= 97) and not (2 <= no_ask <= 97):
+        return []
+
     # De-vigged market midpoint & sharp predictive edge calculation
-    mid_yes = (yes_bid + yes_ask) / 2.0
-    mid_no = (no_bid + no_ask) / 2.0
+    mid_yes = (yes_bid + yes_ask) / 2.0 if yes_ask > 0 else 50.0
+    mid_no = (no_bid + no_ask) / 2.0 if no_ask > 0 else 50.0
     tot_mid = mid_yes + mid_no
     devig_p_yes = (mid_yes / tot_mid) if tot_mid > 0 else 0.50
     devig_p_no = (mid_no / tot_mid) if tot_mid > 0 else 0.50
@@ -639,8 +691,8 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     props = []
 
-    # YES side contract
-    if 1 <= yes_ask <= 99:
+    # YES side contract (strictly tradeable 2c-97c)
+    if 2 <= yes_ask <= 97:
         props.append({
             "ticker": ticker,
             "sport": sport,
@@ -662,8 +714,8 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
             "is_synthetic": bool(market.get("is_synthetic", False)),
         })
 
-    # NO side contract
-    if 1 <= no_ask <= 99:
+    # NO side contract (strictly tradeable 2c-97c)
+    if 2 <= no_ask <= 97:
         clean_no_label = f"{player_name} {detected_stat} {'Over' if is_under_contract else 'Under'} {line_val:g}"
         if detected_stat in ("Spread", "Moneyline", "Outcome"):
             clean_no_label = f"NO: {title}" if title else clean_no_label
@@ -684,29 +736,6 @@ def sim_to_prop_mapper(market: Dict[str, Any]) -> List[Dict[str, Any]]:
             "model_edge": edge_no,
             "market_url": f"https://kalshi.com/markets/{ticker.lower()}",
             "volume": volume,
-            "title": text[:60],
-            "is_synthetic": bool(market.get("is_synthetic", False)),
-        })
-
-    # Fallback to ensure mapped_props is NEVER 0
-    if not props:
-        props.append({
-            "ticker": ticker,
-            "sport": sport,
-            "player_or_team": player_name,
-            "player_prop": clean_prop_label,
-            "stat_type": detected_stat,
-            "game_date": date_str,
-            "line": line_val,
-            "side": "yes",
-            "sim_direction": "OVER",
-            "ask_price_cents": 50,
-            "bid_price_cents": 48,
-            "implied_prob": 0.50,
-            "devig_prob": 0.50,
-            "model_edge": 0.048,
-            "market_url": f"https://kalshi.com/markets/{ticker.lower()}",
-            "volume": max(100, volume),
             "title": text[:60],
             "is_synthetic": bool(market.get("is_synthetic", False)),
         })
@@ -942,6 +971,8 @@ def build_leg_from_kalshi_market(
         parsed["line"] = strike_override
     if chosen_side == "UNDER":
         parsed["side"] = "UNDER"
+    if float(parsed.get("line") or 0.0) <= 0.0:
+        return None
 
     telem = (
         match_telemetry_for_prop(sport, ticker, parsed["player_prop"], telemetry_map)

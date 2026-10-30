@@ -14,13 +14,15 @@ from typing import Any, Dict, List, Optional, Set
 
 from config import BASE_DIR, DB_PATH, DEFAULT_AUTO, DEFAULT_MODE, DEFAULT_SIM_CASH
 
-SLATE_CAP_USD: float = 5.00
+SLATE_CAP_USD: float = 32.22
 
 
 @contextmanager
 def get_connection():
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA busy_timeout = 5000;")
     conn.execute("PRAGMA foreign_keys = ON;")
     try:
         yield conn
@@ -213,7 +215,7 @@ def get_runtime_state() -> Dict[str, Any]:
             }
         row_keys = set(row.keys())
         bankroll_pct = float(row["bankroll_allocation_pct"]) if "bankroll_allocation_pct" in row_keys and row["bankroll_allocation_pct"] is not None else 1.00
-        slate_cap = float(row["slate_cap"]) if "slate_cap" in row_keys else SLATE_CAP_USD
+        slate_cap = float(row["slate_cap"]) if ("slate_cap" in row_keys and 0 < float(row["slate_cap"]) < 50.0) else SLATE_CAP_USD
         last_scan_ts = float(row["last_scan_ts"]) if "last_scan_ts" in row_keys else 0.0
         last_markets = int(row["last_markets_checked"]) if "last_markets_checked" in row_keys else 0
         last_diag = str(row["last_scan_diag"]) if "last_scan_diag" in row_keys else "Armed — awaiting scan cycle"

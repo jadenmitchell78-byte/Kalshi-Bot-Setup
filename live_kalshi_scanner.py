@@ -142,6 +142,24 @@ def fetch_paginated_kalshi_sports(sport: str = "ALL", max_pages: int = 6) -> Lis
                         if not t or t in seen_tickers:
                             continue
 
+                        # Rule 1: Hard reject non-daily markets and career stats
+                        if any(b in t for b in ("CAREER", "SEASON", "RECORD", "AWARD", "LEADER", "HOF", "CHAMP")) or not re.search(r"26(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}", t):
+                            continue
+
+                        # Rule 2: Hard reject strike <= 0
+                        invalid_strike = False
+                        for sf in ("floor_strike", "strike_price", "cap_strike", "line"):
+                            v = m.get(sf)
+                            if v is not None:
+                                try:
+                                    if float(v) <= 0.0:
+                                        invalid_strike = True
+                                        break
+                                except (ValueError, TypeError):
+                                    pass
+                        if invalid_strike:
+                            continue
+
                         m_title = str(m.get("title", "")).upper()
                         m_sub = str(m.get("subtitle", "")).upper()
                         full_blob = f"{ev_blob} {t} {m_title} {m_sub}"
@@ -170,36 +188,51 @@ def fetch_paginated_kalshi_sports(sport: str = "ALL", max_pages: int = 6) -> Lis
             except Exception:
                 break
 
-        # Direct /markets sweep if /events sweep returned sparse sports markets
-        if len(collected) < 10:
-            cursor_m = None
-            for _ in range(4):
-                params_m = {"status": "open", "limit": 200}
-                if cursor_m:
-                    params_m["cursor"] = cursor_m
-                try:
-                    r_m = requests.get(f"{base}/markets", params=params_m, timeout=5)
-                    if r_m.status_code == 200:
-                        m_data = r_m.json()
-                        m_list = m_data.get("markets", [])
-                        for sm in m_list:
-                            if sm.get("status") in ("active", "open"):
-                                t = str(sm.get("ticker", "")).upper()
-                                if not t or t in seen_tickers:
+        # Targeted daily sports series sweep across KXNBAPTS, KXNBAGAME, etc.
+        DAILY_SPORTS_SERIES = [
+            "KXNBAPTS", "KXNBAREB", "KXNBAAST", "KXNBA3PT", "KXNBATHREES", "KXNBAPRA",
+            "KXNBA2D", "KXNBA3D", "KXNBAGAME", "KXNBASPREAD", "KXNBATOTAL",
+            "KXNBATEAMTOTAL", "KXNBA1HSPREAD", "KXNBA2HTOTAL", "KXNBA1QTOTAL",
+            "KXNFLGAME", "KXNFLSPREAD", "KXNFLTOTAL", "KXNFLPASS", "KXNFLRUSH", "KXNFLREC", "KXNFLTD",
+            "KXCFBGAME", "KXCFBSPREAD", "KXCFBTOTAL",
+            "KXNHLGAME", "KXNHLSPREAD", "KXNHLTOTAL", "KXNHLSOG", "KXNHLPOINTS",
+            "KXTENNIS", "KXATP", "KXWTA", "KXMLB"
+        ]
+        target_series = [s for s in DAILY_SPORTS_SERIES if sport == "ALL" or sport in s]
+        if not target_series:
+            target_series = DAILY_SPORTS_SERIES
+
+        for st in target_series:
+            try:
+                r_st = requests.get(f"{base}/markets", params={"status": "open", "limit": 200, "series_ticker": st}, timeout=4)
+                if r_st.status_code == 200:
+                    for sm in r_st.json().get("markets", []):
+                        if sm.get("status") in ("active", "open"):
+                            t = str(sm.get("ticker", "")).upper()
+                            if t and t not in seen_tickers:
+                                # Rule 1: Hard reject non-daily markets and career stats
+                                if any(b in t for b in ("CAREER", "SEASON", "RECORD", "AWARD", "LEADER", "HOF", "CHAMP")) or not re.search(r"\d{2}(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}", t):
+                                    continue
+                                # Rule 2: Hard reject strike <= 0
+                                inv_s = False
+                                for sf in ("floor_strike", "strike_price", "cap_strike", "line"):
+                                    v = sm.get(sf)
+                                    if v is not None:
+                                        try:
+                                            if float(v) <= 0.0:
+                                                inv_s = True
+                                                break
+                                        except (ValueError, TypeError):
+                                            pass
+                                if inv_s:
                                     continue
                                 full_blob = f"{t} {sm.get('title','')} {sm.get('subtitle','')} {sm.get('category','')}".upper()
                                 if any(b in full_blob for b in BANNED_NON_GAME_WORDS):
                                     continue
-                                if any(k in full_blob for k in target_kws) or t.startswith(("KXNBA", "KXNFL", "KXTENNIS", "KXATP", "KXWTA", "KXMLB", "KXNHL", "KXCFB")):
-                                    seen_tickers.add(t)
-                                    collected.append(sm)
-                        cursor_m = m_data.get("cursor")
-                        if not cursor_m or not m_list:
-                            break
-                    else:
-                        break
-                except Exception:
-                    break
+                                seen_tickers.add(t)
+                                collected.append(sm)
+            except Exception:
+                pass
 
         if collected:
             break

@@ -67,22 +67,7 @@ def is_valid_hoops_market(market: dict) -> bool:
         return False
     return bool(re.search(r"\d+(\.\d+)?", combined))
 
-TEAM_SCHEDULE_NOTES = {
-    "MIA": "Miami Heat are off today (Next game: Mon Oct 26 vs DAL)",
-    "BOS": "Boston Celtics are off today (Next game: Mon Oct 26 vs MIL)",
-    "GSW": "Golden State Warriors are off today (Next game: Mon Oct 26 vs PHX)",
-    "DEN": "Denver Nuggets are off today (Next game: Mon Oct 26 @ NOP)",
-    "HOU": "Houston Rockets are off today (Next game: Mon Oct 26 vs ATL)",
-    "SAS": "San Antonio Spurs are off today (Next game: Mon Oct 26 vs CHI)",
-    "WAS": "Washington Wizards are off today (Next game: Mon Oct 26 @ CHA)",
-    "CHI": "Chicago Bulls are off today (Next game: Mon Oct 26 @ SAS)",
-    "ATL": "Atlanta Hawks are off today (Next game: Mon Oct 26 @ HOU)",
-    "NOP": "New Orleans Pelicans are off today (Next game: Mon Oct 26 vs DEN)",
-    "CLE": "Cleveland Cavaliers are off today (Next game: Mon Oct 26 @ NYK)",
-    "MIL": "Milwaukee Bucks are off today (Next game: Mon Oct 26 @ BOS)",
-    "PHX": "Phoenix Suns are off today (Next game: Mon Oct 26 @ GSW)",
-    "DAL": "Dallas Mavericks are off today (Next game: Mon Oct 26 @ MIA)",
-}
+TEAM_SCHEDULE_NOTES: Dict[str, str] = {}
 
 PLAYER_CANONICAL_MAP = {
     "TYLER HERO": ("Tyler Herro", "MIA", "MOVEMENT_OFF_SCREEN_SHOOTER"),
@@ -96,9 +81,10 @@ PLAYER_CANONICAL_MAP = {
     "ANTHONY EDWARDS": ("Anthony Edwards", "MIN", "SLASHING_RIM_PRESSURE"),
     "EDWARDS": ("Anthony Edwards", "MIN", "SLASHING_RIM_PRESSURE"),
     "ANT": ("Anthony Edwards", "MIN", "SLASHING_RIM_PRESSURE"),
-    "L DONCIC": ("Luka Doncic", "DAL", "HELIOCENTRIC_PNR_HANDLER"),
-    "LUKA DONCIC": ("Luka Doncic", "DAL", "HELIOCENTRIC_PNR_HANDLER"),
-    "DONCIC": ("Luka Doncic", "DAL", "HELIOCENTRIC_PNR_HANDLER"),
+    "L DONCIC": ("Luka Doncic", "LAL", "HELIOCENTRIC_PNR_HANDLER"),
+    "LUKA DONCIC": ("Luka Doncic", "LAL", "HELIOCENTRIC_PNR_HANDLER"),
+    "DONCIC": ("Luka Doncic", "LAL", "HELIOCENTRIC_PNR_HANDLER"),
+    "LUKA": ("Luka Doncic", "LAL", "HELIOCENTRIC_PNR_HANDLER"),
     "S GILGEOUS-ALEXANDER": ("Shai Gilgeous-Alexander", "OKC", "SLASHING_RIM_PRESSURE"),
     "SHAI GILGEOUS-ALEXANDER": ("Shai Gilgeous-Alexander", "OKC", "SLASHING_RIM_PRESSURE"),
     "SGA": ("Shai Gilgeous-Alexander", "OKC", "SLASHING_RIM_PRESSURE"),
@@ -124,6 +110,10 @@ PLAYER_CANONICAL_MAP = {
     "JOKIC": ("Nikola Jokic", "DEN", "HELIOCENTRIC_PNR_HANDLER"),
     "VICTOR WEMBANYAMA": ("Victor Wembanyama", "SAS", "GLASS_CLEANER"),
     "WEMBY": ("Victor Wembanyama", "SAS", "GLASS_CLEANER"),
+    "KAWHI LEONARD": ("Kawhi Leonard", "LAC", "ISOLATION_MIDRANGE_SCORER"),
+    "KAWHI": ("Kawhi Leonard", "LAC", "ISOLATION_MIDRANGE_SCORER"),
+    "KAWAHI": ("Kawhi Leonard", "LAC", "ISOLATION_MIDRANGE_SCORER"),
+    "LEONARD": ("Kawhi Leonard", "LAC", "ISOLATION_MIDRANGE_SCORER"),
     "GIANNIS": ("Giannis Antetokounmpo", "MIL", "VOLUME_SCORER"),
     "GIANNIS ANTETOKOUNMPO": ("Giannis Antetokounmpo", "MIL", "VOLUME_SCORER"),
     "PATRICK MAHOMES": ("Patrick Mahomes", "KC", "DUAL_THREAT_QB"),
@@ -325,6 +315,101 @@ KALSHI_SERIES_PREFIXES: Dict[Tuple[str, str], List[str]] = {
 
 CURATED_FALLBACK_MARKETS: List[Dict[str, Any]] = []
 
+DAILY_SPORTS_SERIES = [
+    "KXNBAPTS", "KXNBAREB", "KXNBAAST", "KXNBA3PT", "KXNBATHREES", "KXNBAPRA",
+    "KXNBAGAME", "KXNBASPREAD", "KXNBATOTAL",
+    "KXNFLGAME", "KXNFLSPREAD", "KXNFLTOTAL", "KXNFLPASS", "KXNFLRUSH", "KXNFLREC", "KXNFLTD",
+    "KXNHLGAME", "KXTENNIS", "KXATP", "KXWTA", "KXMLB"
+]
+
+ALLOWED_SPORTS_PREFIXES = (
+    "KXNBA", "KXNFL", "KXNHL", "KXMLB", "KXTENNIS", "KXATP", "KXWTA", "KXCFB", "KXCBB", "KXWNBA", "KXUFC", "KXSOCCER", "KXPGA"
+)
+
+DAILY_DATE_CODE_REGEX = re.compile(r"26(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}", re.I)
+
+BANNED_FUTURES_WORDS = ("CAREER", "SEASON", "RECORD", "AWARD", "LEADER", "HOF", "CHAMP")
+
+NOVELTY_BANNED_WORDS = (
+    "STADIUM", "JOINCONF", "DRAFT", "COACH", "MVP", "CHAMP", "PLAYOFF",
+    "FINALS", "ROTY", "DPOY", "TRADE", "KXMVE", "CROSSCATEGORY",
+    "EXPANSION", "RELOCATE", "AWARDS", "AWARD", "CUP", "ALL-STAR", "ALLSTAR",
+    "CAREER", "SEASON", "RECORD", "LEADER", "LEADERS", "HISTORIC",
+    "ALLTIME", "ALL-TIME", "ALL_TIME", "TOTALS", "MILESTONE", "HOF"
+)
+
+
+def normalize_kalshi_market(m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Initial market ingestion filter:
+    1. Check ticker: if it contains CAREER, SEASON, RECORD, AWARD, LEADER, HOF, CHAMP,
+       or does NOT contain a valid daily game date stamp matching 26(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2},
+       or does not start with an allowed sports prefix, REJECT IT IMMEDIATELY (returns None).
+    2. Check strike_line: if strike_line <= 0 (e.g. -0.5 or 0), DISCARD IT IMMEDIATELY (returns None).
+    """
+    if not isinstance(m, dict):
+        return None
+    tk = str(m.get("ticker") or "").upper()
+    if not tk:
+        return None
+    if not any(tk.startswith(pref) for pref in ALLOWED_SPORTS_PREFIXES):
+        return None
+    if any(bad in tk for bad in BANNED_FUTURES_WORDS):
+        return None
+    if not DAILY_DATE_CODE_REGEX.search(tk):
+        return None
+    for strike_field in ("floor_strike", "strike_price", "cap_strike", "line"):
+        v = m.get(strike_field)
+        if v is not None:
+            try:
+                if float(v) <= 0.0:
+                    return None
+            except (ValueError, TypeError):
+                pass
+    return m
+
+
+def is_valid_sports_market_window(m: Dict[str, Any], max_hours_future: float = 48.0) -> bool:
+    """Strictly filters sports markets:
+    1. Blocks novelty/futures keywords (CAREER, SEASON, RECORD, AWARD, LEADER, HOF, CHAMP, etc.).
+    2. Validates daily sports series and strictly requires daily date code (e.g. 26OCT27).
+    3. Rejects only past contracts that expired > 2 hours ago.
+    """
+    if not normalize_kalshi_market(m):
+        return False
+
+    tk = str(m.get("ticker") or "").upper()
+    title = str(m.get("title") or "").upper()
+    sub = str(m.get("subtitle") or "").upper()
+    s_tkr = str(m.get("series_ticker") or m.get("_series_ticker") or "").upper()
+    ev_tkr = str(m.get("event_ticker") or "").upper()
+    blob = f"{tk} {title} {sub} {s_tkr} {ev_tkr}"
+
+    if any(bad in blob for bad in NOVELTY_BANNED_WORDS):
+        return False
+
+    now_ts = time.time()
+    c_time_raw = m.get("close_time") or m.get("expected_expiration_time") or m.get("expiration_time")
+    if c_time_raw:
+        try:
+            if isinstance(c_time_raw, (int, float)):
+                exp_ts = float(c_time_raw)
+            else:
+                dt = datetime.datetime.fromisoformat(str(c_time_raw).replace("Z", "+00:00"))
+                exp_ts = dt.timestamp()
+            # If expired > 2 hours ago, reject
+            if exp_ts < now_ts - 7200.0:
+                return False
+        except Exception:
+            pass
+
+    # Strictly require a valid daily date code (e.g. 26OCT27) in ticker or event_ticker
+    has_date_code = bool(DAILY_DATE_CODE_REGEX.search(tk) or DAILY_DATE_CODE_REGEX.search(ev_tkr))
+    if not has_date_code:
+        return False
+
+    return True
+
 
 class KalshiSmartPlacer:
     def __init__(
@@ -370,14 +455,19 @@ class KalshiSmartPlacer:
             print(f"[SMART-PLACER-WARN] Could not load private key via cryptography: {e}")
 
     def sign_headers(self, method: str, path: str) -> Dict[str, str]:
+        clean_path = path.split("?")[0]
         if self.auth_header_fn:
             try:
-                return self.auth_header_fn(method, path)
+                return self.auth_header_fn(method, clean_path)
             except Exception:
                 pass
+        try:
+            from bot import get_auth_headers
+            return get_auth_headers(method, clean_path)
+        except Exception:
+            pass
 
         ts = str(int(time.time() * 1000))
-        clean_path = path.split("?")[0]
         msg = f"{ts}{method.upper()}{clean_path}".encode("utf-8")
 
         if self.private_key is not None and HAS_CRYPTOGRAPHY:
@@ -468,6 +558,8 @@ class KalshiSmartPlacer:
                     for m in ev.get("markets", []):
                         if m.get("status") not in ("active", "open"):
                             continue
+                        if not is_valid_sports_market_window(m):
+                            continue
                         m_cat = (m.get("category") or ev_cat).upper()
                         m_title = (m.get("title") or ev_title).upper()
                         m_sub = (m.get("subtitle") or "").upper()
@@ -489,18 +581,30 @@ class KalshiSmartPlacer:
             except Exception:
                 break
 
-        # 2. Targeted series sweep fallback if event sweep returned sparse markets
-        if len(collected) < 10:
+        # 2. Targeted series sweep fallback across DAILY_SPORTS_SERIES & stat prefixes
+        if len(collected) < 15:
             st_u = stat.upper()
             prefixes = KALSHI_SERIES_PREFIXES.get((sp_u, st_u)) or KALSHI_SERIES_PREFIXES.get((sp_u, st_u.split()[0])) or [f"KX{sp_u}"]
-            for prefix in prefixes:
+            sweep_targets = list(prefixes)
+            if sp_u == "NBA":
+                for s in ("KXNBAPTS", "KXNBAREB", "KXNBAAST", "KXNBA3PT", "KXNBATHREES", "KXNBAPRA", "KXNBAGAME", "KXNBASPREAD", "KXNBATOTAL"):
+                    if s not in sweep_targets:
+                        sweep_targets.append(s)
+            elif sp_u in ("ALL", "NFL"):
+                for s in DAILY_SPORTS_SERIES:
+                    if s not in sweep_targets:
+                        sweep_targets.append(s)
+
+            for prefix in sweep_targets:
                 try:
                     path = f"/trade-api/v2/markets?status=open&limit=100&series_ticker={prefix}"
                     resp = requests.get(self.base_url + path, headers=self.sign_headers("GET", path), timeout=4)
                     if resp.status_code == 200:
                         for m in resp.json().get("markets", []):
                             if m.get("status") in ("active", "open"):
-                                tk = m.get("ticker", "")
+                                if not is_valid_sports_market_window(m):
+                                    continue
+                                tk = (m.get("ticker") or "").upper()
                                 if tk and tk not in seen_tickers:
                                     seen_tickers.add(tk)
                                     collected.append(m)
@@ -521,7 +625,9 @@ class KalshiSmartPlacer:
                         m_list = m_data.get("markets", [])
                         for m in m_list:
                             if m.get("status") in ("active", "open"):
-                                tk = m.get("ticker", "")
+                                if not is_valid_sports_market_window(m):
+                                    continue
+                                tk = (m.get("ticker") or "").upper()
                                 if tk and tk not in seen_tickers:
                                     m_blob = f"{tk} {m.get('title', '')} {m.get('subtitle', '')} {m.get('category', '')}".upper()
                                     if any(exc in m_blob for exc in EXCLUDED_CATEGORIES):
@@ -674,15 +780,31 @@ class KalshiSmartPlacer:
 
         ticker = existing_ticker
         market = None
-        is_real_kalshi = bool(ticker and ticker.upper().startswith("KX") and len(ticker) >= 10)
+        is_real_kalshi = bool(ticker and ticker.upper().startswith("KX") and len(ticker) >= 10 and "KXMVE" not in ticker.upper() and "CROSSCATEGORY" not in ticker.upper())
         if not is_real_kalshi:
             market = self.resolve_prop_ticker(sport, player_name, stat, line)
             ticker = market.get("ticker") if market else ticker
 
-        if not ticker or not ticker.upper().startswith("KX"):
+        if not ticker or not ticker.upper().startswith("KX") or "KXMVE" in ticker.upper() or "CROSSCATEGORY" in ticker.upper():
             return {
-                "status": "NO_TICKER",
-                "reason": f"Could not resolve active Kalshi contract for {player_name} {stat} {line}",
+                "status": "BLOCKED",
+                "reason": f"Blocked combo/invalid ticker: {ticker}",
+                "player": player_name,
+                "stat": stat,
+                "line": line,
+            }
+        if any(bad in ticker.upper() for bad in ("CAREER", "SEASON", "RECORD", "AWARD", "LEADER", "HOF", "CHAMP")) or not DAILY_DATE_CODE_REGEX.search(ticker.upper()):
+            return {
+                "status": "BLOCKED",
+                "reason": f"Blocked non-daily/futures ticker: {ticker}",
+                "player": player_name,
+                "stat": stat,
+                "line": line,
+            }
+        if float(line) <= 0.0:
+            return {
+                "status": "BLOCKED",
+                "reason": f"Blocked non-positive line: {line}",
                 "player": player_name,
                 "stat": stat,
                 "line": line,
@@ -697,8 +819,14 @@ class KalshiSmartPlacer:
         b = (100.0 - limit_cents) / float(max(1, limit_cents))  # Net profit odds per cent risked
         raw_kelly = max(0.0, (b * p - q) / b) if b > 0 else 0.0
         eff_bankroll = bankroll_usd if bankroll_usd > 0 else 32.22
-        stake_usd = max(1.00, min(eff_bankroll * 0.40, round(eff_bankroll * max(0.08, raw_kelly) * kelly_fraction, 2)))
-        contracts = max(1, min(10, int((stake_usd * 100) // max(1, limit_cents))))
+        avail_cash_cents = int(round(eff_bankroll * 100))
+        stake_usd = max(0.50, min(eff_bankroll * 0.40, round(eff_bankroll * max(0.08, raw_kelly) * kelly_fraction, 2)))
+        kelly_contracts = int((stake_usd * 100) // max(1, limit_cents))
+        max_affordable = max(1, avail_cash_cents // max(1, limit_cents)) if avail_cash_cents >= limit_cents else 1
+        if avail_cash_cents >= limit_cents and ev_edge_pct >= 1.5:
+            contracts = max(1, min(max_affordable, kelly_contracts if kelly_contracts > 0 else 1))
+        else:
+            contracts = max(1, min(10, min(max_affordable, kelly_contracts if kelly_contracts > 0 else 1)))
         cost_usd = round((contracts * limit_cents) / 100.0, 2)
 
         if not (sniper_on and live_mode):
@@ -713,29 +841,36 @@ class KalshiSmartPlacer:
                 "note": f"Simulated paper execution ({pricing_note})",
             }
 
+        if not (10 <= int(limit_cents) <= 90):
+            return {"status": "BLOCKED", "reason": f"Price {limit_cents}¢ outside 10-90¢ safe band", "ticker": ticker, "limit_cents": limit_cents, "contracts": contracts}
+
         # Execute Real Kalshi V2 Limit Order
         client_oid = str(uuid.uuid4())
         is_yes = kalshi_side.lower() in ("yes", "over", "o")
-        v2_side = "yes" if is_yes else "no"
-        price_field = "yes_price" if is_yes else "no_price"
-        price_val = int(limit_cents if is_yes else (100 - limit_cents))
+        clean_limit = max(1, min(99, int(limit_cents)))
+
+        # Kalshi V2 Create Order Single-Book Model:
+        # Buying YES at clean_limit -> side: "bid", price: clean_limit / 100
+        # Buying NO at clean_limit  -> side: "ask", price: (100 - clean_limit) / 100
+        v2_side = "bid" if is_yes else "ask"
+        v2_price_cents = clean_limit if is_yes else (100 - clean_limit)
+        v2_price_str = f"{v2_price_cents / 100.0:.4f}"
 
         payload = {
             "ticker": ticker,
-            "action": "buy",
-            "side": v2_side,
-            "count": max(1, int(contracts)),
-            "type": "limit",
             "client_order_id": client_oid,
-            price_field: price_val,
+            "side": v2_side,
+            "count": f"{max(1, int(contracts))}.00",
+            "price": v2_price_str,
+            "time_in_force": "good_till_canceled",
         }
 
-        path = "/trade-api/v2/portfolio/orders"
+        order_path = "/trade-api/v2/portfolio/events/orders"  # V2 create-order; signed and posted with this identical path
         try:
             resp = requests.post(
-                self.base_url + path,
+                self.base_url.rstrip("/") + order_path,
                 json=payload,
-                headers=self.sign_headers("POST", path),
+                headers=self.sign_headers("POST", order_path),
                 timeout=8,
             )
             if resp.status_code in (200, 201):
@@ -877,20 +1012,30 @@ class KalshiSmartPlacer:
                 "note": f"Paper tracked ({pricing_note})",
             }
 
-        order_path = "/trade-api/v2/portfolio/orders"
+        if not ticker or any(bad in ticker.upper() for bad in NOVELTY_BANNED_WORDS):
+            return {"status": "BLOCKED", "reason": f"Blocked novelty/invalid game line ticker: {ticker}"}
+
+        order_path = "/trade-api/v2/portfolio/events/orders"  # V2 create-order; signed and posted with this identical path
+        client_oid = str(uuid.uuid4())
+        is_yes = (kalshi_side.lower() in ("yes", "over", "o"))
+        clean_limit = max(1, min(99, int(limit_cents)))
+
+        v2_side = "bid" if is_yes else "ask"
+        v2_price_cents = clean_limit if is_yes else (100 - clean_limit)
+        v2_price_str = f"{v2_price_cents / 100.0:.4f}"
+
         payload = {
             "ticker": ticker,
-            "action": "buy",
-            "side": kalshi_side,
-            "count": contracts,
-            "type": "limit",
-            "client_order_id": str(uuid.uuid4()),
-            f"{kalshi_side}_price": limit_cents,
+            "client_order_id": client_oid,
+            "side": v2_side,
+            "count": f"{max(1, int(contracts))}.00",
+            "price": v2_price_str,
+            "time_in_force": "good_till_canceled",
         }
 
         try:
             resp = requests.post(
-                self.base_url + order_path,
+                self.base_url.rstrip("/") + order_path,
                 json=payload,
                 headers=self.sign_headers("POST", order_path),
                 timeout=8,
@@ -991,23 +1136,45 @@ def place_kalshi_order(
     base_url: str = "https://api.elections.kalshi.com",
 ) -> Dict[str, Any]:
     """Execute live authenticated Kalshi limit order with instant Telegram notification."""
+    tk_u = str(ticker or "").upper()
+    if (not tk_u.startswith("KX") or " " in tk_u or "PROJECTION" in tk_u
+            or not DAILY_DATE_CODE_REGEX.search(tk_u)
+            or not (10 <= int(price_cents) <= 90)):
+        return {
+            "ok": False, "status_code": 0, "status": "BLOCKED",
+            "error": f"Refused: not a real open daily ticker or price {price_cents}¢ outside 10-90¢ ({ticker})",
+            "payload": {},
+        }
     client_oid = str(uuid.uuid4())
     is_yes = side.lower() in ("yes", "over", "o")
-    v2_side = "yes" if is_yes else "no"
-    price_field = "yes_price" if is_yes else "no_price"
-    price_val = int(price_cents if is_yes else (100 - price_cents))
+    clean_price = max(1, min(99, int(price_cents)))
+
+    # Kalshi V2 Create Order Single-Book Model:
+    # Action BUY:
+    #   Buy YES at clean_price -> side: "bid", price: clean_price / 100
+    #   Buy NO at clean_price  -> side: "ask", price: (100 - clean_price) / 100
+    # Action SELL:
+    #   Sell YES at clean_price -> side: "ask", price: clean_price / 100
+    #   Sell NO at clean_price  -> side: "bid", price: (100 - clean_price) / 100
+    if action.lower() == "buy":
+        v2_side = "bid" if is_yes else "ask"
+        v2_price_cents = clean_price if is_yes else (100 - clean_price)
+    else:
+        v2_side = "ask" if is_yes else "bid"
+        v2_price_cents = clean_price if is_yes else (100 - clean_price)
+
+    v2_price_str = f"{v2_price_cents / 100.0:.4f}"
 
     payload = {
         "ticker": ticker,
-        "action": action.lower(),
-        "side": v2_side,
-        "count": max(1, int(count)),
-        "type": "limit",
         "client_order_id": client_oid,
-        price_field: price_val,
+        "side": v2_side,
+        "count": f"{max(1, int(count))}.00",
+        "price": v2_price_str,
+        "time_in_force": "good_till_canceled",
     }
 
-    path = "/trade-api/v2/portfolio/orders"
+    order_path = "/trade-api/v2/portfolio/events/orders"  # V2 create-order; signed and posted with this identical path
     endpoints = [
         base_url,
         "https://api.elections.kalshi.com",
@@ -1017,9 +1184,10 @@ def place_kalshi_order(
     for base in [u for u in endpoints if not (u in seen or seen.add(u))]:
         try:
             from bot import get_auth_headers
-            headers = get_auth_headers("POST", path)
+            headers = get_auth_headers("POST", order_path)
+            clean_base = base.rstrip("/")
             resp = requests.post(
-                f"{base}{path}",
+                f"{clean_base}{order_path}",
                 json=payload,
                 headers=headers,
                 timeout=8,
@@ -1029,14 +1197,14 @@ def place_kalshi_order(
                 real_oid = order_data.get("order_id") or client_oid
                 try:
                     from bot import notify_telegram
-                    notify_telegram(f"✅ AUTO-SNIPER ORDER PLACED: {ticker} | {count}x {v2_side.upper()} @ {price_cents}¢ | Order ID: {real_oid}")
+                    notify_telegram(f"✅ AUTO-SNIPER ORDER PLACED: {ticker} | {count}x {'YES' if is_yes else 'NO'} ({v2_side.upper()}) @ {price_cents}¢ (${v2_price_str}) | Order ID: {real_oid}")
                 except Exception:
                     pass
                 return {
                     "ok": True,
                     "order_id": real_oid,
                     "ticker": ticker,
-                    "side": v2_side,
+                    "side": "YES" if is_yes else "NO",
                     "count": count,
                     "price_cents": price_cents,
                     "status": "PLACED",

@@ -1487,10 +1487,32 @@ async def cmd_slip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"❌ Error building Copula slip: `{exc}`", parse_mode=ParseMode.MARKDOWN)
 
 
+async def _air_bridge_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, sport: str) -> None:
+    """Single exit for sport commands: one clean card via air_bridge_core, never auto-snipes."""
+    import air_bridge_core
+    cmd = f"/{sport} {' '.join(context.args)}" if context.args else f"/{sport}"
+    html_text, kb = await asyncio.to_thread(air_bridge_core.handle_sport_command, update.effective_chat.id, cmd)
+    await update.message.reply_text(html_text, parse_mode=ParseMode.HTML, reply_markup=_air_kb(kb))
+
+
+def _air_kb(kb):
+    """Convert air_bridge dict keyboard to PTB markup (or None)."""
+    if not kb:
+        return None
+    if isinstance(kb, dict) and kb.get("inline_keyboard"):
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(b["text"], callback_data=b.get("callback_data"), url=b.get("url")) for b in row]
+            for row in kb["inline_keyboard"]
+        ])
+    return kb
+
+
 async def cmd_nba(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _ensure_chat_id(update)
     if not update.message:
         return
+    await _air_bridge_reply(update, context, "nba")
+    return
     full_cmd = f"/nba {' '.join(context.args)}" if context.args else "/nba"
     parsed = parse_user_query(full_cmd)
     clean_kb = build_casual_video_buttons()
@@ -1550,6 +1572,8 @@ async def cmd_nfl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _ensure_chat_id(update)
     if not update.message:
         return
+    await _air_bridge_reply(update, context, "nfl")
+    return
     full_cmd = f"/nfl {' '.join(context.args)}" if context.args else "/nfl"
     parsed = parse_user_query(full_cmd)
     clean_kb = build_casual_video_buttons()

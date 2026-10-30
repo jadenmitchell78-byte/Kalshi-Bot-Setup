@@ -1,4 +1,5 @@
 import datetime
+import logging
 import json
 import math
 import re
@@ -14,12 +15,14 @@ ALLOWED_SPORTS_PREFIXES = (
     "KXNBA", "KXNFL", "KXMLB", "KXNHL", "KXTENNIS", "KXATP", "KXWTA", "KXNCAA", "KXCFB", "KXSOCCER", "KXBOXING", "KXMMA", "KXUFC"
 )
 
-# Strictly ban futures, awards, music, and celebrity markets even if under sports series
+# Strictly ban futures, awards, music, celebrity, stadium, and novelty markets even if under sports series
 BANNED_TITLE_WORDS = (
+    "STADIUM", "JOINCONF", "EXPANSION", "RELOCATE", "COACH", "TRADE", "ROTY", "DPOY",
     "RETIRE", "OWNER", "MVP", "CHAMPION", "DRAFT", "HEADLINER", "LUMINATE",
-    "OSCAR", "BLANCHETT", "ACT", "ALBUM", "BILLBOARD", "ANNOUNCE", "COACH",
+    "OSCAR", "BLANCHETT", "ACT", "ALBUM", "BILLBOARD", "ANNOUNCE",
     "WHITE HOUSE", "PRESIDENT", "ELECT", "SELECT", "ROSTER", "HALL OF FAME",
-    "THE FALL OFF", "FALL OFF", "GRAMMY", "EMMY", "BOX OFFICE", "CELEBRITY"
+    "THE FALL OFF", "FALL OFF", "GRAMMY", "EMMY", "BOX OFFICE", "CELEBRITY",
+    "KXMVE", "CROSSCATEGORY"
 )
 
 # In-memory cache for live ESPN schedules: {sport: (timestamp, schedule_dict)}
@@ -51,7 +54,7 @@ def get_live_sport_schedule(sport: str = "NBA") -> Dict[str, Any]:
 
     active_teams: Set[str] = set()
     team_games: Dict[str, Dict[str, Any]] = {}
-    today_dt = datetime.now()
+    today_dt = dt_cls.now()
     today_str = today_dt.strftime("%b %d, %Y")
 
     try:
@@ -108,7 +111,7 @@ def get_live_sport_schedule(sport: str = "NBA") -> Dict[str, Any]:
                 for gt in game_teams:
                     team_games[gt] = game_info
     except Exception:
-        pass
+        logging.exception("get_live_sport_schedule failed")
 
     result = {
         "active_teams": active_teams,
@@ -122,7 +125,7 @@ def get_live_sport_schedule(sport: str = "NBA") -> Dict[str, Any]:
 
 def _format_espn_game_time(date_iso: str, detail: str, state: str) -> str:
     """Helper to format readable dates like 'Today (Oct 26) • 7:30 PM ET' or 'Live (Q3 4:12)'."""
-    now_dt = datetime.now()
+    now_dt = dt_cls.now()
     default_date = f"Today ({now_dt.strftime('%b %d')})"
 
     if state == "in":
@@ -134,12 +137,12 @@ def _format_espn_game_time(date_iso: str, detail: str, state: str) -> str:
     if date_iso:
         try:
             clean_iso = date_iso.replace("Z", "+00:00")
-            dt = datetime.fromisoformat(clean_iso)
+            dt = dt_cls.fromisoformat(clean_iso)
             m_d = dt.strftime("%b %d")
             t_str = dt.strftime("%I:%M %p ET").lstrip("0")
             return f"Today ({m_d}) • {t_str}"
         except Exception:
-            pass
+            logging.exception("_format_espn_game_time failed")
 
     if detail and ("PM" in detail or "AM" in detail):
         return f"Today ({now_dt.strftime('%b %d')}) • {detail.strip()}"
@@ -174,12 +177,14 @@ def get_prop_date_str(sport: str, team: str = "", market: Optional[dict] = None)
             c_time = market.get(f)
             if c_time and isinstance(c_time, str):
                 try:
-                    dt = datetime.fromisoformat(c_time.replace("Z", "+00:00"))
-                    return f"{dt.strftime('%b %d')} • {dt.strftime('%I:%M %p ET').lstrip('0')}"
+                    dt = dt_cls.fromisoformat(c_time.replace("Z", "+00:00"))
+                    # US Eastern game night alignment
+                    dt_et = dt.astimezone(timezone(datetime.timedelta(hours=-4)))
+                    return f"{dt_et.strftime('%b %d')} • {dt_et.strftime('%I:%M %p ET').lstrip('0')}"
                 except Exception:
-                    pass
+                    logging.exception("get_prop_date_str failed")
 
-    now_dt = datetime.now()
+    now_dt = dt_cls.now()
     return f"Today ({now_dt.strftime('%b %d')}) • Active Slate"
 
 
@@ -196,6 +201,22 @@ def is_real_live_game_contract(market: dict, active_teams: Optional[Set[str]] = 
     subtitle = str(market.get("subtitle", "")).upper()
     blob = f"{ticker} {title} {subtitle}"
 
+    # Rule 1: Hard reject non-daily markets and career stats
+    if any(bad in ticker for bad in ("CAREER", "SEASON", "RECORD", "AWARD", "LEADER", "HOF", "CHAMP")):
+        return False
+    if not re.search(r"26(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}", ticker):
+        return False
+
+    # Rule 2: Hard reject strike <= 0
+    for sf in ("floor_strike", "strike_price", "cap_strike", "line"):
+        v = market.get(sf)
+        if v is not None:
+            try:
+                if float(v) <= 0.0:
+                    return False
+            except (ValueError, TypeError):
+                pass
+
     # 1. Must start with an official sports prefix
     if not ticker.startswith(ALLOWED_SPORTS_PREFIXES):
         return False
@@ -204,16 +225,17 @@ def is_real_live_game_contract(market: dict, active_teams: Optional[Set[str]] = 
     if any(bad in blob for bad in BANNED_TITLE_WORDS):
         return False
 
-    # 3. Check expiration date: reject old/past year contracts
-    c_time = market.get("close_time") or market.get("expected_expiration_time")
+    # 3. Check expiration date: reject old/past contracts (>2h ago)
+    c_time = market.get("close_time") or market.get("expected_expiration_time") or market.get("expiration_time")
     if c_time and isinstance(c_time, str):
         try:
-            dt = datetime.fromisoformat(c_time.replace("Z", "+00:00"))
-            now_utc = datetime.now(timezone.utc)
+            dt = dt_cls.fromisoformat(c_time.replace("Z", "+00:00"))
+            now_utc = dt_cls.now(timezone.utc)
+            # Drop past expired contracts > 2 hours ago
             if dt < now_utc and (now_utc - dt).total_seconds() > 7200:
                 return False
         except Exception:
-            pass
+            logging.exception("is_real_live_game_contract date check failed")
 
     # 4. If active_teams provided from ESPN today's scoreboard, require a match
     if active_teams and not any(t in blob for t in active_teams):
@@ -309,7 +331,10 @@ def format_pick_headline(p: dict, default_price: int = 50) -> str:
     if clean_matchup:
         detail_parts.append(f"🏟️ Matchup: {clean_matchup}")
     if ticker and not ticker.endswith("-LIVE") and ticker != "KXTENNIS-LIVE" and ticker != "N/A":
-        detail_parts.append(f"📊 Ticker: {ticker}")
+        if "PROJECTION" in ticker.upper() or ticker.startswith("📊"):
+            detail_parts.append("📊 Market: Projection Only (No Open Kalshi Prop Yet)")
+        else:
+            detail_parts.append(f"📊 Ticker: {ticker}")
 
     detail_line = f"   {' | '.join(detail_parts)}" if detail_parts else ""
     date_str = p.get("game_date")
@@ -327,14 +352,19 @@ def format_video_style_single_card(sim: dict, exec_res: dict, bankroll: float = 
     """
     Produces the clean promo-video UI with exact game dates and a collapsible sharp math drawer.
     """
-    c = sim.get("combo", {})
+    c = sim.get("combo") or {}
     joint_p = max(0.10, min(0.88, c.get("joint_prob", 25.0) / 100.0))
     odds_str = _prob_to_american(joint_p)
     stake = max(1.00, round(bankroll * 0.08, 2))
     payout = round(stake / joint_p, 2)
     profit = round(payout - stake, 2)
     status_str = str(exec_res.get("status", "ARMED"))
-    badge = "🟢 <b>BET PLACED AUTOMATICALLY</b>" if "PLACED" in status_str.upper() else "⚡ <b>AUTO-SNIPER ARMED</b>"
+    if "PROJECTION" in status_str.upper():
+        badge = "📊 <b>PROJECTION ONLY (10k MC SIM)</b>"
+    elif "PLACED" in status_str.upper():
+        badge = "🟢 <b>BET PLACED AUTOMATICALLY</b>"
+    else:
+        badge = "⚡ <b>AUTO-SNIPER ARMED</b>"
 
     sp = sim.get("sport", "NBA")
     p_team = sim.get("team", "")
@@ -342,7 +372,7 @@ def format_video_style_single_card(sim: dict, exec_res: dict, bankroll: float = 
 
     leg1_block = format_pick_headline(sim, default_price=exec_res.get("limit_cents", 50))
     partner_sim = {
-        "player": c.get("partner", "Teammate"),
+        "player": c.get("partner") or (f"{p_team} Star" if p_team else "Correlated Partner"),
         "side": c.get("side", "OVER"),
         "line": c.get("line", 5.5),
         "stat": c.get("stat", "AST"),
@@ -356,6 +386,11 @@ def format_video_style_single_card(sim: dict, exec_res: dict, bankroll: float = 
     leg2_block = format_pick_headline(partner_sim, default_price=50)
 
     p_name = sim.get("target_pick") or sim.get("player", "Player")
+    raw_ev = sim.get("ev_edge", 0.0)
+    try:
+        ev_str = f"{float(raw_ev):+.1f}%"
+    except Exception:
+        ev_str = f"+{raw_ev}%" if not str(raw_ev).startswith("+") else f"{raw_ev}%"
 
     return (
         f"✅ <b>PREDICTIONS FOUND</b> ✅\n\n"
@@ -365,7 +400,7 @@ def format_video_style_single_card(sim: dict, exec_res: dict, bankroll: float = 
         f"{leg2_block}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"💵 <b>Stake:</b> <code>${stake:.2f}</code>  ➔  💰 <b>Payout:</b> <code>${payout:.2f}</code> (+${profit:.2f} Profit)\n"
-        f"🔥 <b>AI Edge:</b> <code>+{sim.get('ev_edge', 0.0)}%</code>  |  {badge}\n\n"
+        f"🔥 <b>AI Edge:</b> <code>{ev_str}</code>  |  {badge}\n\n"
         f"<blockquote expandable>🧠 <b>Tap for AI Coach &amp; 10k Sim Math</b>\n"
         f"• {p_name}: {sim.get('true_prob', 50.0)}% True Prob (Proj: {sim.get('mean', sim.get('line', ''))} ± {sim.get('std', 1.5)})\n"
         f"• Floor/Med/Ceil: {sim.get('p10', sim.get('line', ''))} / {sim.get('p50', sim.get('line', ''))} / {sim.get('p90', sim.get('line', ''))}\n"
@@ -383,7 +418,7 @@ def format_video_style_board_scan(sport: str, top_plays: list, exec_res: dict, b
     Video style 3-team parlay scan card with exact game dates and collapsible sharp drawer.
     """
     sport_u = sport.upper()
-    now_dt = datetime.now()
+    now_dt = dt_cls.now()
     today_label = now_dt.strftime("%b %d, %Y")
 
     if not top_plays:
@@ -425,7 +460,7 @@ def format_video_style_board_scan(sport: str, top_plays: list, exec_res: dict, b
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"💵 <b>Total Stake:</b> <code>${stake:.2f}</code>\n"
         f"💰 <b>Est. Payout:</b> <code>${payout:.2f}</code> (<b>+${profit:.2f} Profit</b>)\n"
-        f"🔥 <b>Automated Edge:</b> <code>+{avg_edge}%</code>\n"
+        f"🔥 <b>Automated Edge:</b> <code>{avg_edge:+.1f}%</code>\n"
         f"{badge}\n\n"
         f"<blockquote expandable>🧠 <b>Tap for 10k Sim &amp; Kalshi Order Receipt</b>\n"
         f"{math_block}"
@@ -467,7 +502,7 @@ def format_casual_video_slip(legs: list, combo_data: dict, stake_usd: float, ord
         f"{leg_lines}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"💵 <b>Stake:</b> <code>${stake_usd:.2f}</code>  ➔  💰 <b>Payout:</b> <code>${payout:.2f}</code> (+${profit:.2f})\n"
-        f"🔥 <b>AI Edge:</b> <code>+{edge_pct}%</code>\n"
+        f"🔥 <b>AI Edge:</b> <code>{edge_pct:+.1f}%</code>\n"
         f"{status_badge}\n\n"
         f"<blockquote expandable>🧠 <b>Tap for AI Coach &amp; 10k Sim Breakdown</b>\n"
         f"{math_drawer_lines}"
@@ -476,7 +511,7 @@ def format_casual_video_slip(legs: list, combo_data: dict, stake_usd: float, ord
     )
 
 
-def build_casual_video_buttons(stream_url: str = "https://peezt-tv.vercel.app", as_ptb: bool = False) -> Any:
+def build_casual_video_buttons(stream_url: str = "https://streamed.su/watch/basketball", as_ptb: bool = False) -> Any:
     """
     Returns the clean button layout matching the video UI:
     [ 🟢 PLACE AUTO-BET ]  [ 📺 WATCH LIVE STREAM ]

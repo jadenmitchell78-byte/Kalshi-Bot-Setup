@@ -59,6 +59,7 @@ try:
         find_live_kalshi_props_for_player,
         find_live_sgp_partner,
         get_real_open_markets_summary,
+        resolve_espn_athlete_info,
     )
 except ImportError:
     get_live_active_games = None  # type: ignore
@@ -66,6 +67,7 @@ except ImportError:
     find_live_kalshi_props_for_player = None  # type: ignore
     find_live_sgp_partner = None  # type: ignore
     get_real_open_markets_summary = None  # type: ignore
+    resolve_espn_athlete_info = None  # type: ignore
 
 try:
     import numpy as np
@@ -130,9 +132,9 @@ NBA_SUPERSTAR_MAP: Dict[str, Dict[str, Any]] = {
     "LBJ": {"name": "LeBron James", "team": "LAL", "defaults": {"PTS": 23.5, "AST": 7.5, "REB": 7.5, "3PM": 2.5, "PRA": 38.5}},
     "ANTHONY DAVIS": {"name": "Anthony Davis", "team": "LAL", "defaults": {"PTS": 24.5, "REB": 12.5, "AST": 3.5, "PRA": 40.5, "BLK": 2.5}},
     "AD": {"name": "Anthony Davis", "team": "LAL", "defaults": {"PTS": 24.5, "REB": 12.5, "AST": 3.5, "PRA": 40.5, "BLK": 2.5}},
-    "LUKA DONCIC": {"name": "Luka Doncic", "team": "DAL", "defaults": {"PTS": 31.5, "AST": 8.5, "REB": 8.5, "3PM": 3.5, "PRA": 48.5}},
-    "LUKA": {"name": "Luka Doncic", "team": "DAL", "defaults": {"PTS": 31.5, "AST": 8.5, "REB": 8.5, "3PM": 3.5, "PRA": 48.5}},
-    "DONCIC": {"name": "Luka Doncic", "team": "DAL", "defaults": {"PTS": 31.5, "AST": 8.5, "REB": 8.5, "3PM": 3.5, "PRA": 48.5}},
+    "LUKA DONCIC": {"name": "Luka Doncic", "team": "LAL", "defaults": {"PTS": 31.5, "AST": 8.5, "REB": 8.5, "3PM": 3.5, "PRA": 48.5}},
+    "LUKA": {"name": "Luka Doncic", "team": "LAL", "defaults": {"PTS": 31.5, "AST": 8.5, "REB": 8.5, "3PM": 3.5, "PRA": 48.5}},
+    "DONCIC": {"name": "Luka Doncic", "team": "LAL", "defaults": {"PTS": 31.5, "AST": 8.5, "REB": 8.5, "3PM": 3.5, "PRA": 48.5}},
     "JULIUS RANDLE": {"name": "Julius Randle", "team": "MIN", "defaults": {"PTS": 21.5, "REB": 8.5, "AST": 4.5, "PRA": 34.5}},
     "RANDLE": {"name": "Julius Randle", "team": "MIN", "defaults": {"PTS": 21.5, "REB": 8.5, "AST": 4.5, "PRA": 34.5}},
     "ANTHONY EDWARDS": {"name": "Anthony Edwards", "team": "MIN", "defaults": {"PTS": 27.5, "REB": 5.5, "AST": 5.5, "3PM": 3.5, "PRA": 38.5}},
@@ -156,6 +158,46 @@ NBA_SUPERSTAR_MAP: Dict[str, Dict[str, Any]] = {
     "TYLER HERRO": {"name": "Tyler Herro", "team": "MIA", "defaults": {"PTS": 21.5, "3PM": 3.5, "AST": 4.5, "REB": 5.0, "PRA": 31.0}},
     "HERRO": {"name": "Tyler Herro", "team": "MIA", "defaults": {"PTS": 21.5, "3PM": 3.5, "AST": 4.5, "REB": 5.0, "PRA": 31.0}},
     "TYLER HERO": {"name": "Tyler Herro", "team": "MIA", "defaults": {"PTS": 21.5, "3PM": 3.5, "AST": 4.5, "REB": 5.0, "PRA": 31.0}},
+    "KAWHI LEONARD": {"name": "Kawhi Leonard", "team": "LAC", "defaults": {"PTS": 23.5, "REB": 6.5, "AST": 3.5, "3PM": 2.5, "PRA": 33.5}},
+    "KAWHI": {"name": "Kawhi Leonard", "team": "LAC", "defaults": {"PTS": 23.5, "REB": 6.5, "AST": 3.5, "3PM": 2.5, "PRA": 33.5}},
+    "KAWAHI": {"name": "Kawhi Leonard", "team": "LAC", "defaults": {"PTS": 23.5, "REB": 6.5, "AST": 3.5, "3PM": 2.5, "PRA": 33.5}},
+    "LEONARD": {"name": "Kawhi Leonard", "team": "LAC", "defaults": {"PTS": 23.5, "REB": 6.5, "AST": 3.5, "3PM": 2.5, "PRA": 33.5}},
+    "JA MORANT": {"name": "Ja Morant", "team": "MEM", "defaults": {"PTS": 25.5, "AST": 8.0, "REB": 5.5, "3PM": 1.5, "PRA": 39.0}},
+    "MORANT": {"name": "Ja Morant", "team": "MEM", "defaults": {"PTS": 25.5, "AST": 8.0, "REB": 5.5, "3PM": 1.5, "PRA": 39.0}},
+    "JA": {"name": "Ja Morant", "team": "MEM", "defaults": {"PTS": 25.5, "AST": 8.0, "REB": 5.5, "3PM": 1.5, "PRA": 39.0}},
+}
+
+NBA_TEAMMATES: Dict[str, List[str]] = {
+    "LAL": ["Austin Reaves", "Anthony Davis", "LeBron James", "D'Angelo Russell", "Rui Hachimura"],
+    "GSW": ["Stephen Curry", "Draymond Green", "Andrew Wiggins", "Jonathan Kuminga", "Buddy Hield"],
+    "BOS": ["Jayson Tatum", "Jaylen Brown", "Derrick White", "Jrue Holiday", "Kristaps Porzingis"],
+    "NYK": ["Jalen Brunson", "Karl-Anthony Towns", "Mikal Bridges", "OG Anunoby", "Josh Hart"],
+    "MIN": ["Anthony Edwards", "Julius Randle", "Rudy Gobert", "Mike Conley", "Jaden McDaniels"],
+    "DEN": ["Nikola Jokic", "Jamal Murray", "Michael Porter Jr.", "Aaron Gordon", "Christian Braun"],
+    "OKC": ["Shai Gilgeous-Alexander", "Jalen Williams", "Chet Holmgren", "Luguentz Dort", "Alex Caruso"],
+    "MIL": ["Giannis Antetokounmpo", "Damian Lillard", "Khris Middleton", "Brook Lopez", "Bobby Portis"],
+    "PHI": ["Tyrese Maxey", "Joel Embiid", "Paul George", "Kelly Oubre Jr.", "Caleb Martin"],
+    "DAL": ["Kyrie Irving", "Klay Thompson", "Dereck Lively II", "P.J. Washington", "Daniel Gafford"],
+    "PHX": ["Kevin Durant", "Devin Booker", "Bradley Beal", "Jusuf Nurkic", "Tyus Jones"],
+    "MIA": ["Jimmy Butler", "Bam Adebayo", "Tyler Herro", "Terry Rozier", "Duncan Robinson"],
+    "CLE": ["Donovan Mitchell", "Darius Garland", "Evan Mobley", "Jarrett Allen", "Caris LeVert"],
+    "IND": ["Tyrese Haliburton", "Pascal Siakam", "Myles Turner", "Bennedict Mathurin", "Aaron Nesmith"],
+    "MEM": ["Ja Morant", "Desmond Bane", "Jaren Jackson Jr.", "Marcus Smart", "Zach Edey"],
+    "SAC": ["De'Aaron Fox", "Domantas Sabonis", "DeMar DeRozan", "Keegan Murray", "Malik Monk"],
+    "ORL": ["Paolo Banchero", "Franz Wagner", "Jalen Suggs", "Wendell Carter Jr.", "Kentavious Caldwell-Pope"],
+    "HOU": ["Alperen Sengun", "Jalen Green", "Fred VanVleet", "Jabari Smith Jr.", "Dillon Brooks"],
+    "LAC": ["James Harden", "Kawhi Leonard", "Norman Powell", "Ivica Zubac", "Terance Mann"],
+    "SAS": ["Victor Wembanyama", "Chris Paul", "Devin Vassell", "Keldon Johnson", "Jeremy Sochan"],
+    "NOP": ["Zion Williamson", "Brandon Ingram", "CJ McCollum", "Dejounte Murray", "Herbert Jones"],
+    "ATL": ["Trae Young", "Jalen Johnson", "Clint Capela", "De'Andre Hunter", "Dyson Daniels"],
+    "CHI": ["Zach LaVine", "Coby White", "Nikola Vucevic", "Josh Giddey", "Patrick Williams"],
+    "TOR": ["Scottie Barnes", "RJ Barrett", "Immanuel Quickley", "Jakob Poeltl", "Gradey Dick"],
+    "BKN": ["Cam Thomas", "Dennis Schroder", "Cameron Johnson", "Nic Claxton", "Dorian Finney-Smith"],
+    "DET": ["Cade Cunningham", "Jaden Ivey", "Tobias Harris", "Jalen Duren", "Tim Hardaway Jr."],
+    "CHA": ["LaMelo Ball", "Brandon Miller", "Miles Bridges", "Tre Mann", "Grant Williams"],
+    "POR": ["Anfernee Simons", "Jerami Grant", "Deandre Ayton", "Scoot Henderson", "Shaedon Sharpe"],
+    "UTA": ["Lauri Markkanen", "Collin Sexton", "Keyonte George", "John Collins", "Walker Kessler"],
+    "WAS": ["Jordan Poole", "Kyle Kuzma", "Bilal Coulibaly", "Alex Sarr", "Malcolm Brogdon"],
 }
 
 PLAYER_REGISTRY: Dict[str, Dict[str, Any]] = {}
@@ -345,18 +387,41 @@ def parse_user_query(raw_text: str) -> Dict[str, Any]:
         return {"mode": "SCAN", "sport": sport}
 
     # Resolve canonical player name:
-    # 1. First check NBA Superstar Map (exact or fuzzy)
     canonical = raw_player
-    if sport == "NBA":
+    try:
+        from auto_market_index import fetch_espn_player_profile
+        espn_p = fetch_espn_player_profile(raw_player, sport=sport)
+        if espn_p and espn_p.get("full_name"):
+            canonical = espn_p["full_name"].upper()
+    except Exception:
+        pass
+
+    try:
+        from universal_entity_resolver import resolve_athlete_universal
+        ath = resolve_athlete_universal(raw_player, sport=sport)
+        if ath and ath.get("full_name") and canonical == raw_player:
+            canonical = ath["full_name"].upper()
+    except Exception:
+        pass
+
+    # 1. First check NBA Superstar Map (exact, substring, or fuzzy)
+    if sport == "NBA" and canonical == raw_player:
         if raw_player in NBA_SUPERSTAR_MAP:
             canonical = NBA_SUPERSTAR_MAP[raw_player]["name"].upper()
         else:
             best_star, best_star_score = None, 0.0
             for star_k, star_info in NBA_SUPERSTAR_MAP.items():
-                sc = SequenceMatcher(None, raw_player, star_k).ratio()
+                if raw_player == star_k:
+                    sc = 1.0
+                elif re.search(r"\b" + re.escape(star_k) + r"\b", raw_player, re.I):
+                    sc = 0.95
+                elif len(raw_player) >= 3 and re.search(r"\b" + re.escape(raw_player) + r"\b", star_k, re.I):
+                    sc = 0.95
+                else:
+                    sc = SequenceMatcher(None, raw_player, star_k).ratio()
                 if sc > best_star_score:
                     best_star, best_star_score = star_info["name"].upper(), sc
-            if best_star and best_star_score >= 0.70:
+            if best_star and best_star_score >= 0.85:
                 canonical = best_star
 
     # 2. Check active ESPN rosters if available
@@ -367,10 +432,17 @@ def parse_user_query(raw_text: str) -> Dict[str, Any]:
         else:
             best_match, best_score = None, 0.0
             for r_name, r_info in active_rosters.items():
-                score = SequenceMatcher(None, raw_player, r_name).ratio()
+                if raw_player == r_name:
+                    score = 1.0
+                elif re.search(r"\b" + re.escape(raw_player) + r"\b", r_name, re.I):
+                    score = 0.92
+                elif len(r_name) >= 4 and re.search(r"\b" + re.escape(r_name) + r"\b", raw_player, re.I):
+                    score = 0.92
+                else:
+                    score = SequenceMatcher(None, raw_player, r_name).ratio()
                 if score > best_score:
                     best_match, best_score = r_info.get("name", r_name).upper(), score
-            if best_match and best_score >= 0.72:
+            if best_match and best_score >= 0.85:
                 canonical = best_match
 
     return {
@@ -419,19 +491,25 @@ def simulate_prop_and_combo(
     live_meta = live_meta or {}
 
     # 1. DYNAMIC ROSTER & OPEN KALSHI MARKET LOOKUP (Strictly Real)
-    matched_kalshi_props = []
-    if find_live_kalshi_props_for_player:
-        matched_kalshi_props = find_live_kalshi_props_for_player(player_key, sport=sport, target_stat=stat)
-        if not matched_kalshi_props and stat != "ALL":
-            matched_kalshi_props = find_live_kalshi_props_for_player(player_key, sport=sport)
-
     roster_info = None
-    if get_active_espn_rosters:
+    if resolve_espn_athlete_info:
+        roster_info = resolve_espn_athlete_info(player_key, sport=sport)
+    elif get_active_espn_rosters:
         active_rosters = get_active_espn_rosters(sport)
         roster_info = active_rosters.get(player_key.upper())
         if not roster_info:
             p_last = player_key.upper().split()[-1] if player_key.split() else player_key.upper()
             roster_info = active_rosters.get(p_last)
+
+    eff_player_name = roster_info.get("name", player_key) if roster_info else player_key
+
+    matched_kalshi_props = []
+    if find_live_kalshi_props_for_player:
+        matched_kalshi_props = find_live_kalshi_props_for_player(eff_player_name, sport=sport, target_stat=stat)
+        if not matched_kalshi_props:
+            matched_kalshi_props = find_live_kalshi_props_for_player(player_key, sport=sport, target_stat=stat)
+        if not matched_kalshi_props and stat != "ALL":
+            matched_kalshi_props = find_live_kalshi_props_for_player(eff_player_name, sport=sport)
 
     # If NO open live Kalshi market exists for this player:
     # Run 10,000-draw Monte Carlo baseline model with authentic schedule & next-game telemetry
@@ -454,32 +532,28 @@ def simulate_prop_and_combo(
         kalshi_line = float(line if line is not None else default_line)
         if line is None:
             line = kalshi_line
-        p_team = star_info.get("team") or "NBA"
-        ticker = f"KXNBA-{p_team}-{player_key.split()[-1].upper()[:4]}-{stat}"
-        market_url = "https://kalshi.com/markets/kxnba"
+        p_team = (roster_info.get("team_abbr") if roster_info else None) or star_info.get("team") or "NBA"
+        ticker = "📊 Market: Projection Only (No Open Kalshi Prop Yet)"
+        market_url = "https://kalshi.com/markets"
         ask_cents = 50
         book_prob = 0.50
 
         if not roster_info:
-            try:
-                from smart_placer import TEAM_SCHEDULE_NOTES
-                schedule_note = TEAM_SCHEDULE_NOTES.get(p_team, f"{p_team} scheduled slate • 10k MC Model Active")
-            except Exception:
-                schedule_note = f"{p_team} scheduled slate • 10k MC Model Active"
-            teammate_cands = [v["name"] for k, v in NBA_SUPERSTAR_MAP.items() if v.get("team") == p_team and k != player_key.upper()]
+            cand_teammates = NBA_TEAMMATES.get(p_team, ["Austin Reaves", "Anthony Davis", "Stephen Curry"])
+            filtered_tm = [t for t in cand_teammates if t.upper() != player_key.upper()]
             roster_info = {
                 "name": star_info.get("name", player_key.title()),
                 "team_abbr": p_team,
                 "team_name": p_team,
-                "matchup": schedule_note,
-                "game_date": "Next Scheduled Game",
-                "teammates": teammate_cands,
+                "matchup": f"{p_team} (Scheduled Slate)",
+                "game_date": "Today • Active Slate",
+                "teammates": filtered_tm if filtered_tm else ["Austin Reaves"],
             }
 
     # Resolve real team and schedule
     team_name = roster_info.get("team_abbr") if roster_info else "LIVE"
     matchup = roster_info.get("matchup") if roster_info else team_name
-    game_date = roster_info.get("game_date") if roster_info else ("Today • Live Slate" if is_live_orderable else "Next Scheduled Game")
+    game_date = roster_info.get("game_date") if roster_info else "Today • Live Slate"
 
     arch = "VOLUME_SCORER" if stat in ("PTS", "POINTS") else ("MOVEMENT_SHOOTER" if stat in ("3PM", "3PT") else "ROTATION_PIECE")
     scheme = "SMALL_BALL_SWITCH"
@@ -537,13 +611,16 @@ def simulate_prop_and_combo(
     ev_edge = (true_prob - book_prob) * 100.0
 
     # 4. Joint Gaussian Copula 2-Leg Correlated Partner Simulation
-    combo_data = None
     partner_obj = None
     if find_live_sgp_partner and roster_info:
         partner_obj = find_live_sgp_partner(roster_info.get("teammates", []), sport=sport)
 
-    if not partner_obj and roster_info and roster_info.get("teammates"):
-        t_name = roster_info["teammates"][0]
+    if not partner_obj:
+        teammates_list = (roster_info.get("teammates") if roster_info else None) or []
+        valid_tm = [t for t in teammates_list if t.upper() not in ("TEAMMATE", player_key.upper())]
+        if not valid_tm:
+            valid_tm = [t for t in NBA_TEAMMATES.get(team_name, ["Austin Reaves", "Anthony Davis", "Stephen Curry"]) if t.upper() != player_key.upper()]
+        t_name = valid_tm[0] if valid_tm else "Austin Reaves"
         t_star = NBA_SUPERSTAR_MAP.get(t_name.upper(), {})
         t_stat = "AST" if stat != "AST" else "PTS"
         t_line = t_star.get("defaults", {}).get(t_stat, 5.5 if t_stat == "AST" else 20.5)
@@ -552,53 +629,52 @@ def simulate_prop_and_combo(
             "stat": t_stat,
             "line": t_line,
             "rho": 0.38,
-            "ticker": f"KXNBA-{team_name}-{t_name.split()[-1].upper()[:4]}-{t_stat}",
-            "market_url": "https://kalshi.com/markets/kxnba",
+            "ticker": "📊 Market: Projection Only (No Open Kalshi Prop Yet)",
+            "market_url": "https://kalshi.com/markets",
         }
 
-    if partner_obj:
-            p_name = partner_obj["partner"]
-            p_stat = partner_obj["stat"]
-            p_line = partner_obj["line"]
-            rho = partner_obj.get("rho", 0.42)
-            p_mean = p_line * 1.06
-            std2 = max(1.4, p_mean * 0.25)
-            leg2_hits = 0
-            joint_hits = 0
-            for idx, d1 in enumerate(draws):
-                z1 = _norm_ppf(max(1e-5, min(1.0 - 1e-5, (idx + 0.5) / 10000.0)))
-                z_ind = random.gauss(0.0, 1.0)
-                z2 = rho * z1 + math.sqrt(max(0.01, 1.0 - rho * rho)) * z_ind
-                u2 = _norm_cdf(z2)
-                d2 = max(0.0, p_mean + _norm_ppf(u2) * std2)
+    p_name = partner_obj["partner"]
+    p_stat = partner_obj["stat"]
+    p_line = partner_obj["line"]
+    rho = partner_obj.get("rho", 0.42)
+    p_mean = p_line * 1.06
+    std2 = max(1.4, p_mean * 0.25)
+    leg2_hits = 0
+    joint_hits = 0
+    for idx, d1 in enumerate(draws):
+        z1 = _norm_ppf(max(1e-5, min(1.0 - 1e-5, (idx + 0.5) / 10000.0)))
+        z_ind = random.gauss(0.0, 1.0)
+        z2 = rho * z1 + math.sqrt(max(0.01, 1.0 - rho * rho)) * z_ind
+        u2 = _norm_cdf(z2)
+        d2 = max(0.0, p_mean + _norm_ppf(u2) * std2)
 
-                hit1 = (d1 > line) if side == "OVER" else (d1 < line)
-                hit2 = (d2 > p_line)
-                if hit2:
-                    leg2_hits += 1
-                if hit1 and hit2:
-                    joint_hits += 1
+        hit1 = (d1 > line) if side == "OVER" else (d1 < line)
+        hit2 = (d2 > p_line)
+        if hit2:
+            leg2_hits += 1
+        if hit1 and hit2:
+            joint_hits += 1
 
-            leg2_prob = leg2_hits / 10000.0
-            joint_prob = joint_hits / 10000.0
-            indep_prob = true_prob * leg2_prob
-            combo_ev = (joint_prob - 0.277) * 100.0
-            combo_data = {
-                "partner": p_name,
-                "stat": p_stat,
-                "line": p_line,
-                "side": "OVER",
-                "team": team_name,
-                "matchup": matchup,
-                "game_date": game_date,
-                "ticker": partner_obj.get("ticker", ""),
-                "market_url": partner_obj.get("market_url", ""),
-                "partner_prob": round(leg2_prob * 100, 1),
-                "rho": rho,
-                "joint_prob": round(joint_prob * 100, 1),
-                "boost_pct": round((joint_prob - indep_prob) * 100, 2),
-                "combo_ev": round(combo_ev, 2),
-            }
+    leg2_prob = leg2_hits / 10000.0
+    joint_prob = joint_hits / 10000.0
+    indep_prob = true_prob * leg2_prob
+    combo_ev = (joint_prob - 0.277) * 100.0
+    combo_data = {
+        "partner": p_name,
+        "stat": p_stat,
+        "line": p_line,
+        "side": "OVER",
+        "team": team_name,
+        "matchup": matchup,
+        "game_date": game_date,
+        "ticker": partner_obj.get("ticker", ""),
+        "market_url": partner_obj.get("market_url", ""),
+        "partner_prob": round(leg2_prob * 100, 1),
+        "rho": rho,
+        "joint_prob": round(joint_prob * 100, 1),
+        "boost_pct": round((joint_prob - indep_prob) * 100, 2),
+        "combo_ev": round(combo_ev, 2),
+    }
 
     return {
         "status": "OK",
@@ -612,6 +688,8 @@ def simulate_prop_and_combo(
         "side": side,
         "ticker": ticker,
         "market_url": market_url,
+        "is_live_orderable": is_live_orderable,
+        "open_markets": get_real_open_markets_summary(sport, limit=4) if get_real_open_markets_summary else [],
         "arch": arch,
         "scheme": scheme,
         "scheme_pct": round((scheme_mod - 1.0) * 100, 1),
@@ -692,10 +770,17 @@ class KalshiUnifiedSniper:
                 pass
 
     def _headers(self, method: str, path: str) -> Dict[str, str]:
-        # Priority 1: Pure-Python RFC 8032 Ed25519 signer from kalshi_client (Zero C/Rust .so dependencies)
+        clean_path = path.split("?")[0]
+        try:
+            from bot import get_auth_headers
+            return get_auth_headers(method, clean_path)
+        except Exception:
+            pass
+
+        # Priority 1: Pure-Python RFC 8032 Ed25519 signer from kalshi_client
         try:
             from kalshi_client import build_kalshi_auth_headers
-            auth_h = build_kalshi_auth_headers(method, self.base_url + path)
+            auth_h = build_kalshi_auth_headers(method, clean_path)
             if auth_h:
                 auth_h["Content-Type"] = "application/json"
                 auth_h["Accept"] = "application/json"
@@ -703,7 +788,6 @@ class KalshiUnifiedSniper:
         except Exception:
             pass
 
-        clean_path = path.split("?")[0]
         ts = str(int(time.time() * 1000))
         if not self.private_key or not self.key_id or not HAS_CRYPTOGRAPHY:
             return {"Content-Type": "application/json", "Accept": "application/json"}
@@ -813,14 +897,17 @@ class KalshiUnifiedSniper:
         raw_side = str(sim_data.get("side", "OVER")).upper()
         side = "yes" if raw_side in ("OVER", "YES", "WIN", "HOME") else "no"
 
-        if not ticker:
+        # Guard: If market is not a real, open, orderable Kalshi market, do NOT submit order
+        is_orderable = bool(sim_data.get("is_live_orderable", True))
+        is_real_ticker = bool(ticker and ticker.startswith("KX") and "PROJECTION" not in str(ticker).upper() and not str(ticker).startswith("📊"))
+        if not (is_orderable and is_real_ticker):
             return {
-                "status": "⚠️ MARKET UNAVAILABLE (No active orderbook)",
-                "ticker": f"KX{sim_data.get('sport', 'LIVE')}-{sim_data.get('player', 'PROP').split()[-1].upper()}",
-                "contracts": contracts,
+                "status": "📊 PROJECTION ONLY (Market Pending — No Order Placed)",
+                "ticker": "📊 Market: Projection Only (No Open Kalshi Prop Yet)",
+                "contracts": 0,
                 "limit_cents": limit_cents,
                 "side": side,
-                "note": "No active Kalshi market open",
+                "note": "Kalshi market not active yet — 10k Monte Carlo sim displayed",
             }
 
         entry_cents = limit_cents
@@ -836,27 +923,32 @@ class KalshiUnifiedSniper:
                 "note": f"Paper tracked ({contracts}x {side.upper()} @ {entry_cents}¢)",
             }
 
-        path = "/trade-api/v2/portfolio/orders"
+        order_path = "/trade-api/v2/portfolio/orders"
         client_oid = str(uuid.uuid4())
-        payload = {
+        v2_side = "bid" if side == "yes" else "ask"
+        v2_price_cents = entry_cents if side == "yes" else (100 - entry_cents)
+        v2_payload = {
             "ticker": ticker,
-            "action": "buy",
-            "side": side,
-            "count": contracts,
-            "type": "limit",
             "client_order_id": client_oid,
-            f"{side}_price": entry_cents,
+            "side": v2_side,
+            "count": str(max(1, int(contracts))),
+            "price": f"{v2_price_cents / 100.0:.4f}",
+            "time_in_force": "good_till_canceled",
         }
 
+        last_code = 500
+        last_body = "Connection failed"
         for host in (self.base_url, "https://api.elections.kalshi.com", "https://external-api.kalshi.com"):
             if not host:
                 continue
-            clean_host = host.replace("/trade-api/v2", "")
+            clean_host = host.replace("/trade-api/v2", "").rstrip("/")
             try:
-                resp = requests.post(f"{clean_host}{path}", json=payload, headers=self._headers("POST", path), timeout=8)
+                resp = requests.post(f"{clean_host}{order_path}", json=v2_payload, headers=self._headers("POST", order_path), timeout=8)
+                last_code = resp.status_code
+                last_body = resp.text
                 if resp.status_code in (200, 201):
                     res_json = resp.json()
-                    order_obj = res_json.get("order", {})
+                    order_obj = res_json.get("order") or res_json.get("event_order") or {}
                     order_id = order_obj.get("order_id") or client_oid[:8]
                     return {
                         "status": f"✅ LIVE ORDER FILLED (Order ID: {order_id} | {contracts}x {side.upper()} @ {entry_cents}¢)",
@@ -867,25 +959,29 @@ class KalshiUnifiedSniper:
                         "side": side,
                         "note": "Live order executed on Kalshi",
                     }
-                elif resp.status_code == 400 and "order" in resp.text.lower():
+                else:
                     return {
-                        "status": f"⚠️ ORDER REJECTED ({resp.status_code})",
+                        "status": f"⚠️ ORDER FAILED [HTTP {resp.status_code}]: {resp.text[:180]}",
                         "ticker": ticker,
                         "contracts": contracts,
                         "limit_cents": entry_cents,
                         "side": side,
                         "note": resp.text[:90],
                     }
-            except Exception:
+            except Exception as exc:
+                last_body = str(exc)
+                continue
+            except Exception as exc:
+                last_body = str(exc)
                 continue
 
         return {
-            "status": "⚠️ ORDER FAILED (Network/Auth error)",
+            "status": f"⚠️ ORDER FAILED [HTTP {last_code}]: {last_body[:180]}",
             "ticker": ticker,
             "contracts": contracts,
             "limit_cents": entry_cents,
             "side": side,
-            "note": "Could not connect to Kalshi orderbook",
+            "note": last_body[:90],
         }
 
 
@@ -900,8 +996,17 @@ def _meter_bar(prob_pct: float, length: int = 10) -> str:
 def format_revamped_sim_card(sim: Dict[str, Any], exec_res: Dict[str, Any]) -> str:
     if format_video_style_single_card:
         return format_video_style_single_card(sim, exec_res)
-    bar = _meter_bar(sim["true_prob"])
-    c = sim["combo"]
+    bar = _meter_bar(sim.get("true_prob", 50.0))
+    c = sim.get("combo") or {
+        "rho": 0.35,
+        "partner": "Austin Reaves",
+        "side": "OVER",
+        "line": 0.5,
+        "stat": "PTS",
+        "partner_prob": 50.0,
+        "joint_prob": 50.0,
+        "combo_ev": 10.0,
+    }
     return (
         f"⚡ <b>PEZZY QUANT TERMINAL  •  {sim['sport']}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"

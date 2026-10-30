@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -39,11 +40,20 @@ STREAMED_MIRRORS = [
     "https://streamed.st/api",
     "https://streamed.pk/api",
 ]
+STREAM_BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://streamed.su/",
+    "Origin": "https://streamed.su",
+}
 SPORT_TO_STREAMED_CAT = {
     "NBA": "basketball",
     "WNBA": "basketball",
     "NFL": "american-football",
+    "CFB": "american-football",
     "MLB": "baseball",
+    "NHL": "hockey",
     "TENNIS": "tennis",
     "ESPORTS": "other",
 }
@@ -58,7 +68,8 @@ async def fetch_on_demand_stream(sport: str, query: str = "") -> Dict[str, Any]:
     cat = SPORT_TO_STREAMED_CAT.get(sport.upper(), "basketball")
     cache_key = f"{cat}:{query.upper().strip()}"
     cached = _WEB_CACHE["streams_cache"].get(cache_key)
-    if cached:
+    # Stream embed URLs go stale quickly: expire cache after 120s so a dead feed isn't served forever
+    if cached and (time.time() - cached.get("_cached_at", 0.0)) < 120.0:
         return cached
 
     q_tokens = [t.lower() for t in query.replace("—", " ").replace("vs", " ").replace("@", " ").split() if len(t) >= 3]
@@ -66,7 +77,7 @@ async def fetch_on_demand_stream(sport: str, query: str = "") -> Dict[str, Any]:
     for base_url in STREAMED_MIRRORS:
         matches_url = f"{base_url}/matches/{cat}"
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=STREAM_BROWSER_HEADERS) as session:
                 async with session.get(
                     matches_url, timeout=aiohttp.ClientTimeout(total=4)
                 ) as resp:
@@ -145,6 +156,7 @@ async def fetch_on_demand_stream(sport: str, query: str = "") -> Dict[str, Any]:
                                 "streams": collected_slots,
                                 "slots": collected_slots,
                             }
+                            result["_cached_at"] = time.time()
                             _WEB_CACHE["streams_cache"][cache_key] = result
                             return result
         except Exception as exc:
