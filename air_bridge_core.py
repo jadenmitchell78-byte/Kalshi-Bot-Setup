@@ -413,6 +413,17 @@ def handle_sport_command(chat_id: Any, text: str, bankroll: float = 15.58,
         player = matched_athlete["name"]
     if not player:
         return (f"ℹ️ Usage: <code>/{sport} Player stat [line]</code> e.g. <code>/{sport} Luka 3pts</code>", None)
+
+    # Intercept NBA team queries (e.g. /NBA 76ers, /NBA Sixers, /NBA Boston, /NBA LA)
+    if sport.upper() == "NBA" and not forced_name and not forced_athlete:
+        try:
+            from team_card import resolve_team, generate_team_card_response
+            tm_cands = resolve_team(player)
+            if tm_cands:
+                return generate_team_card_response(player, bankroll=bankroll)
+        except Exception:
+            logging.exception("team_card generation failed for %s", player)
+
     fallback_note = ""
     if not forced_name and not matched_athlete:
         try:

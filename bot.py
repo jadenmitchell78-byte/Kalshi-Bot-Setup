@@ -3866,6 +3866,29 @@ async def telegram_notifier_and_command_loop():
                                 print(f"[PICKER-ERR] {_pe}")
                             continue
 
+                        # "Which team did you mean?" team picker buttons (team|SPORT|TEAM)
+                        if _cb_raw.startswith("team|"):
+                            try:
+                                await asyncio.to_thread(
+                                    requests.post,
+                                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
+                                    json={"callback_query_id": cb_id, "text": "Simulating team game & props..."},
+                                    timeout=3,
+                                )
+                                _p = (_cb_raw.split("|") + [""] * 3)[:3]
+                                _sport = _p[1] or "NBA"
+                                _tm = _p[2] or ""
+                                from team_card import generate_team_card_response
+                                _h, _k = await asyncio.to_thread(
+                                    generate_team_card_response,
+                                    _tm, live_kalshi_balance,
+                                )
+                                await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, _h, _k, "HTML")
+                            except Exception as _te:
+                                print(f"[TEAM-CARD-ERR] {_te}")
+                                await asyncio.to_thread(notify_telegram, f"⚠️ Error simulating team: <code>{html.escape(str(_te)[:150])}</code>", None, cb_chat_id, "HTML")
+                            continue
+
                         cb_answered = False
                         # Immediate button acknowledgment so button never hangs or spins silently
                         if cb_id:

@@ -352,13 +352,35 @@ def run_bridge_player_simulation(
                 pool = in_band_rungs if in_band_rungs else ladders
                 best_rung = max(pool, key=lambda r: r.get("ev_edge", -999))
 
+    # Authoritative tip-off timestamp from ESPN scoreboard (fallback to Kalshi market expiration)
+    tipoff_ts = None
+    try:
+        from sim_scanner import fetch_espn_nba_games
+        espn_games = fetch_espn_nba_games()
+        g_info = espn_games.get(team_abbr)
+        if g_info and g_info.get("tipoff_ts"):
+            tipoff_ts = float(g_info["tipoff_ts"])
+    except Exception:
+        pass
+
+    if tipoff_ts is None:
+        for r in ladders or []:
+            ct = r.get("close_time") or r.get("expected_expiration_time")
+            if ct:
+                try:
+                    dt_tip = datetime.datetime.fromisoformat(str(ct).replace("Z", "+00:00"))
+                    tipoff_ts = dt_tip.timestamp()
+                    break
+                except Exception:
+                    pass
+
     # Hook in sim_logger (writes to its own sim_log.db, never touches picks.db)
     try:
         import sim_logger
         sim_logger.log_ladder(
             player=p_name, team=team_abbr, opp=opp_team, stat=stat_norm,
             game_date=str(game_date)[:10], ladder=prob_ladder, kalshi_rungs=ladders,
-            inputs=confidence_inputs)
+            inputs=confidence_inputs, tipoff_ts=tipoff_ts)
     except Exception:
         pass            # logging must never break a reply
 
@@ -368,6 +390,40 @@ def run_bridge_player_simulation(
     contract_side = "YES"
     gate_status = "ACTIONABLE_PASS"
     gate_note = ""
+
+    # Evaluate against risk_manager (Quarter Kelly sizing & veto gates)
+    risk_decision = None
+    if has_open_market:
+        try:
+            import risk_manager
+            cand = risk_manager.Candidate(
+                ticker=best_rung["ticker"],
+                player=p_name,
+                team=team_abbr,
+                opp=opp_team,
+                stat=stat_norm,
+                line=float(best_rung["line"]),
+                side=best_rung.get("contract_side", "YES"),
+                sim_prob=float(best_rung["true_prob"]),
+                yes_bid=best_rung.get("yes_bid"),
+                yes_ask=best_rung.get("yes_ask"),
+                tipoff_ts=float(tipoff_ts) if tipoff_ts else 0.0,
+                snapshot_ts=time.time(),
+                confirmed=bool(athlete_espn.get("confirmed", False)),
+            )
+            risk_decision = risk_manager.evaluate_candidate(
+                c=cand,
+                bankroll=bankroll,
+                config=risk_manager.RiskConfig(live_enabled=False),
+            )
+            risk_manager.log_decision_to_db(risk_decision)
+            if not risk_decision.approved:
+                is_orderable = False
+                gate_note = f"⏸ Risk Veto ({risk_decision.reason_code}): {risk_decision.reason_desc}"
+            else:
+                gate_note = f"✅ Risk Approved: ${risk_decision.stake:.2f} stake ({'PRELIMINARY 50%' if risk_decision.is_preliminary else 'Quarter Kelly'}, edge {risk_decision.edge:+.1%})"
+        except Exception:
+            pass
 
     if has_open_market:
         ticker = best_rung["ticker"]
