@@ -608,37 +608,48 @@ def fetch_espn_player_profile(
             else:
                 ov_data = r_ov.json()
                 statistics = ov_data.get("statistics", {})
-                stat_names = [str(n).upper() for n in (statistics.get("names") or statistics.get("labels") or [])]
+                # Prefer `labels` (["MIN", "FG", ..., "3PT", ..., "REB", "AST", ..., "PTS"]) over `names` (long camelCase)
+                stat_labels = [str(n).upper() for n in (statistics.get("labels") or statistics.get("names") or [])]
+                stat_names = [str(n).upper() for n in (statistics.get("names") or [])]
                 splits = statistics.get("splits", [])
                 # splits[0] is current Regular Season; splits[1:] contains Career or Prior Season baseline
                 for sp_idx, sp in enumerate(splits):
                     target_dict = season_averages if sp_idx == 0 else prior_season_averages
                     for stat_entry in sp.get("stats", []):
                         if isinstance(stat_entry, dict):
-                            name = (stat_entry.get("name") or stat_entry.get("shortDisplayName") or stat_entry.get("abbreviation") or "").upper()
+                            name = (stat_entry.get("abbreviation") or stat_entry.get("shortDisplayName") or stat_entry.get("name") or "").upper()
                             fv = _extract_stat_value(stat_entry.get("value") if stat_entry.get("value") is not None else stat_entry.get("displayValue"))
                             if name and fv is not None and name not in target_dict:
                                 target_dict[name] = fv
                     raw_vals = sp.get("stats", [])
-                    if stat_names and raw_vals and not isinstance(raw_vals[0], dict):
-                        for k_nm, raw_v in zip(stat_names, raw_vals):
+                    if stat_labels and raw_vals and not isinstance(raw_vals[0], dict):
+                        for col_i, raw_v in enumerate(raw_vals):
                             fv = _extract_stat_value(raw_v)
-                            if fv is not None and k_nm not in target_dict:
-                                target_dict[k_nm] = fv
+                            if fv is None:
+                                continue
+                            if col_i < len(stat_labels) and stat_labels[col_i] not in target_dict:
+                                target_dict[stat_labels[col_i]] = fv
+                            if col_i < len(stat_names) and stat_names[col_i] not in target_dict:
+                                target_dict[stat_names[col_i]] = fv
 
                 # Parse recent gameLog embedded in overview if present
                 gl_block = ov_data.get("gameLog") or {}
                 gl_stats_list = gl_block.get("statistics") or []
                 for gl_stat in gl_stats_list:
-                    gl_names = [str(n).upper() for n in (gl_stat.get("names") or gl_stat.get("labels") or [])]
+                    gl_labels = [str(n).upper() for n in (gl_stat.get("labels") or gl_stat.get("names") or [])]
+                    gl_names = [str(n).upper() for n in (gl_stat.get("names") or [])]
                     for ev_row in (gl_stat.get("events") or []):
                         vals = ev_row.get("stats") or []
-                        if gl_names and vals:
+                        if gl_labels and vals:
                             row_map: Dict[str, float] = {}
-                            for k_nm, raw_v in zip(gl_names, vals):
+                            for col_i, raw_v in enumerate(vals):
                                 fv = _extract_stat_value(raw_v)
-                                if fv is not None:
-                                    row_map[k_nm] = fv
+                                if fv is None:
+                                    continue
+                                if col_i < len(gl_labels):
+                                    row_map[gl_labels[col_i]] = fv
+                                if col_i < len(gl_names):
+                                    row_map[gl_names[col_i]] = fv
                             if row_map:
                                 recent_logs.append(row_map)
 
@@ -666,25 +677,36 @@ def fetch_espn_player_profile(
                     log.warning("ESPN athlete gamelog HTTP %d for athlete_id=%s (%s)", r_gl.status_code, eff_athlete_id, gl_url)
                 else:
                     gl_data = r_gl.json()
-                    gl_names = [str(n).upper() for n in (gl_data.get("names") or gl_data.get("labels") or [])]
+                    gl_labels = [str(n).upper() for n in (gl_data.get("labels") or gl_data.get("names") or [])]
+                    gl_names = [str(n).upper() for n in (gl_data.get("names") or [])]
                     for st_type in (gl_data.get("seasonTypes") or []):
+                        st_disp = str(st_type.get("displayName") or st_type.get("name") or "").lower()
+                        if any(bad in st_disp for bad in ("postseason", "playoff", "play-in", "preseason", "all-star")):
+                            continue
+                        if st_disp and "regular" not in st_disp:
+                            continue
                         for cat in (st_type.get("categories") or []):
-                            cat_names = [str(n).upper() for n in (cat.get("names") or cat.get("labels") or gl_names)]
+                            cat_labels = [str(n).upper() for n in (cat.get("labels") or gl_labels or cat.get("names") or [])]
+                            cat_names = [str(n).upper() for n in (cat.get("names") or gl_names or [])]
                             for ev_row in (cat.get("events") or []):
                                 vals = ev_row.get("stats") or []
-                                if cat_names and vals:
+                                if cat_labels and vals:
                                     row_map = {}
-                                    for k_nm, raw_v in zip(cat_names, vals):
+                                    for col_i, raw_v in enumerate(vals):
                                         fv = _extract_stat_value(raw_v)
-                                        if fv is not None:
-                                            row_map[k_nm] = fv
+                                        if fv is None:
+                                            continue
+                                        if col_i < len(cat_labels):
+                                            row_map[cat_labels[col_i]] = fv
+                                        if col_i < len(cat_names):
+                                            row_map[cat_names[col_i]] = fv
                                     if row_map:
                                         recent_logs.append(row_map)
                             # Also check category totals/averages if season_averages was empty
                             tot_vals = cat.get("totals") or []
-                            if cat_names and tot_vals and not season_averages:
+                            if cat_labels and tot_vals and not season_averages:
                                 n_ev = max(1, len(cat.get("events") or []))
-                                for k_nm, raw_v in zip(cat_names, tot_vals):
+                                for k_nm, raw_v in zip(cat_labels, tot_vals):
                                     fv = _extract_stat_value(raw_v)
                                     if fv is not None:
                                         # Totals in gamelog are season sums for counting stats unless "%" or "AVG"
@@ -858,26 +880,8 @@ def fetch_espn_player_profile(
         except Exception as rost_exc:
             log.warning("ESPN roster request failed for team=%s: %s", team_abbr, rost_exc)
 
-    # Compute opponent defensive factor from real ESPN opponent stats (shrunk toward 1.0, k=10 games)
-    if opp_team and opp_team not in ("OPP", sport_u):
-        opp_url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/teams/{opp_team.lower()}"
-        try:
-            r_opp = requests.get(opp_url, headers=headers, timeout=4)
-            if r_opp.status_code == 200:
-                opp_data = r_opp.json()
-                rec_items = ((opp_data.get("team") or {}).get("record") or {}).get("items") or []
-                for rec in rec_items:
-                    stats_map = {str(s.get("name") or ""): s.get("value") for s in (rec.get("stats") or []) if isinstance(s, dict)}
-                    pts_against = stats_map.get("avgPointsAgainst") or stats_map.get("pointsAgainst")
-                    opp_gp = float(stats_map.get("gamesPlayed") or ( float(stats_map.get("wins") or 0) + float(stats_map.get("losses") or 0) ) or 0)
-                    if pts_against is not None and float(pts_against) > 50.0:
-                        raw_opp_mult = float(pts_against) / 114.5
-                        k_opp = 10.0
-                        opp_factor = round(((opp_gp * raw_opp_mult) + (k_opp * 1.0)) / (opp_gp + k_opp), 4)
-                        opp_factor = max(0.90, min(1.10, opp_factor))
-                        break
-        except Exception as opp_exc:
-            log.debug("Opponent stats lookup warning for opp=%s: %s", opp_team, opp_exc)
+    # Keep opp_factor neutral (1.0) unless stat-specific opponent & league averages are computed from game logs
+    opp_factor = 1.0
 
     # Prominent team roster fallbacks if ESPN roster call was empty
     if not active_teammates:

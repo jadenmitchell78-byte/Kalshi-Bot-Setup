@@ -41,7 +41,7 @@ MIN_SLIP_LEGS: int = int(os.getenv("MIN_SLIP_LEGS", "2"))
 
 # Bankroll & Unit Sizing (Strictly uses actual Kalshi live cash balance)
 DEFAULT_MODE: str = os.getenv("DEFAULT_MODE", "SIM").upper()
-DEFAULT_AUTO: bool = os.getenv("DEFAULT_AUTO", "true").lower() in ("1", "true", "yes", "on")
+DEFAULT_AUTO: bool = os.getenv("DEFAULT_AUTO", "false").lower() in ("1", "true", "yes", "on")
 DEFAULT_SIM_CASH: float = float(os.getenv("DEFAULT_SIM_CASH", "0.00"))
 BANKROLL_USD: float = float(os.getenv("BANKROLL_USD", "0.00"))
 UNIT_SIZE_USD: float = float(os.getenv("UNIT_SIZE_USD", "10.00"))

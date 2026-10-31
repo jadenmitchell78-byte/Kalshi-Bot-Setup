@@ -53,6 +53,13 @@ DAILY_DATE_CODE_REGEX = re.compile(r"26(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|
 LAST_SIM_RESULT: Dict[str, Any] = {}
 BANNED_FUTURES_WORDS = ("CAREER", "SEASON", "RECORD", "AWARD", "LEADER", "HOF", "CHAMP")
 
+# Live Bot Calibration & Edge Gates (from 2025-26 Out-of-Sample verification)
+POSITIVE_SKILL_STATS = {"3PM", "3PT", "AST", "REB", "PTS"}
+EXPERIMENTAL_STATS = {"PRA"}
+FAIR_PROB_MIN = 0.20            # Only show/bet fair probabilities in [20%, 80%]
+FAIR_PROB_MAX = 0.80
+MIN_EDGE_AFTER_FEES_PCT = 5.0   # Require >= +5.0 percentage points of edge after Kalshi fees
+
 
 def normalize_kalshi_market(m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
@@ -94,7 +101,7 @@ def run_bridge_player_simulation(
     stat_query: str,
     line_query: Optional[float] = None,
     bankroll: float = 32.22,
-    sniper_on: bool = True,
+    sniper_on: bool = False,
     live_mode: bool = False,
     athlete_id: Optional[str] = None,
     known_name: Optional[str] = None,
@@ -163,14 +170,20 @@ def run_bridge_player_simulation(
     raw_season_val = float(season_avg_map.get(stat_norm, prior_val))
     last5_val = last5_map.get(stat_norm)
 
-    # Lineup / injury usage boost (+2.0% per injured teammate, capped at +6.0%)
-    injury_boost = min(1.06, 1.0 + 0.02 * len(out_teammates)) if out_teammates else 1.0
-    injury_adj_pct = round((injury_boost - 1.0) * 100.0, 1)
+    # Only apply teammate-out usage redistribution if validated out-of-sample by ab_test_lineup.py
+    from sim_core import PARAMS as _SIM_PARAMS
+    redist_w = float(_SIM_PARAMS.get("lineup_rate_redist", 0.0) or 0.0)
+    if out_teammates and redist_w > 0.0:
+        injury_boost = min(1.08, 1.0 + redist_w * min(2, len(out_teammates)))
+        injury_adj_pct = round((injury_boost - 1.0) * 100.0, 1)
+    else:
+        injury_boost = 1.0
+        injury_adj_pct = 0.0
 
     if is_home is True:
-        loc_label = "Home (+2.0%)"
+        loc_label = "Home (+1.2%)"
     elif is_home is False:
-        loc_label = "Away (-1.5%)"
+        loc_label = "Away (-1.2%)"
     else:
         loc_label = "Neutral"
 
@@ -203,34 +216,64 @@ def run_bridge_player_simulation(
     p50 = round(draws[int(10000 * 0.50)], 1)
     p90 = round(draws[int(10000 * 0.90)], 1)
 
-    # Build multi-line probability distribution ladder (e.g. 1+ 91% · 2+ 61% · 3+ 30% · 4+ 11%)
+    # Build multi-line probability distribution ladder, gated to calibrated [20%, 80%] fair probabilities
     if stat_norm in ("3PM", "3PT", "SOG"):
-        center_m = max(2, int(round(proj_mean)))
-        milestones = [max(1, center_m - 1), center_m, center_m + 1, center_m + 2]
-        milestones = sorted(list(dict.fromkeys(milestones)))[:4]
+        center_m = max(1, int(round(proj_mean)))
+        cand_milestones = [max(1, center_m - 2), max(1, center_m - 1), center_m, center_m + 1, center_m + 2, center_m + 3]
+        cand_milestones = sorted(list(dict.fromkeys(cand_milestones)))
     elif stat_norm in ("REB", "AST", "K"):
-        center_m = max(4, int(round(proj_mean)))
-        milestones = [max(2, center_m - 2), center_m, center_m + 2, center_m + 4]
+        center_m = max(3, int(round(proj_mean)))
+        cand_milestones = [max(2, center_m - 4), max(2, center_m - 2), center_m, center_m + 2, center_m + 4]
+        cand_milestones = sorted(list(dict.fromkeys(cand_milestones)))
     else:  # PTS, PRA, yards
         base_5 = max(15, int(round(proj_mean / 5.0) * 5))
-        milestones = [max(10, base_5 - 5), base_5, base_5 + 5, base_5 + 10]
+        cand_milestones = [max(10, base_5 - 10), max(10, base_5 - 5), base_5, base_5 + 5, base_5 + 10]
+        cand_milestones = sorted(list(dict.fromkeys(cand_milestones)))
 
-    prob_ladder: List[Dict[str, Any]] = []
-    for m_val in milestones:
+    all_ladder_rungs: List[Dict[str, Any]] = []
+    for m_val in cand_milestones:
         line_cut = float(m_val) - 0.5
         hits_m = sum(1 for d in draws if d > line_cut)
-        prob_pct = round((hits_m / 10000.0) * 100.0, 1)
-        fee_c = int(round(kalshi_fee_prob(prob_pct / 100.0) * 100.0))
-        prob_ladder.append({
+        prob_dec = hits_m / 10000.0
+        prob_pct = round(prob_dec * 100.0, 1)
+        fee_c = int(round(kalshi_fee_prob(prob_dec) * 100.0))
+        in_band = (FAIR_PROB_MIN <= prob_dec <= FAIR_PROB_MAX)
+        all_ladder_rungs.append({
             "label": f"{m_val}+",
             "line": line_cut,
             "prob_pct": prob_pct,
+            "in_prob_band": in_band,
             "fair_cents": max(1, min(99, int(round(prob_pct)))),
-            "buy_below_cents": max(1, min(95, int(round(prob_pct - max(4.0, fee_c + 3.0))))),
+            "buy_below_cents": max(1, min(95, int(round(prob_pct - (fee_c + MIN_EDGE_AFTER_FEES_PCT))))),
         })
+
+    # Keep only calibrated 20%-80% fair probability rungs on the card (fallback to closest to 50% if none)
+    prob_ladder = [r for r in all_ladder_rungs if r["in_prob_band"]][:4]
+    if not prob_ladder and all_ladder_rungs:
+        prob_ladder = sorted(all_ladder_rungs, key=lambda r: abs(r["prob_pct"] - 50.0))[:2]
     prob_ladder_str = " · ".join(f"<b>{r['label']}</b> {r['prob_pct']:.0f}%" for r in prob_ladder)
 
-    # 4. Evaluate each Kalshi ladder rung against 10k MC draws (Fee-aware + both YES/OVER and NO/UNDER)
+    is_experimental_stat = stat_norm in EXPERIMENTAL_STATS
+    is_positive_skill_stat = stat_norm in POSITIVE_SKILL_STATS
+
+    confidence_inputs = {
+        "games_played": games_played,
+        "season_avg": round(raw_season_val, 2),
+        "prior_avg": round(prior_val, 2),
+        "prior_source": "prior_season" if player_prior is not None else "position",
+        "shrunk_avg": round(shrunk_season, 2),
+        "last5_avg": round(float(last5_val), 2) if last5_val is not None else None,
+        "minutes_season": round(season_min, 1),
+        "minutes_proj": round(proj_min, 1),
+        "home_away": loc_label,
+        "opp_team": opp_team or "N/A",
+        "opp_adj_pct": opp_adj_pct,
+        "out_teammates": out_teammates[:3],
+        "injury_adj_pct": injury_adj_pct,
+        "is_experimental": is_experimental_stat,
+    }
+
+    # 4. Evaluate each Kalshi ladder rung against 10k MC draws (Fee-aware + 20-80% prob gate + 5pt min edge gate)
     best_rung = None
     ladder_summary_lines = []
 
@@ -245,6 +288,7 @@ def run_bridge_player_simulation(
             yes_ask = int(r.get("yes_ask") or 50)
             yes_bid = int(r.get("yes_bid") or max(1, yes_ask - 4))
             no_ask = int(r.get("no_ask") or max(1, 100 - yes_bid))
+            no_bid = int(r.get("no_bid") or max(1, 100 - yes_ask))
 
             yes_ask_prob = yes_ask / 100.0
             no_ask_prob = no_ask / 100.0
@@ -265,22 +309,67 @@ def run_bridge_player_simulation(
                 r["true_prob"] = true_over_prob
                 r["ev_edge"] = yes_ev
 
-            ev_str = f"+{r['ev_edge']}%" if r["ev_edge"] >= 0 else f"{r['ev_edge']}%"
-            ladder_summary_lines.append(
-                f"• <b>{r.get('milestone_label', f'{rung_line}+')} {stat_norm} ({r['picked_side']}):</b> "
-                f"{round(r['true_prob']*100, 1)}% True vs {r['entry_cents']}¢ Ask (<code>{ev_str} Fee-Adj EV</code>) — <code>{r['ticker']}</code>"
-            )
+            r["true_over_prob"] = true_over_prob
+            r["yes_bid"] = yes_bid
+            r["yes_ask"] = yes_ask
+            r["no_bid"] = no_bid
+            r["no_ask"] = no_ask
+
+            in_prob_band = (FAIR_PROB_MIN <= r["true_prob"] <= FAIR_PROB_MAX)
+            meets_min_edge = (r["ev_edge"] >= MIN_EDGE_AFTER_FEES_PCT)
+
+            gate_reasons = []
+            if is_experimental_stat:
+                gate_reasons.append("EXPERIMENTAL_STAT_PRA")
+            elif not is_positive_skill_stat:
+                gate_reasons.append("UNVERIFIED_STAT")
+            if not in_prob_band:
+                gate_reasons.append(f"PROB_{r['true_prob']*100:.0f}%_OUTSIDE_20_80")
+            if not meets_min_edge:
+                gate_reasons.append(f"EDGE_{r['ev_edge']:+.1f}%_BELOW_5PT")
+
+            r["passes_live_gate"] = (len(gate_reasons) == 0)
+            r["gate_status"] = "ACTIONABLE_PASS" if r["passes_live_gate"] else ("GATED:" + ",".join(gate_reasons))
+
+            if in_prob_band:
+                ev_str = f"{r['ev_edge']:+.1f}%"
+                gate_tag = " ✅" if r["passes_live_gate"] else " (Pass <+5%)"
+                ladder_summary_lines.append(
+                    f"• <b>{r.get('milestone_label', f'{rung_line}+')} {stat_norm} ({r['picked_side']}):</b> "
+                    f"{round(r['true_prob']*100, 1)}% Fair vs {r['entry_cents']}¢ Ask "
+                    f"(<code>{ev_str} Fee-Adj EV{gate_tag}</code>) — <code>{r['ticker']}</code>"
+                )
 
         if line_query is not None:
             closest_rungs = sorted(ladders, key=lambda r: abs(float(r["line"]) - line_query))
             best_rung = closest_rungs[0]
         else:
-            best_rung = max(ladders, key=lambda r: r.get("ev_edge", -999))
+            passing_rungs = [r for r in ladders if r.get("passes_live_gate")]
+            if passing_rungs:
+                best_rung = max(passing_rungs, key=lambda r: r.get("ev_edge", -999))
+            else:
+                in_band_rungs = [r for r in ladders if FAIR_PROB_MIN <= r.get("true_prob", 0.5) <= FAIR_PROB_MAX]
+                pool = in_band_rungs if in_band_rungs else ladders
+                best_rung = max(pool, key=lambda r: r.get("ev_edge", -999))
 
-    is_orderable = bool(best_rung)
+    # Hook in sim_logger (writes to its own sim_log.db, never touches picks.db)
+    try:
+        import sim_logger
+        sim_logger.log_ladder(
+            player=p_name, team=team_abbr, opp=opp_team, stat=stat_norm,
+            game_date=str(game_date)[:10], ladder=prob_ladder, kalshi_rungs=ladders,
+            inputs=confidence_inputs)
+    except Exception:
+        pass            # logging must never break a reply
+
+    # Only mark orderable if a Kalshi rung exists AND passes all 3 live gates (20-80% prob, positive-skill stat, >= +5pt post-fee edge)
+    has_open_market = bool(best_rung)
+    is_orderable = bool(best_rung and best_rung.get("passes_live_gate"))
     contract_side = "YES"
+    gate_status = "ACTIONABLE_PASS"
+    gate_note = ""
 
-    if is_orderable:
+    if has_open_market:
         ticker = best_rung["ticker"]
         entry_cents = best_rung.get("entry_cents", best_rung.get("yes_ask", 50))
         target_line = float(best_rung["line"])
@@ -290,6 +379,14 @@ def run_bridge_player_simulation(
         side = best_rung.get("picked_side", "OVER")
         contract_side = best_rung.get("contract_side", "YES")
         book_prob = round(entry_cents / 100.0, 4)
+        gate_status = best_rung.get("gate_status", "ACTIONABLE_PASS")
+        if not is_orderable:
+            if is_experimental_stat:
+                gate_note = "🧪 Experimental stat (PRA has +0.3% OOS skill) — shown for tracking only, no live bet."
+            elif not (FAIR_PROB_MIN <= true_prob <= FAIR_PROB_MAX):
+                gate_note = f"⏸ Gated: Fair prob {true_prob*100:.0f}% is outside the calibrated 20–80% range."
+            else:
+                gate_note = f"⏸ Pass (No Bet): {ev_edge:+.1f}% post-fee edge is below the +{MIN_EDGE_AFTER_FEES_PCT:.0f}% minimum gate."
     elif line_query is not None and line_query > 0:
         # User explicitly typed a line (e.g. /NBA Donovan Mitchell PTS 27.5): evaluate that specific threshold
         target_line = float(line_query)
@@ -305,8 +402,16 @@ def run_bridge_player_simulation(
         ev_edge = None
         ticker = "Projection only (no open Kalshi contract)"
         milestone_label = f"{target_line}"
+        if is_experimental_stat:
+            gate_status = "GATED:EXPERIMENTAL_STAT_PRA"
+            gate_note = "🧪 Experimental stat (PRA has +0.3% OOS skill) — projection only."
+        elif not (FAIR_PROB_MIN <= over_prob <= FAIR_PROB_MAX):
+            gate_status = f"GATED:PROB_{over_prob*100:.0f}%_OUTSIDE_20_80"
+            gate_note = f"⚠️ Fair OVER prob ({over_prob*100:.1f}%) is outside the calibrated 20–80% band."
+        else:
+            gate_status = "PROJECTION_ONLY"
     else:
-        # No Kalshi market and no user-specified line: show the probability ladder without inventing an artificial OVER/UNDER pick
+        # No Kalshi market and no user-specified line: show the calibrated 20-80% probability ladder
         center_rung = prob_ladder[min(1, len(prob_ladder) - 1)] if prob_ladder else {"line": round(proj_mean, 1), "prob_pct": 50.0, "label": f"{round(proj_mean, 1)}+"}
         target_line = float(center_rung["line"])
         true_prob = float(center_rung["prob_pct"]) / 100.0
@@ -317,29 +422,16 @@ def run_bridge_player_simulation(
         ev_edge = None
         ticker = "Projection only (no open Kalshi contract)"
         milestone_label = str(center_rung["label"])
+        gate_status = "GATED:EXPERIMENTAL_STAT_PRA" if is_experimental_stat else "PROJECTION_ONLY"
+        if is_experimental_stat:
+            gate_note = "🧪 Experimental stat (PRA has +0.3% OOS skill) — projection only."
 
-    real_kalshi_ticker = ticker if is_orderable else None
-    is_projection_only = not is_orderable
+    real_kalshi_ticker = ticker if has_open_market else None
+    is_projection_only = not has_open_market
 
     fair_cents = max(1, min(99, int(round(true_prob * 100.0))))
-    fee_margin = max(4, int(round(kalshi_fee_prob(true_prob) * 100.0)) + 3)
+    fee_margin = int(round(kalshi_fee_prob(true_prob) * 100.0)) + int(MIN_EDGE_AFTER_FEES_PCT)
     buy_below_cents = max(1, min(95, fair_cents - fee_margin))
-
-    confidence_inputs = {
-        "games_played": games_played,
-        "season_avg": round(raw_season_val, 2),
-        "prior_avg": round(prior_val, 2),
-        "prior_source": "prior_season" if player_prior is not None else "position",
-        "shrunk_avg": round(shrunk_season, 2),
-        "last5_avg": round(float(last5_val), 2) if last5_val is not None else None,
-        "minutes_season": round(season_min, 1),
-        "minutes_proj": round(proj_min, 1),
-        "home_away": loc_label,
-        "opp_team": opp_team or "N/A",
-        "opp_adj_pct": opp_adj_pct,
-        "out_teammates": out_teammates[:3],
-        "injury_adj_pct": injury_adj_pct,
-    }
 
     # 5. Optional correlated 2nd leg: ONLY a real ESPN teammate with a REAL open Kalshi ladder (ask > 5¢).
     active_teammates = athlete_espn.get("active_teammates") or []
@@ -414,6 +506,10 @@ def run_bridge_player_simulation(
         "coach_note": f"10k MC adjusted proj ({loc_label}, Opp {opp_adj_pct:+.1f}%) • {matchup}",
         "combo": combo_dict,
         "is_live_orderable": is_orderable,
+        "has_open_market": has_open_market,
+        "is_experimental": is_experimental_stat,
+        "gate_status": gate_status,
+        "gate_note": gate_note,
         "real_kalshi_ticker": real_kalshi_ticker,
         "is_projection_only": is_projection_only,
     }
@@ -421,13 +517,14 @@ def run_bridge_player_simulation(
     # 6. Sizing & Order Execution Resolution
     if not is_orderable:
         buy_ladder_str = " · ".join(f"{r['label']} ≤{r['buy_below_cents']}¢" for r in prob_ladder[:3])
+        status_msg = gate_note if gate_note else f"Projection only. Target entry prices (after fees + 5% min edge): {buy_ladder_str}"
         exec_res = {
-            "status": f"Projection only. Target entry prices (after fees): {buy_ladder_str}",
+            "status": status_msg,
             "ticker": ticker,
             "contracts": 0,
-            "limit_cents": None,
+            "limit_cents": entry_cents,
             "side": side,
-            "note": f"No open Kalshi contract — target entry: {buy_ladder_str}",
+            "note": status_msg,
         }
     elif not (sniper_on and live_mode) or real_kalshi_ticker is None or not (10 <= int(entry_cents or 0) <= 90):
         exec_res = {

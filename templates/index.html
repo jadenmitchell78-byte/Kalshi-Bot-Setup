@@ -744,6 +744,10 @@
       <iframe id="video-dock-iframe" src="about:blank" referrerpolicy="no-referrer" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen></iframe>
       <video id="video-dock-hls" controls playsinline autoplay style="display:none;position:absolute;top:0;left:0;width:100%;height:100%;background:#000;"></video>
     </div>
+    <div id="video-dock-helper" style="padding:6px 12px;background:#090E18;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;font-size:11px">
+      <span style="color:var(--muted)">💡 If video is blank in embedded player:</span>
+      <button class="btn" style="padding:4px 10px;font-size:10px;background:var(--cyan);color:#04131A;border-color:var(--cyan);font-weight:900" onclick="popoutStream()">↗ Open Direct Live Feed</button>
+    </div>
   </div>
 
   <!-- TAB 1: HOME (Live +EV Scanner & Correlated Copula Combos) -->
@@ -816,57 +820,69 @@
 
     function openQuantModal(playerName, sport, trueProb, edgePct, p10 = 20.1, p50 = 27.8, p90 = 35.8, line = 25.5) {
       haptic('medium');
-      document.getElementById('modal-prop-title').innerText = `${playerName} (${sport})`;
-      document.getElementById('modal-archetype-badge').innerText = `${sport} QUANT MC MODEL`;
-      document.getElementById('modal-p10').innerText = p10;
-      document.getElementById('modal-p50').innerText = p50;
-      document.getElementById('modal-p90').innerText = p90;
-      document.getElementById('modal-line').innerText = line;
-      document.getElementById('modal-trueprob').innerText = trueProb + '%';
-      document.getElementById('modal-pbar').style.width = Math.min(100, Math.max(10, parseFloat(trueProb) || 60)) + '%';
+      try {
+        const titleEl = document.getElementById('modal-prop-title');
+        if (titleEl) titleEl.innerText = `${playerName} (${sport})`;
+        const badgeEl = document.getElementById('modal-archetype-badge');
+        if (badgeEl) badgeEl.innerText = `${sport} QUANT MC MODEL`;
+        const p10El = document.getElementById('modal-p10');
+        if (p10El) p10El.innerText = p10;
+        const p50El = document.getElementById('modal-p50');
+        if (p50El) p50El.innerText = p50;
+        const p90El = document.getElementById('modal-p90');
+        if (p90El) p90El.innerText = p90;
+        const lineEl = document.getElementById('modal-line');
+        if (lineEl) lineEl.innerText = line;
+        const probEl = document.getElementById('modal-trueprob');
+        if (probEl) probEl.innerText = trueProb + '%';
+        const pbarEl = document.getElementById('modal-pbar');
+        if (pbarEl) pbarEl.style.width = Math.min(100, Math.max(10, parseFloat(trueProb) || 60)) + '%';
 
-      const canvas = document.getElementById('radarChart');
-      if (canvas) {
-        const ctx = canvas.getContext('2d');
-        if (radarChartInstance) {
-          radarChartInstance.destroy();
-        }
-        const edgeScore = Math.min(100, Math.max(20, Math.round(parseFloat(edgePct) * 12)));
-        const probScore = Math.min(100, Math.max(30, Math.round(parseFloat(trueProb))));
-
-        radarChartInstance = new Chart(ctx, {
-          type: 'radar',
-          data: {
-            labels: ['EV Edge', 'Confidence', 'Copula Synergy', 'Liquidity', 'Usage / Min'],
-            datasets: [{
-              label: `${playerName} Model Breakdown`,
-              data: [edgeScore, probScore, 82, 88, 91],
-              backgroundColor: 'rgba(16, 185, 129, 0.25)',
-              borderColor: '#10B981',
-              pointBackgroundColor: '#06B6D4',
-              pointBorderColor: '#fff',
-              borderWidth: 2,
-            }]
-          },
-          options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            scales: {
-              r: {
-                angleLines: { color: '#233047' },
-                grid: { color: '#233047' },
-                pointLabels: { color: '#94A3B8', font: { size: 10, weight: '700' } },
-                ticks: { display: false, min: 0, max: 100 }
-              }
-            },
-            plugins: {
-              legend: { display: false }
-            }
+        const canvas = document.getElementById('radarChart');
+        if (canvas && typeof Chart !== 'undefined') {
+          const ctx = canvas.getContext('2d');
+          if (radarChartInstance) {
+            try { radarChartInstance.destroy(); } catch (_) {}
           }
-        });
-      }
+          const edgeScore = Math.min(100, Math.max(20, Math.round(parseFloat(edgePct) * 12)));
+          const probScore = Math.min(100, Math.max(30, Math.round(parseFloat(trueProb))));
 
-      document.getElementById('quant-modal').classList.add('open');
+          radarChartInstance = new Chart(ctx, {
+            type: 'radar',
+            data: {
+              labels: ['EV Edge', 'Confidence', 'Copula Synergy', 'Liquidity', 'Usage / Min'],
+              datasets: [{
+                label: `${playerName} Model Breakdown`,
+                data: [edgeScore, probScore, 82, 88, 91],
+                backgroundColor: 'rgba(16, 185, 129, 0.25)',
+                borderColor: '#10B981',
+                pointBackgroundColor: '#06B6D4',
+                pointBorderColor: '#fff',
+                borderWidth: 2,
+              }]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              scales: {
+                r: {
+                  angleLines: { color: '#233047' },
+                  grid: { color: '#233047' },
+                  pointLabels: { color: '#94A3B8', font: { size: 10, weight: '700' } },
+                  ticks: { display: false, min: 0, max: 100 }
+                }
+              },
+              plugins: {
+                legend: { display: false }
+              }
+            }
+          });
+        }
+      } catch (err) {
+        console.warn('Radar modal notice:', err);
+      }
+      const modal = document.getElementById('quant-modal');
+      if (modal) modal.classList.add('open');
     }
 
     function closeQuantModal() {
@@ -905,6 +921,7 @@
     let lastSlipsSig = '';
     let lastPropsSig = '';
     let lastOpenSig = '';
+    let lastScoresSig = '';
     let currentLiveCash = 32.22;
     let bankrollPct = 1.00;
     let isSliderDragging = false;
@@ -937,6 +954,7 @@
     }
 
     function setCategory(cat) {
+      haptic('light');
       activeCategory = cat;
       const pills = document.querySelectorAll('#cat-bar .cat-pill');
       pills.forEach(btn => {
@@ -946,6 +964,7 @@
       });
       lastSlipsSig = '';
       lastPropsSig = '';
+      lastScoresSig = '';
       renderLiveScores(latestState.telemetry || latestState.games || []);
       renderHomeSlips();
       renderProps();
@@ -985,13 +1004,20 @@
     }
 
     function popoutStream() {
-      if (dockStreamsList && dockStreamsList[currentDockStreamIdx]) {
-        window.open(dockStreamsList[currentDockStreamIdx].embed_url, '_blank');
+      haptic('light');
+      let targetUrl = '';
+      if (dockStreamsList && dockStreamsList[currentDockStreamIdx] && dockStreamsList[currentDockStreamIdx].embed_url) {
+        targetUrl = dockStreamsList[currentDockStreamIdx].embed_url;
       } else {
         const iframe = document.getElementById('video-dock-iframe');
         if (iframe && iframe.src && iframe.src !== 'about:blank') {
-          window.open(iframe.src, '_blank');
+          targetUrl = iframe.src;
         }
+      }
+      if (targetUrl) {
+        window.open(targetUrl, '_blank', 'noopener,noreferrer');
+      } else {
+        showToast('No active stream URL to open.');
       }
     }
 
@@ -1076,16 +1102,22 @@
     }
 
     async function watchMatchStream(sport, label) {
+      haptic('medium');
       const dock = document.getElementById('persistent-video-dock');
       const titleEl = document.getElementById('video-dock-title');
-      dock.style.display = 'block';
+      if (dock) {
+        dock.style.display = 'block';
+        try { dock.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch (_) {}
+      }
       currentDockTitle = `[${sport}] ${label}`;
-      titleEl.innerText = `📺 Resolving live multi-slot streams: ${currentDockTitle}...`;
+      if (titleEl) {
+        titleEl.innerText = `📺 Resolving live multi-slot streams: ${currentDockTitle}...`;
+      }
 
       try {
         const resp = await fetch(`/api/stream?sport=${encodeURIComponent(sport)}&q=${encodeURIComponent(label)}`);
         const data = await resp.json();
-        if (data && data.embed_url) {
+        if (data && (data.embed_url || (data.streams && data.streams.length))) {
           dockStreamsList = (data.streams && data.streams.length > 0)
             ? data.streams
             : (data.slots && data.slots.length > 0 ? data.slots : [{ embed_url: data.embed_url, source: data.source, name: 'Slot 1: Main Feed' }]);
@@ -1101,12 +1133,17 @@
 
       const catMap = { NBA: 'basketball', WNBA: 'basketball', NFL: 'american-football', MLB: 'baseball', TENNIS: 'tennis', ESPORTS: 'other' };
       const cat = catMap[sport] || 'basketball';
+      const slugMap = { NBA: 'nba', WNBA: 'nba', NFL: 'nfl', MLB: 'mlb', NHL: 'nhl', TENNIS: 'tennis' };
+      const slug = slugMap[sport] || 'nba';
       dockStreamsList = [
-        { slot: 1, name: 'Slot 1: Streamed Main', source: 'main', embed_url: `https://streamed.su/watch/${cat}`, is_hls: false },
-        { slot: 2, name: 'Slot 2: Mirror Portal', source: 'mirror', embed_url: `https://streamed.pk/watch/${cat}`, is_hls: false },
-        { slot: 3, name: 'Slot 3: Backup ST', source: 'backup', embed_url: `https://streamed.st/watch/${cat}`, is_hls: false }
+        { slot: 1, name: 'Slot 1: TheTVApp Live Broadcast', source: 'tvapp', embed_url: `https://thetvapp.to/${slug}`, is_hls: false },
+        { slot: 2, name: 'Slot 2: Streamed Main Feed', source: 'main', embed_url: `https://streamed.su/watch/${cat}`, is_hls: false },
+        { slot: 3, name: 'Slot 3: Sportsurge Stream Hub', source: 'sportsurge', embed_url: `https://v2.sportsurge.net/`, is_hls: false }
       ];
       currentDockStreamIdx = 0;
+      renderSlotsBar();
+      setupStreamPlayer(dockStreamsList[0]);
+    }
       renderSlotsBar();
       setupStreamPlayer(dockStreamsList[0]);
     }
@@ -1139,11 +1176,17 @@
     }
 
     function switchTab(t) {
+      haptic('light');
       activeTab = t;
       ['home', 'props', 'open'].forEach(k => {
-        document.getElementById('tab-' + k).style.display = (k === t ? 'block' : 'none');
-        document.getElementById('nav-' + k).className = 'nav-btn' + (k === t ? ' active' : '');
+        const panel = document.getElementById('tab-' + k);
+        const btn = document.getElementById('nav-' + k);
+        if (panel) panel.style.display = (k === t ? 'block' : 'none');
+        if (btn) btn.className = 'nav-btn' + (k === t ? ' active' : '');
       });
+      if (t === 'props') renderProps();
+      else if (t === 'open') renderOpenSlips();
+      else if (t === 'home') renderHomeSlips();
     }
 
     function toggleLeg(ticker) {
@@ -1219,6 +1262,19 @@
       }
     }
 
+    function executeSlipById(slipId, sendTelegram) {
+      haptic('medium');
+      const allSlips = latestState.slips || [];
+      const s = allSlips.find(x => x.slip_id === slipId);
+      if (!s || !s.legs) {
+        showToast('Slip not found. Refreshing state...');
+        pullState();
+        return;
+      }
+      const tickers = s.legs.map(l => l.market_ticker);
+      submitPick6(sendTelegram, tickers);
+    }
+
     async function submitPick6(sendTelegram, customTickers) {
       const tickers = customTickers || selectedTickers;
       if (!tickers || tickers.length < 2) {
@@ -1244,14 +1300,20 @@
     }
 
     async function triggerAction(act) {
-      const resp = await fetch('/api/action', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ act })
-      });
-      const data = await resp.json();
-      if (data.msg) showToast(data.msg);
-      pullState();
+      haptic('medium');
+      try {
+        showToast(`Processing ${act}...`);
+        const resp = await fetch('/api/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ act })
+        });
+        const data = await resp.json();
+        if (data.msg) showToast(data.msg);
+        pullState();
+      } catch (err) {
+        showToast('Action notice: ' + (err.message || err));
+      }
     }
 
     function renderLiveScores(gamesList) {
@@ -1300,7 +1362,7 @@
         const awayWin = isFinal && g.away_score > g.home_score;
         const homeWin = isFinal && g.home_score > g.away_score;
         const sportTag = (g.sport || 'NBA').toUpperCase();
-        const queryTerm = `${g.away_team} ${g.home_team}`.replace(/'/g, '');
+        const queryTerm = `${g.away_team} ${g.home_team}`.replace(/['"\\]/g, ' ');
 
         return `
           <div class="score-card ${isLive ? 'is-live' : ''}" onclick="watchMatchStream('${sportTag}', '${queryTerm}')">
@@ -1346,9 +1408,8 @@
           : '⚡ ACTION: TAKE (MODERATE EDGE) ⚡';
         const boostSign = s.copula_boost_pct >= 0 ? '+' : '';
         const corrStatus = s.cannibalized ? 'Negative Correlation Warning' : 'Positive Correlation Verified';
-        const tickersJson = JSON.stringify(s.legs.map(l => l.market_ticker)).replace(/"/g, '&quot;');
         const primaryLeg = (s.legs && s.legs[0]) ? s.legs[0] : { sport: 'NBA', player_name: 'Live Game' };
-        const safeLabel = (primaryLeg.player_name || 'Live').replace(/'/g, '');
+        const safeLabel = (primaryLeg.player_name || 'Live').replace(/['"\\]/g, ' ');
 
         const legsHtml = s.legs.map((l, idx) => `
           <div class="leg-item">
@@ -1381,8 +1442,8 @@
               </div>
             </div>
             <div class="action-row" style="grid-template-columns: 1fr 1fr 1fr 1fr">
-              <button class="btn btn-emerald" onclick="submitPick6(false, ${tickersJson})">⚡ Execute</button>
-              <button class="btn btn-amber" onclick="submitPick6(true, ${tickersJson})">📲 Telegram</button>
+              <button class="btn btn-emerald" onclick="executeSlipById('${s.slip_id}', false)">⚡ Execute</button>
+              <button class="btn btn-amber" onclick="executeSlipById('${s.slip_id}', true)">📲 Telegram</button>
               <button class="btn btn-indigo" onclick="openQuantModal('${safeLabel}', '${primaryLeg.sport}', ${(s.copula_prob_pct || 65)}, ${s.ev_pct})">📊 Radar</button>
               <button class="btn" style="color:var(--cyan);border-color:var(--cyan)" onclick="watchMatchStream('${primaryLeg.sport}', '${safeLabel}')">📺 Watch</button>
             </div>
@@ -1406,7 +1467,7 @@
         const isSel = selectedTickers.includes(p.market_ticker);
         const bkPct = (p.book_prob * 100).toFixed(1);
         const mcPct = (p.mc_true_prob * 100).toFixed(1);
-        const safeName = (p.player_name || p.sport).replace(/'/g, '');
+        const safeName = (p.player_name || p.sport).replace(/['"\\]/g, ' ');
         return `
           <div class="prop-card ${isSel ? 'selected' : ''}" onclick="toggleLeg('${p.market_ticker}')">
             <div style="display:flex;justify-content:space-between;align-items:center">
@@ -1530,8 +1591,13 @@
         const btnMode = document.getElementById('btn-mode');
         btnMode.innerText = `🎛 Mode: ${st.mode || 'SIM'}`;
 
-        // Continually render live match scores and streams
-        renderLiveScores(d.telemetry || d.games || []);
+        // Continually render live match scores and streams with diff guard
+        const scoresData = d.telemetry || d.games || [];
+        const scoresSig = JSON.stringify(scoresData.map(g => [g.away_team, g.home_team, g.away_score, g.home_score, g.status_label, g.is_live])) + '|' + activeCategory;
+        if (scoresSig !== lastScoresSig) {
+          lastScoresSig = scoresSig;
+          renderLiveScores(scoresData);
+        }
 
         // Phase 1 Diff Guard: Only re-render lists whose payload actually changed, never touching #persistent-video-dock
         const slipsSig = JSON.stringify(d.slips || []) + '|' + activeCategory;

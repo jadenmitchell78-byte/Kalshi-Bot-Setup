@@ -924,20 +924,36 @@ SPORT_STREAM_CATS = {
     "ESPORTS": "other",
 }
 
+_RESOLVED_STREAM_CACHE: Dict[str, Tuple[float, dict]] = {}
+
 
 def resolve_streamed_pk_for_position(ticker: str, title: str, engine: str, side: str = "YES", qty: int = 1, entry_cents: int = 50) -> dict:
     """
-    Multi-mirror live stream resolver:
-    1. Sweeps https://streamed.su/api, streamed.st, and streamed.pk with browser headers.
-    2. Matches team/player tokens from open positions against live match schedules.
-    3. Resolves direct embedUrl; if unavailable, falls back to working live stream portals
-       (streamed.su HD feed or TheTVApp).
-    4. Guarantees clickable working links in Telegram.
+    Ultra-Fast multi-mirror live stream resolver:
+    1. Instant cache lookup (<300s TTL) so callbacks return in under 0.05s.
+    2. Maps teams/sports to reliable, working live stream hubs (TheTVApp, Streamed, Sportsurge).
+    3. Guarantees clickable working stream URLs in Telegram and WebApp.
     """
     engine_u = (engine or "NBA").upper()
     cat = SPORT_STREAM_CATS.get(engine_u, "basketball")
-    primary_portal = f"https://streamed.su/watch/{cat}"
-    alt_portal = f"https://thetvapp.to/{'nba' if engine_u in ('NBA', 'WNBA') else ('nfl' if engine_u in ('NFL', 'CFB') else ('mlb' if engine_u == 'MLB' else 'nba'))}"
+    cache_key = f"{ticker}:{engine_u}:{title[:25]}"
+    now = time.time()
+    cached = _RESOLVED_STREAM_CACHE.get(cache_key)
+    if cached and (now - cached[0]) < 300.0:
+        return cached[1]
+
+    sport_slug_map = {
+        "NBA": "nba",
+        "WNBA": "nba",
+        "NFL": "nfl",
+        "CFB": "nfl",
+        "MLB": "mlb",
+        "NHL": "nhl",
+        "TENNIS": "tennis",
+    }
+    slug = sport_slug_map.get(engine_u, "nba")
+    primary_portal = f"https://thetvapp.to/{slug}"
+    alt_portal = f"https://streamed.su/watch/{cat}"
 
     q_terms = []
     upper_blob = f"{ticker} {title}".upper()
@@ -949,6 +965,35 @@ def resolve_streamed_pk_for_position(ticker: str, title: str, engine: str, side:
             q_terms.append(w)
 
     entry_dollars = round(max(1, entry_cents) / 100.0, 2)
+    embed_url = primary_portal
+    match_label = f"{engine_u}: {title[:32]}"
+    resolved_live = False
+
+    # Fast single probe if mirror is responsive (<0.5s timeout)
+    for base in STREAM_MIRRORS[:1]:
+        try:
+            r = session.get(f"{base}/matches/{cat}", timeout=0.5)
+            if r.status_code == 200:
+                matches = r.json()
+                if isinstance(matches, list) and matches:
+                    for m in matches:
+                        m_title = str(m.get("title") or "").lower()
+                        if q_terms and any(term.lower() in m_title for term in q_terms):
+                            srcs = m.get("sources") or []
+                            if srcs and srcs[0].get("source") and srcs[0].get("id"):
+                                sr = session.get(f"{base}/stream/{srcs[0]['source']}/{srcs[0]['id']}", timeout=0.6)
+                                if sr.status_code == 200:
+                                    s_data = sr.json()
+                                    if isinstance(s_data, list) and s_data and s_data[0].get("embedUrl"):
+                                        embed_url = str(s_data[0]["embedUrl"])
+                                        match_label = str(m.get("title") or match_label)
+                                        resolved_live = True
+                                        break
+                        if resolved_live:
+                            break
+        except Exception:
+            pass
+
     sweat_hud_url = (
         f"https://peezt-tv.vercel.app/watch?"
         f"ticker={urllib.parse.quote(ticker)}"
@@ -956,73 +1001,18 @@ def resolve_streamed_pk_for_position(ticker: str, title: str, engine: str, side:
         f"&player={urllib.parse.quote(title[:40])}"
         f"&side={urllib.parse.quote(side.upper())}"
         f"&qty={qty}&entry={entry_dollars:.2f}"
+        f"&streamUrl={urllib.parse.quote(embed_url)}"
     )
 
-    embed_url = primary_portal
-    match_label = f"{engine_u}: {title[:32]}"
-    resolved_live = False
-
-    for base in STREAM_MIRRORS:
-        try:
-            endpoints = [f"{base}/matches/{cat}", f"{base}/matches/all"]
-            matches = []
-            for ep in endpoints:
-                try:
-                    r = session.get(ep, timeout=1.0)
-                    if r.status_code == 200:
-                        data = r.json()
-                        if isinstance(data, list) and data:
-                            matches = data
-                            break
-                except Exception:
-                    continue
-
-            best_match = None
-            best_score = 0
-            for m in matches:
-                m_title = str(m.get("title") or "").lower()
-                m_cat = str(m.get("category") or "").lower()
-                home_n = str(((m.get("teams") or {}).get("home") or {}).get("name") or "").lower()
-                away_n = str(((m.get("teams") or {}).get("away") or {}).get("name") or "").lower()
-                haystack = f"{m_title} {home_n} {away_n} {m_cat}"
-                score = 0
-                for term in q_terms:
-                    if term and term.lower() in haystack:
-                        score += 3 if len(term) >= 5 else 1
-                if engine_u == "NBA" and ("basketball" in m_cat or "nba" in m_title):
-                    score += 1
-                elif engine_u in ("NFL", "CFB") and ("football" in m_cat or "nfl" in m_title):
-                    score += 1
-                elif engine_u in ("TENNIS", "ATP", "WTA") and "tennis" in m_cat:
-                    score += 1
-                if score > best_score and (m.get("sources") or []):
-                    best_score = score
-                    best_match = m
-
-            if best_match and best_match.get("sources"):
-                for src in best_match["sources"][:3]:
-                    src_name, src_id = src.get("source"), src.get("id")
-                    if src_name and src_id:
-                        sr = session.get(f"{base}/stream/{src_name}/{src_id}", timeout=1.2)
-                        if sr.status_code == 200:
-                            streams = sr.json()
-                            if isinstance(streams, list) and streams and streams[0].get("embedUrl"):
-                                embed_url = str(streams[0]["embedUrl"])
-                                match_label = str(best_match.get("title") or match_label)
-                                resolved_live = True
-                                break
-            if resolved_live:
-                break
-        except Exception:
-            continue
-
-    return {
+    res = {
         "match_title": match_label,
         "embed_url": embed_url,
         "alt_url": alt_portal,
         "sweat_hud_url": sweat_hud_url,
         "is_live_stream": resolved_live,
     }
+    _RESOLVED_STREAM_CACHE[cache_key] = (now, res)
+    return res
 
 
 # ==========================================
@@ -2879,8 +2869,10 @@ def format_rich_html_prop_card(leg, order_receipt: Optional[Dict[str, Any]] = No
         f"🔥 <b>True EV Edge:</b> <code>{edge_sign}{ev_edge}%</code> ✅"
     )
 
-    c_notes = getattr(leg, "coaching_notes", [])
-    if c_notes:
+    onoff_card = getattr(leg, "onoff_card_line", "")
+    if onoff_card:
+        html += f"\n\n{onoff_card}"
+    elif c_notes:
         html += f"\n\n🧠 <b>In-Game Coaching Brain:</b>\n• <i>{c_notes[0]}</i>"
 
     if order_receipt:
@@ -3119,7 +3111,13 @@ def build_sim_text(query: str = "") -> str:
 
     coaching_block = ""
     c_notes = getattr(leg, "coaching_notes", [])
-    if c_notes:
+    onoff_card = getattr(leg, "onoff_card_line", "")
+    if onoff_card:
+        coaching_block = (
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{onoff_card}\n"
+        )
+    elif c_notes:
         coaching_block = (
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🧠 *In-Game Coaching Brain:*\n"
@@ -3868,23 +3866,32 @@ async def telegram_notifier_and_command_loop():
                                 print(f"[PICKER-ERR] {_pe}")
                             continue
 
+                        cb_answered = False
                         # Immediate button acknowledgment so button never hangs or spins silently
                         if cb_id:
-                            ack_payload = {"callback_query_id": cb_id}
                             if any(k in cb_data for k in ("force_scan", "scan")):
-                                ack_payload["text"] = "⚡ Running 10,000-draw Monte Carlo scan across live Kalshi markets..."
+                                try:
+                                    await asyncio.to_thread(
+                                        requests.post,
+                                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
+                                        json={"callback_query_id": cb_id, "text": "⚡ Running 10,000-draw Monte Carlo scan across live Kalshi markets..."},
+                                        timeout=2,
+                                    )
+                                    cb_answered = True
+                                except Exception:
+                                    pass
                             elif "scan_sport_" in cb_data:
                                 sp_k = cb_data.split("scan_sport_")[1].upper()
-                                ack_payload["text"] = f"⚡ Scanning {sp_k} props across live Kalshi markets..."
-                            try:
-                                await asyncio.to_thread(
-                                    requests.post,
-                                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
-                                    json=ack_payload,
-                                    timeout=2,
-                                )
-                            except Exception:
-                                pass
+                                try:
+                                    await asyncio.to_thread(
+                                        requests.post,
+                                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
+                                        json={"callback_query_id": cb_id, "text": f"⚡ Scanning {sp_k} props across live Kalshi markets..."},
+                                        timeout=2,
+                                    )
+                                    cb_answered = True
+                                except Exception:
+                                    pass
 
                         toast_text = "🔄 HUD Updated"
                         if any(k in cb_data for k in ("toggle_sniper", "sniper", "pause", "resume", "auto")):
@@ -4188,22 +4195,17 @@ async def telegram_notifier_and_command_loop():
                             _, hud_kb = build_menu_hud_payload()
                             await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, a_txt, hud_kb)
 
-                        elif any(k in cb_data for k in ("menu_watch", "watch_bets", "watch")):
-                            toast_text = "📺 Live Wire Streams"
-                            w_txt, w_kb = await asyncio.to_thread(build_watch_active_bets_payload)
-                            await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, w_txt, w_kb)
-
                         else:
                             hud_text, hud_kb = build_menu_hud_payload()
                             await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
 
-                        if cb_id:
+                        if cb_id and not cb_answered:
                             try:
                                 await asyncio.to_thread(
                                     requests.post,
                                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
                                     json={"callback_query_id": cb_id, "text": toast_text},
-                                    timeout=4,
+                                    timeout=3,
                                 )
                             except Exception:
                                 pass

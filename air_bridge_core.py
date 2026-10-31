@@ -151,39 +151,47 @@ def _leg_block(name: str, team: str, side: str, line: Any, stat: str, matchup: s
                buy_below_cents: Optional[int] = None,
                prob_ladder_str: str = "",
                proj_mean: Any = None,
-               buy_ladder_str: str = "") -> str:
+               buy_ladder_str: str = "",
+               is_orderable: bool = False,
+               is_experimental: bool = False,
+               gate_note: str = "") -> str:
     edge_s = f" | {edge:+.1f}% Fee-Adj Edge" if edge is not None else ""
     fair = f"{float(true_prob):.0f}" if true_prob is not None else "?"
+    stat_lbl = f"{stat} (Experimental)" if is_experimental else str(stat)
     m_txt = str(matchup or "")
     if not m_txt or "Matchup" in m_txt or m_txt.endswith(" Game"):
         m_txt = "Next game: schedule not posted yet"
     try:
-        real_price = ask is not None and float(ask) > 5 and edge is not None
+        has_quote = ask is not None and float(ask) > 5 and edge is not None
     except (TypeError, ValueError):
-        real_price = False
-    if real_price:
+        has_quote = False
+    buy_lim = buy_below_cents if buy_below_cents is not None else max(1, int(round(float(true_prob or 50.0) - 8)))
+    if has_quote and is_orderable:
         icon = "✅"
-        headline = f"{html.escape(str(name))} ({html.escape(str(team))}) — {side} {line} {stat}"
-        price_txt = f"{ask}¢ Ask  <i>(Fair Value: {fair}¢{edge_s})</i>"
+        headline = f"{html.escape(str(name))} ({html.escape(str(team))}) — {side} {line} {html.escape(stat_lbl)}"
+        price_txt = f"{ask}¢ Ask  <i>(Fair Value: {fair}¢{edge_s} ≥ +5% Gate)</i>"
+    elif has_quote and not is_orderable:
+        icon = "🧪" if is_experimental else "⏸"
+        headline = f"{html.escape(str(name))} ({html.escape(str(team))}) — {side} {line} {html.escape(stat_lbl)}"
+        price_txt = f"{ask}¢ Ask  <i>(Fair: {fair}¢{edge_s} — Pass, need ≤{buy_lim}¢ for +5% edge)</i>"
     elif str(side).upper() == "PROJECTION":
-        icon = "📊"
+        icon = "🧪" if is_experimental else "📊"
         mean_lbl = f" (Proj Mean: {proj_mean})" if proj_mean is not None else ""
-        headline = f"{html.escape(str(name))} ({html.escape(str(team))}) — {stat} Distribution{mean_lbl}"
+        headline = f"{html.escape(str(name))} ({html.escape(str(team))}) — {html.escape(stat_lbl)} Distribution{mean_lbl}"
         if buy_ladder_str:
-            price_txt = f"<i>Projection only (no open market). Buy-below targets: {buy_ladder_str}</i>"
+            price_txt = f"<i>Projection only (no open market). +5% Edge Buy-Below: {buy_ladder_str}</i>"
         else:
-            buy_lim = buy_below_cents if buy_below_cents is not None else max(1, int(round(float(true_prob or 50.0) - 6)))
-            price_txt = f"<i>Projection only. Worth buying below ~{buy_lim}¢ if a market opens.</i>"
+            price_txt = f"<i>Projection only. Worth buying below ~{buy_lim}¢ (+5% post-fee edge) if a market opens.</i>"
     else:
-        icon = "📊"
-        headline = f"{html.escape(str(name))} ({html.escape(str(team))}) — {side} {line} {stat}"
-        buy_lim = buy_below_cents if buy_below_cents is not None else max(1, int(round(float(true_prob or 50.0) - 6)))
-        price_txt = f"<i>Projection only (fair {fair}¢). Worth buying below ~{buy_lim}¢ if a market opens.</i>"
-    ladder_line = f"\n📈 <b>Prob Ladder ({html.escape(str(stat))}):</b> {prob_ladder_str}" if prob_ladder_str else ""
+        icon = "🧪" if is_experimental else "📊"
+        headline = f"{html.escape(str(name))} ({html.escape(str(team))}) — {side} {line} {html.escape(stat_lbl)}"
+        price_txt = f"<i>Projection only (fair {fair}¢). Worth buying below ~{buy_lim}¢ (+5% post-fee edge) if a market opens.</i>"
+    ladder_line = f"\n📈 <b>Calibrated Ladder (20–80% {html.escape(str(stat))}):</b> {prob_ladder_str}" if prob_ladder_str else ""
+    gate_line = f"\n🛡 <b>Gate:</b> <i>{html.escape(gate_note)}</i>" if gate_note else ""
     return (
         f"{icon} <b>{headline}</b>\n"
         f"🏟 <i>{html.escape(m_txt)}</i>{ladder_line}\n"
-        f"🏷 <b>Kalshi Price:</b> {price_txt}"
+        f"🏷 <b>Kalshi Price:</b> {price_txt}{gate_line}"
     )
 
 
@@ -192,10 +200,13 @@ def format_casual_slip_card(sport: str, result: Dict[str, Any], bankroll: float 
     exec_res = result.get("exec", {})
     combo = sim.get("combo") or {}
     orderable = bool(sim.get("is_live_orderable"))
+    has_open_market = bool(sim.get("has_open_market"))
+    is_experimental = bool(sim.get("is_experimental")) or str(sim.get("stat", "")).upper() == "PRA"
+    gate_note = str(sim.get("gate_note") or "")
 
     ask1 = sim.get("limit_cents")
     tp1 = sim.get("true_prob", 50.0)
-    ev1 = sim.get("ev_edge") if orderable else None
+    ev1 = sim.get("ev_edge") if has_open_market else None
     buy_below = sim.get("buy_below_cents")
     prob_ladder = sim.get("prob_ladder") or result.get("prob_ladder") or []
     prob_ladder_str = str(sim.get("prob_ladder_str") or result.get("prob_ladder_str") or "")
@@ -207,6 +218,7 @@ def format_casual_slip_card(sport: str, result: Dict[str, Any], bankroll: float 
         sim.get("line", ""), sim.get("stat", ""), sim.get("matchup", ""),
         ask1, tp1, ev1, buy_below_cents=buy_below, prob_ladder_str=prob_ladder_str,
         proj_mean=sim.get("mean"), buy_ladder_str=buy_ladder_str,
+        is_orderable=orderable, is_experimental=is_experimental, gate_note=gate_note,
     )
 
     legs_txt = leg1
@@ -275,22 +287,37 @@ def format_casual_slip_card(sport: str, result: Dict[str, Any], bankroll: float 
         stake = max(1.00, round(bankroll * 0.10, 2))
         payout = round(stake / joint, 2)
         stake_section = f"💵 <b>${stake:.2f} ➡️ Wins ${payout:.2f}</b>  <i>({_prob_to_american(joint)})</i>\n"
-        status = f"🟢 <code>{html.escape(str(sim.get('real_kalshi_ticker')))}</code>"
+        status = f"🟢 <code>{html.escape(str(sim.get('real_kalshi_ticker')))}</code> (Passes 20–80% &amp; +5% Edge Gate)"
         live_note = str(exec_res.get("status", ""))
         if live_note:
             status += f"\n   <i>{html.escape(live_note)}</i>"
         contract_note = str(sim.get("real_kalshi_ticker"))
         hit_rate_label = f"Hit Rate ({side_u} {sim.get('line', '')})"
+    elif has_open_market and sim.get("real_kalshi_ticker"):
+        header_banner = (
+            f"🧪 <b>PEEZY EXPERIMENTAL // {sport.upper()} (PRA)</b>"
+            if is_experimental
+            else f"⏸ <b>PEEZY MARKET PASS // {sport.upper()}</b>"
+        )
+        stake_section = ""  # Hide stake/payout when gated (< +5% post-fee edge or outside 20-80%)
+        buy_lim = buy_below if buy_below is not None else max(1, int(round(float(tp1 or 50.0) - 8)))
+        status = f"⏸ <code>{html.escape(str(sim.get('real_kalshi_ticker')))}</code> — {html.escape(gate_note or f'Need ≤{buy_lim}¢ for +5% edge')}"
+        contract_note = f"{sim.get('real_kalshi_ticker')} (Logged to picks.db — Gated Pass)"
+        hit_rate_label = f"Hit Rate ({side_u} {sim.get('line', '')})"
     else:
-        header_banner = f"📊 <b>PEEZY PROJECTION // {sport.upper()}</b>"
+        header_banner = (
+            f"🧪 <b>PEEZY EXPERIMENTAL // {sport.upper()} (PRA)</b>"
+            if is_experimental
+            else f"📊 <b>PEEZY PROJECTION // {sport.upper()}</b>"
+        )
         stake_section = ""  # Hide stake/payout when no Kalshi contract is open
-        buy_lim = buy_below if buy_below is not None else max(1, int(round(float(tp1 or 50.0) - 6)))
+        buy_lim = buy_below if buy_below is not None else max(1, int(round(float(tp1 or 50.0) - 8)))
         if side_u == "PROJECTION" and buy_ladder_str:
-            status = f"📋 Projection only — target buy-below prices: {buy_ladder_str}"
+            status = f"📋 Projection only — +5% post-fee buy-below targets: {buy_ladder_str}"
             contract_note = f"None — projection only ({buy_ladder_str})"
             hit_rate_label = f"Center Rung (> {sim.get('line', '')})"
         else:
-            status = f"📋 Projection only — worth buying {side_u} {sim.get('line', '')} below ~{buy_lim}¢ if a market opens"
+            status = f"📋 Projection only — worth buying {side_u} {sim.get('line', '')} below ~{buy_lim}¢ (+5% post-fee edge) if a market opens"
             contract_note = f"None — projection only (fair {float(tp1):.0f}¢, buy ≤ {buy_lim}¢)"
             hit_rate_label = f"Hit Rate ({side_u} {sim.get('line', '')})"
 
