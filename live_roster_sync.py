@@ -217,6 +217,8 @@ def get_active_espn_rosters(sport: str = "NBA") -> Dict[str, Dict[str, Any]]:
                 stats_list = team_entry.get("statistics", [])
                 for stat_block in stats_list:
                     for ath in stat_block.get("athletes", []):
+                        if ath.get("didNotPlay") or "DNP" in str(ath.get("reason", "")).upper() or ath.get("ejected"):
+                            continue
                         athlete_obj = ath.get("athlete", {})
                         d_name = athlete_obj.get("displayName")
                         if d_name and d_name not in team_athletes:

@@ -113,6 +113,7 @@ ARCHETYPE_WEIGHTS = _root_spb.ARCHETYPE_WEIGHTS
 assign_archetype = _root_spb.assign_archetype
 NFL_ARCHETYPE_WEIGHTS = _root_spb.NFL_ARCHETYPE_WEIGHTS
 assign_nfl_archetype = _root_spb.assign_nfl_archetype
+filter_active_players = _root_spb.filter_active_players
 ESPNSyncEngine = _root_spb.ESPNSyncEngine
 ESPNNFLSyncEngine = _root_spb.ESPNNFLSyncEngine
 redistribute_team_usage = _root_spb.redistribute_team_usage
