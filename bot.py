@@ -1141,15 +1141,15 @@ def build_menu_hud_payload(show_slider: Optional[bool] = None, show_scan_panel: 
     if scan_panel_active:
         kb_rows.append([
             {"text": "🏀 NBA Props", "callback_data": "scan_sport_nba"},
-            {"text": "🏈 NFL / CFB", "callback_data": "scan_sport_nfl"},
+            {"text": "🏈 NFL Props", "callback_data": "scan_sport_nfl"},
         ])
         kb_rows.append([
+            {"text": "🏈 Live NFL ATD", "callback_data": "atd_refresh_board"},
             {"text": "🎾 Tennis", "callback_data": "scan_sport_tennis"},
-            {"text": "⚾ MLB Props", "callback_data": "scan_sport_mlb"},
         ])
         kb_rows.append([
+            {"text": "⚾ MLB Props", "callback_data": "scan_sport_mlb"},
             {"text": "🏀 WNBA", "callback_data": "scan_sport_wnba"},
-            {"text": "🎮 Esports", "callback_data": "scan_sport_esports"},
         ])
         kb_rows.append([
             {"text": "⚡ All-Slate Scan", "callback_data": "scan_sport_all"},
@@ -1159,11 +1159,11 @@ def build_menu_hud_payload(show_slider: Optional[bool] = None, show_scan_panel: 
     kb_rows.extend([
         [
             {"text": "⚡ Force Scan", "callback_data": "menu_force_scan"},
-            {"text": "🔍 Scan by Sport", "callback_data": "menu_scan_options"},
+            {"text": "🏈 Live NFL ATD", "callback_data": "atd_refresh_board"},
         ],
         [
             {"text": "🛠️ Build Custom Combo", "callback_data": "menu_build_combo"},
-            {"text": "📊 Status & Exposure", "callback_data": "menu_status"},
+            {"text": "🔍 Scan by Sport", "callback_data": "menu_scan_options"},
         ],
         [
             {"text": "📊 Analytics HUD", "callback_data": "menu_analytics"},
@@ -3530,6 +3530,57 @@ def build_simsettle_report() -> str:
     return "\n".join(res_lines)
 
 
+def sync_telegram_bot_commands() -> Tuple[bool, str]:
+    """
+    Registers the full command directory with Telegram via setMyCommands API
+    so that tapping '/' or the 'Menu' button in Telegram natively autocompletes
+    all available commands with clear, categorized descriptions.
+    """
+    commands = [
+        {"command": "menu", "description": "Live AuraScan HUD, telemetry & quick-action deck"},
+        {"command": "start", "description": "Welcome screen & telemetry HUD"},
+        {"command": "atd", "description": "Live NFL Anytime Touchdown & RedZone threat board"},
+        {"command": "atd_odds", "description": "Hot-reload/inject live sportsbook ATD lines"},
+        {"command": "nba", "description": "Scan NBA props (10k Monte Carlo)"},
+        {"command": "nfl", "description": "Scan NFL props (Passing, Rushing, Receiving, TDs)"},
+        {"command": "tennis", "description": "Scan Tennis match/set props & sim matchups"},
+        {"command": "mlb", "description": "Scan MLB props (Strikeouts, Hits, HR)"},
+        {"command": "scan", "description": "Force 10k Monte Carlo scan across active slates"},
+        {"command": "livesim", "description": "Live NBA slate telemetry & Copula combos"},
+        {"command": "sim", "description": "10k Monte Carlo simulation on any specific prop"},
+        {"command": "slip", "description": "Joint Gaussian Copula parlay evaluator"},
+        {"command": "build", "description": "Interactive manual slip builder"},
+        {"command": "sniper", "description": "Arm or disarm autonomous order sniper (on/off)"},
+        {"command": "mode", "description": "Toggle Live Real-Money vs Simulation mode"},
+        {"command": "bal", "description": "Check live Kalshi cash balance & session PnL"},
+        {"command": "cap", "description": "Adjust bankroll allocation cap percentage"},
+        {"command": "open", "description": "View active positions, HWM & streaming telemetry"},
+        {"command": "pnl", "description": "View settled PnL, Win-Loss-Push & ROI report"},
+        {"command": "ban", "description": "Ban a player prop from automated slips"},
+        {"command": "unban", "description": "Remove ban on a player prop"},
+        {"command": "bans", "description": "List all active prop bans in bans.db"},
+        {"command": "record", "description": "View historical hit/miss record on a prop"},
+        {"command": "leg", "description": "Log or grade a tracked leg result"},
+        {"command": "clear_locks", "description": "Flush ticker cooldowns & idempotency locks"},
+        {"command": "audit", "description": "10k MC calibration, 50/50 symmetry & Cholesky audit"},
+        {"command": "analytics", "description": "Quant calibration, Copula boost & telemetry"},
+        {"command": "ports", "description": "Sweat HUD port (8080) & web server links"},
+        {"command": "watch", "description": "Live streamed.su & Sweat HUD video streams"},
+        {"command": "push", "description": "Push all code updates to GitHub repositories"},
+        {"command": "sync_commands", "description": "Sync all commands directly with Telegram API"},
+        {"command": "help", "description": "Full command directory & quant user guide"},
+    ]
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setMyCommands"
+    try:
+        resp = requests.post(url, json={"commands": commands}, timeout=8)
+        if resp.status_code == 200 and resp.json().get("ok"):
+            return True, f"Successfully registered {len(commands)} commands with Telegram API."
+        else:
+            return False, f"Telegram API notice ({resp.status_code}): {resp.text[:120]}"
+    except Exception as e:
+        return False, f"Network exception: {e}"
+
+
 def build_help_commands_report() -> str:
     """Comprehensive command directory for /help."""
     return (
@@ -3549,13 +3600,16 @@ def build_help_commands_report() -> str:
         "• `/bal` — Verify live Kalshi cash balance, signer status, and session PnL\n"
         "• `/ports` (or `/web`) — View mobile Sweat HUD port (8080) & local/network URLs\n"
         "• `/clear_locks` — Flush all ticker cooldowns and idempotency locks\n"
-        "• `/push` — Synchronize code & deploy updates to GitHub\n\n"
+        "• `/push` — Synchronize code & deploy updates to GitHub\n"
+        "• `/sync_commands` — Force sync all bot commands with Telegram's popup menu\n\n"
         "🔍 *MANUAL SPORT SCANS (10,000 MC DRAWS):*\n"
         "• `/nba` — Scan NBA player props (Points, Rebounds, Assists, 3PT, PRA)\n"
         "  _Usage:_ `/nba` or `/nba LeBron James O25.5 PTS`\n"
         "• `/livesim` (or `/combos`) — Live NBA Slate telemetry, rotation checks & Copula combos\n"
         "• `/nfl` (or `/cfb`) — Scan NFL & CFB props (Passing, Rushing, Receiving, TDs)\n"
         "  _Usage:_ `/nfl` or `/nfl Mahomes O274.5 PASS YDS`\n"
+        "• `/atd` — Live NFL Anytime Touchdown drive predictor & front-running anticipatory trigger\n"
+        "• `/atd_odds` — Hot-reload sportsbook ATD lines (`/atd_odds Hunt -115, Steele +550` or `/atd_odds fetch kc`)\n"
         "• `/tennis` (or `/atp`, `/wta`) — Scan Tennis match & set props or simulate matchups\n"
         "  _Usage:_ `/tennis` (scan board) or `/tennis Sinner vs Alcaraz HARD` (matchup sim)\n"
         "• `/mlb` — Scan MLB player props (Strikeouts, Hits, HR)\n"
@@ -3852,6 +3906,11 @@ async def telegram_notifier_and_command_loop():
         pass
 
     await asyncio.to_thread(discover_telegram_chat_id)
+    cmd_ok, cmd_msg = await asyncio.to_thread(sync_telegram_bot_commands)
+    if cmd_ok:
+        print(f"[TELEGRAM] ✅ {cmd_msg}")
+    else:
+        print(f"[TELEGRAM] ℹ️ {cmd_msg}")
     if not TELEGRAM_CHAT_ID:
         print(
             f"[TELEGRAM] 📲 Send /menu or /start to @{bot_username} in Telegram so the bot can link your Chat ID and push alerts!"
@@ -4254,6 +4313,19 @@ async def telegram_notifier_and_command_loop():
                             o_txt, o_kb = await asyncio.to_thread(build_open_positions_report)
                             await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, o_txt, o_kb)
 
+                        elif "atd_refresh_" in cb_data:
+                            toast_text = "🏈 Refreshing Live NFL ATD..."
+                            try:
+                                import live_nfl_atd_engine
+                                g_id = cb_data.split("atd_refresh_")[1]
+                                atd_html, atd_kb = await asyncio.to_thread(
+                                    live_nfl_atd_engine.scan_live_nfl_atd_board,
+                                    None if g_id in ("live", "board", "") else g_id
+                                )
+                                await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, atd_html, atd_kb, "HTML")
+                            except Exception as atd_cb_err:
+                                await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, f"⚠️ Error: {atd_cb_err}", None)
+
                         elif any(k in cb_data for k in ("menu_analytics", "analytics")):
                             toast_text = "📊 Quant Analytics HUD"
                             a_txt = await asyncio.to_thread(build_analytics_report)
@@ -4312,6 +4384,20 @@ async def telegram_notifier_and_command_loop():
                             await asyncio.to_thread(notify_telegram, hud_text, hud_kb, target_cid)
                         else:
                             await asyncio.to_thread(notify_telegram, hud_text, hud_kb)
+
+                    elif low.startswith(("/sync_commands", "/sync_cmds", "/update_commands", "/setcommands")):
+                        ok, res_str = await asyncio.to_thread(sync_telegram_bot_commands)
+                        rep = (
+                            f"{'✅' if ok else '⚠️'} *Telegram Command Directory Sync*\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"{res_str}\n\n"
+                            f"💡 _All 31 commands are now registered with Telegram. Tap `[/]` or the menu button next to the chat bar to autocomplete any command!_"
+                        )
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb)
 
                     elif low.startswith(("/push", "/deploy", "/sync", "push")):
                         try:
@@ -4508,6 +4594,102 @@ async def telegram_notifier_and_command_loop():
                             await asyncio.to_thread(notify_telegram, w_txt, w_kb, target_cid)
                         else:
                             await asyncio.to_thread(notify_telegram, w_txt, w_kb)
+
+                    elif low.startswith(("/atd_odds", "/atdodds")):
+                        try:
+                            from atd_odds_store import ATDOddsStore, NFL_TEAM_MAP, ACTIVE_ROSTER_NAMES
+                            parts = clean_text.split(maxsplit=1)
+                            raw_args = parts[1].strip() if len(parts) > 1 else ""
+
+                            if not raw_args:
+                                current = ATDOddsStore.load_odds()
+                                if not current:
+                                    rep = (
+                                        "📭 <b>No Live ATD Odds Cached.</b>\n\n"
+                                        "• <i>Inject manual lines:</i> <code>/atd_odds Hunt -115, Steele +550, Kelce +135</code>\n"
+                                        "• <i>Auto-fetch books:</i> <code>/atd_odds fetch kc</code>\n"
+                                        "• <i>Clear:</i> <code>/atd_odds clear</code>"
+                                    )
+                                else:
+                                    lines_out = [
+                                        f" • <b>{name}</b>: <code>{'+'+str(v) if v > 0 else v}</code> (Implied: <code>{ATDOddsStore.implied_pct(v):.1f}%</code>)"
+                                        for name, v in current.items()
+                                    ]
+                                    rep = "📊 <b>Active ATD Market Odds Cache:</b>\n" + "\n".join(lines_out)
+                            elif raw_args.lower() == "clear":
+                                ATDOddsStore.clear_odds()
+                                rep = "🧹 <b>Cleared live ATD odds cache.</b>"
+                            elif raw_args.lower().startswith("fetch"):
+                                fetch_parts = raw_args.split(maxsplit=1)
+                                team_arg = fetch_parts[1].lower().strip() if len(fetch_parts) > 1 else "kc"
+                                team_full = NFL_TEAM_MAP.get(team_arg, team_arg.title())
+                                api_key = os.getenv("ODDS_API_KEY", "") or ODDS_API_KEY
+                                if not api_key:
+                                    rep = (
+                                        "⚠️ Missing <code>ODDS_API_KEY</code> env variable in Termux.\n"
+                                        "Export it with: <code>export ODDS_API_KEY=\"your_key\"</code> or use manual shorthand:\n"
+                                        "<code>/atd_odds Hunt -115, Steele +550, Kelce +135</code>"
+                                    )
+                                else:
+                                    try:
+                                        scraped = await ATDOddsStore.fetch_live_book_atd(api_key, team_query=team_full)
+                                        saved = ATDOddsStore.save_odds(scraped, merge=True)
+                                        preview = "\n".join([
+                                            f" • <b>{k}</b>: <code>{'+'+str(v) if v > 0 else v}</code>"
+                                            for k, v in list(scraped.items())[:8]
+                                        ])
+                                        rep = (
+                                            f"✅ <b>Loaded {len(scraped)} Live ATD Lines ({team_full}):</b>\n{preview}\n\n"
+                                            f"<i>Poller will automatically compute +EV edges on next play tick.</i>"
+                                        )
+                                    except Exception as fetch_err:
+                                        rep = f"❌ <b>Fetch Failed:</b> <code>{html.escape(str(fetch_err))}</code>"
+                            else:
+                                # Manual shorthand injection
+                                parsed = ATDOddsStore.parse_manual_input(raw_args, ACTIVE_ROSTER_NAMES)
+                                if not parsed:
+                                    rep = (
+                                        "⚠️ Could not parse odds. Format as:\n"
+                                        "<code>/atd_odds Hunt -120, Steele +550, Kelce +140</code>"
+                                    )
+                                else:
+                                    updated_board = ATDOddsStore.save_odds(parsed, merge=True)
+                                    formatted_updates = "\n".join([
+                                        f" • <b>{k}</b>: <code>{'+'+str(v) if v > 0 else v}</code> (Implied: <code>{ATDOddsStore.implied_pct(v):.1f}%</code>)"
+                                        for k, v in parsed.items()
+                                    ])
+                                    rep = (
+                                        f"⚡ <b>Injected Live ATD Odds ({len(parsed)} updated):</b>\n{formatted_updates}\n\n"
+                                        f"<i>Hot-reloaded into live_nfl_atd_engine.py for +EV triggers.</i>"
+                                    )
+                        except Exception as odds_cmd_err:
+                            rep = f"❌ <b>ATD Odds Command Error:</b> <code>{html.escape(str(odds_cmd_err))}</code>"
+
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb, target_cid, "HTML")
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb, None, "HTML")
+
+                    elif low.startswith(("/atd", "/touchdown", "/nflatd")):
+                        try:
+                            import live_nfl_atd_engine
+                            parts = clean_text.split(maxsplit=1)
+                            q_arg = parts[1].strip() if len(parts) > 1 else None
+                            atd_html, atd_kb = await asyncio.to_thread(live_nfl_atd_engine.scan_live_nfl_atd_board, q_arg)
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, atd_html, atd_kb, target_cid, "HTML")
+                            else:
+                                await asyncio.to_thread(notify_telegram, atd_html, atd_kb, None, "HTML")
+                        except Exception as atd_err:
+                            err_trace = traceback.format_exc()
+                            print(f"[ATD-ERR] {atd_err}\n{err_trace}")
+                            err_msg = f"❌ <b>Live NFL ATD Error:</b> <code>{html.escape(str(atd_err))}</code>"
+                            _, hud_kb = build_menu_hud_payload()
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, err_msg, hud_kb, target_cid, "HTML")
+                            else:
+                                await asyncio.to_thread(notify_telegram, err_msg, hud_kb, None, "HTML")
 
                     elif low.startswith(("/ban", "/bans", "/unban", "/banimport", "/record", "/leg")):
                         import ban_list
@@ -4879,6 +5061,7 @@ async def telegram_notifier_and_command_loop():
                             "• `/menu` — Live AuraScan HUD & Controls\n"
                             "• `/scan` or `/scan nba` · `/scan nfl` — Prop Scans\n"
                             "• `/nba` · `/nfl` · `/tennis` — Single Sport\n"
+                            "• `/atd` — Live NFL Anytime TD Predictor\n"
                             "• `/sim <player>` — 10k Monte Carlo Sim\n"
                             "• `/slip <leg1> | <leg2>` — Correlated Slip\n"
                             "• `/help` — Full Command Directory"
@@ -5268,6 +5451,19 @@ async def start_web_server_adapter():
         return None
 
 
+async def run_nfl_atd_background_loop():
+    """
+    Runs the 32-team LeagueWideATDOrchestrator in the background.
+    Tracks all live NFL games, monitors RedZone possessions, alerts on vulture/high-EV windows,
+    and maintains the fast in-memory snapshots for instant Telegram /atd responses.
+    """
+    try:
+        import live_nfl_atd_engine
+        await live_nfl_atd_engine.ORCHESTRATOR.run_sunday_multiplexer()
+    except Exception as exc:
+        print(f"[NFL-ATD-LOOP-WARN] Multiplexer loop notice: {exc}")
+
+
 async def main():
     reaped = kill_stale_bot_processes()
     if reaped:
@@ -5289,7 +5485,7 @@ async def main():
     print(f" AURASCAN // KALSHI V2 HYBRID ENGINE [{mode_banner}] (Ed25519 Native)")
     print(f" Kalshi Bal: ${live_kalshi_balance:.2f} | Sniper: {'ARMED' if SNIPER_ARMED else 'DISARMED'} | Slate Cap: ${curr_slate_cap:.2f} ({int(bankroll_allocation_pct*100)}%)")
     print(f" Web HUD: http://127.0.0.1:{ACTIVE_WEB_PORT} (0.0.0.0:{ACTIVE_WEB_PORT}) | Vercel: https://peezt-tv.vercel.app")
-    print(" Commands: /menu | /mode [live|sim] | /api | /bal | /cap [10-100] | /ports | /build | /resume | /sniper on|off")
+    print(" Commands: /menu | /mode [live|sim] | /api | /bal | /cap [10-100] | /ports | /build | /resume | /atd | /atd_odds")
     print("======================================================================")
     try:
         await asyncio.gather(
@@ -5297,6 +5493,7 @@ async def main():
             kalshi_ws_listener(),
             rest_scanner_loop(),
             auto_pilot_loop(),
+            run_nfl_atd_background_loop(),
         )
     finally:
         if web_runner:
