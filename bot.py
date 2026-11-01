@@ -127,6 +127,22 @@ from auto_market_index import (
     DAILY_DATE_CODE_REGEX,
     ALLOWED_SPORTS_PREFIXES,
 )
+from sim_prop_bridge import (
+    ESPNSyncEngine,
+    ESPNNFLSyncEngine,
+    redistribute_team_usage,
+    redistribute_nfl_usage,
+    run_bridge_player_simulation,
+    run_bridge_nfl_player_simulation,
+    build_kalshi_v2_order,
+    draw_distribution,
+    simulate_prop_edge,
+    simulate_nfl_prop_edge,
+    ARCHETYPE_WEIGHTS,
+    NFL_ARCHETYPE_WEIGHTS,
+    assign_archetype,
+    assign_nfl_archetype,
+)
 
 # ==========================================
 # CORE CREDENTIALS & ENDPOINTS
@@ -3249,6 +3265,12 @@ def build_custom_combo_menu(selected_tickers: Optional[List[str]] = None) -> tup
             for p in sim_to_prop_mapper(m):
                 tk = p.get("ticker", "")
                 if tk and tk not in existing:
+                    try:
+                        import ban_list
+                        if ban_list.check(p.get("player_or_team", ""), p.get("stat_type", ""), p.get("line")):
+                            continue
+                    except Exception:
+                        pass
                     existing.add(tk)
                     candidate_props.append(p)
                 if len(candidate_props) >= 8:
@@ -3552,6 +3574,13 @@ def build_help_commands_report() -> str:
         "• `/analytics` — 10k MC calibration, 50/50 symmetry, Copula boost & telemetry report\n"
         "• `/audit` — 10k MC calibration, 50/50 symmetry & Cholesky audit\n"
         "• `/build` (or `/builder`) — Interactive manual slip builder\n\n"
+        "🚫 *BAN LIST & RECORD COMMANDS:*\n"
+        "• `/ban <player> <stat> [line] [| reason]` — Ban a player prop (all lines or specific line)\n"
+        "• `/unban <player> <stat> [line]` — Unban a player prop\n"
+        "• `/bans` — List all active bans in bans.db\n"
+        "• `/banimport <lines>` — Bulk import ban notes (one per line)\n"
+        "• `/record <player> <stat> [line]` — View graded personal hit record on a prop\n"
+        "• `/leg <player> <stat> [line]` — Log a tracked leg or set result (`/leg hit <id>`)\n\n"
         "📊 *PORTFOLIO, STREAMS & SETTLEMENT:*\n"
         "• `/open` (or `/positions`) — View active open contracts, HWM & streams\n"
         "• `/pnl` — Session bankroll, Win-Loss-Push record & settled ROI\n"
@@ -3784,6 +3813,19 @@ def get_real_open_markets_summary(sport: str = "NBA", query: Optional[str] = Non
         q_clean = str(query).upper()
         return [m for m in markets if q_clean in str(m.get("ticker", "")).upper() or q_clean in str(m.get("title", "")).upper()]
     return markets
+
+
+def _resolve_ban_player(name: str) -> Optional[str]:
+    """Resolves player query to canonical name via player_index."""
+    try:
+        import player_index
+        for sp in ("NBA", "NFL", "WNBA"):
+            verdict, cands = player_index.resolve_decision(name, sp)
+            if cands:
+                return cands[0]["name"]
+    except Exception:
+        pass
+    return None
 
 
 async def telegram_notifier_and_command_loop():
@@ -4466,6 +4508,100 @@ async def telegram_notifier_and_command_loop():
                             await asyncio.to_thread(notify_telegram, w_txt, w_kb, target_cid)
                         else:
                             await asyncio.to_thread(notify_telegram, w_txt, w_kb)
+
+                    elif low.startswith(("/ban", "/bans", "/unban", "/banimport", "/record", "/leg")):
+                        import ban_list
+                        if low.startswith(("/bans", "/banlist", "/listbans")):
+                            active_bans = ban_list.list_bans(active_only=True)
+                            if active_bans:
+                                ban_lines = [f"• {ban_list.reminder_text(b)}" for b in active_bans]
+                                rep = f"🚫 *ACTIVE BANS LIST ({len(active_bans)})*\n━━━━━━━━━━━━━━━━━━━━━━━━\n" + "\n".join(ban_lines)
+                            else:
+                                rep = "📋 *No active bans in bans.db.*\nUse `/ban <player> <stat> [line] [| reason]` to ban a prop."
+                        elif low.startswith("/banimport"):
+                            parts = clean_text.split(maxsplit=1)
+                            if len(parts) > 1 and parts[1].strip():
+                                ids, errs = ban_list.import_lines(parts[1].strip(), resolve=_resolve_ban_player)
+                                rep = f"📥 *Ban Import Summary:*\n• Added: `{len(ids)}` ban(s)\n• Errors: `{len(errs)}`"
+                                if errs:
+                                    rep += "\n• _Errors:_\n" + "\n".join(f"  - {err}" for err in errs[:5])
+                            else:
+                                rep = "⚠️ *Usage:* `/banimport <paste notes, one per line>`\n_Example:_\n`/banimport\nEvan mobley rebs | keeps busting\nStephen Castle 3pts`"
+                        elif low.startswith("/unban"):
+                            parts = clean_text.split(maxsplit=1)
+                            if len(parts) > 1 and parts[1].strip():
+                                try:
+                                    name, stat, line, _ = ban_list.parse_ban_line(parts[1].strip(), resolve=_resolve_ban_player)
+                                    n_unbanned = ban_list.unban(name, stat, line=line)
+                                    line_str = ban_list._fmt_line(line)
+                                    rep = f"✅ *Unbanned:* `{name} {stat} ({line_str})` — deactivated {n_unbanned} ban(s)"
+                                except Exception as e:
+                                    rep = f"⚠️ *Unban Error:* {e}\n_Usage:_ `/unban <player> <stat> [line]`\n_Example:_ `/unban Evan Mobley rebs`"
+                            else:
+                                rep = "⚠️ *Usage:* `/unban <player> <stat> [line]`\n_Example:_ `/unban Evan Mobley rebs`"
+                        elif low.startswith("/record"):
+                            parts = clean_text.split(maxsplit=1)
+                            if len(parts) > 1 and parts[1].strip():
+                                try:
+                                    name, stat, line, _ = ban_list.parse_ban_line(parts[1].strip(), resolve=_resolve_ban_player)
+                                    rec = ban_list.prop_record(name, stat, line=line)
+                                    line_str = ban_list._fmt_line(line)
+                                    rate_str = f"{rec['rate']*100:.1f}%" if rec['rate'] is not None else "N/A"
+                                    rep = (
+                                        f"📊 *PROP RECORD // {name.upper()}*\n"
+                                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                        f"• 📌 *Prop:* `{stat}` ({line_str})\n"
+                                        f"• ✅ *Hits:* `{rec['hits']}`\n"
+                                        f"• ❌ *Misses:* `{rec['misses']}`\n"
+                                        f"• ⏳ *Pending:* `{rec['pending']}`\n"
+                                        f"• 📈 *Hit Rate:* `{rate_str}` (across {rec['n']} graded legs)"
+                                    )
+                                except Exception as e:
+                                    rep = f"⚠️ *Record Query Error:* {e}\n_Usage:_ `/record <player> <stat> [line]`\n_Example:_ `/record Wendell Carter Jr. 6+ rebounds`"
+                            else:
+                                rep = "⚠️ *Usage:* `/record <player> <stat> [line]`\n_Example:_ `/record Wendell Carter Jr. 6+ rebounds`"
+                        elif low.startswith("/leg"):
+                            parts = clean_text.split(maxsplit=1)
+                            if len(parts) > 1 and parts[1].strip():
+                                arg_str = parts[1].strip()
+                                tokens = arg_str.split()
+                                if tokens[0].lower() in ("hit", "miss", "win", "loss") and len(tokens) >= 2:
+                                    try:
+                                        lid = int(tokens[1])
+                                        is_hit = tokens[0].lower() in ("hit", "win")
+                                        ban_list.set_leg_result(lid, is_hit)
+                                        rep = f"📝 *Leg #{lid} result set to:* `{'HIT ✅' if is_hit else 'MISS ❌'}`"
+                                    except Exception as e:
+                                        rep = f"⚠️ *Error setting leg result:* {e}\n_Usage:_ `/leg hit <id>` or `/leg miss <id>`"
+                                else:
+                                    try:
+                                        name, stat, line, note = ban_list.parse_ban_line(arg_str, resolve=_resolve_ban_player)
+                                        lid = ban_list.log_leg(name, stat, line, note=note)
+                                        line_str = ban_list._fmt_line(line)
+                                        rep = f"📝 *Logged Leg #{lid}:* `{name} {stat} ({line_str})`"
+                                    except Exception as e:
+                                        rep = f"⚠️ *Leg Log Error:* {e}\n_Usage:_ `/leg <player> <stat> [line] [| note]` or `/leg hit <id>`"
+                            else:
+                                rep = "⚠️ *Usage:*\n• `/leg <player> <stat> [line] [| note]` — Log tracked leg\n• `/leg hit <id>` or `/leg miss <id>` — Grade leg result"
+                        else:
+                            # /ban <target>
+                            parts = clean_text.split(maxsplit=1)
+                            if len(parts) > 1 and parts[1].strip():
+                                try:
+                                    name, stat, line, reason = ban_list.parse_ban_line(parts[1].strip(), resolve=_resolve_ban_player)
+                                    bid = ban_list.add_ban(name, stat, line=line, reason=reason)
+                                    line_str = ban_list._fmt_line(line)
+                                    why = f" - {reason}" if reason else ""
+                                    rep = f"🚫 *Banned:* `{name} {stat} ({line_str})`{why} (ID #{bid})"
+                                except Exception as e:
+                                    rep = f"⚠️ *Ban Error:* {e}\n_Usage:_ `/ban <player> <stat> [line] [| reason]`\n_Example:_ `/ban Evan Mobley rebs | keeps busting`"
+                            else:
+                                rep = "⚠️ *Usage:* `/ban <player> <stat> [line] [| reason]`\n_Examples:_\n• `/ban Evan Mobley rebs | keeps busting`\n• `/ban Wendell Carter Jr. 6+ rebounds | minutes`"
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb)
 
                     elif low.startswith("/mode"):
                         parts = low.split()

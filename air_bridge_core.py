@@ -7,6 +7,7 @@ Air-Bridge: single clean entry point for /NBA /NFL /NHL /MLB /CFB /TENNIS comman
 """
 
 import datetime
+from datetime import datetime, timezone
 import html
 import json
 import os
@@ -16,6 +17,18 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+from sim_prop_bridge import (
+    ESPNSyncEngine,
+    ESPNNFLSyncEngine,
+    redistribute_team_usage,
+    redistribute_nfl_usage,
+    run_bridge_player_simulation,
+    run_bridge_nfl_player_simulation,
+    build_kalshi_v2_order,
+    draw_distribution,
+    simulate_prop_edge,
+    simulate_nfl_prop_edge,
+)
 
 CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_slate_cache.json")
 SYNC_INTERVAL_SEC = 60

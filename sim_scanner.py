@@ -47,8 +47,28 @@ from auto_market_index import (
 from build_backtest_csv import normalize_team_abbr
 import player_index
 import risk_manager
+import ban_list
 from sim_core import core_simulate, make_rng, prior_for
 import sim_logger
+
+_LAST_HOUSEKEEPING_TS: float = 0.0
+
+def run_hourly_housekeeping(now_ts: Optional[float] = None) -> List[Dict[str, Any]]:
+    """Runs scanner hourly housekeeping: checks ban_list due reviews and dispatches reminders."""
+    global _LAST_HOUSEKEEPING_TS
+    now = now_ts or time.time()
+    due = ban_list.due_reviews(now=now)
+    if due:
+        reminders = [ban_list.reminder_text(b) for b in due]
+        log.warning("[HOUSEKEEPING] %d ban(s) due for review:\n%s", len(due), "\n".join(reminders))
+        try:
+            from bot import notify_telegram
+            tg_text = f"⏰ <b>SCANNER HOUSEKEEPING // BAN LIST DUE REVIEWS ({len(due)})</b>\n\n" + "\n".join(f"• {r}" for r in reminders)
+            notify_telegram(tg_text)
+        except Exception:
+            pass
+    _LAST_HOUSEKEEPING_TS = now
+    return due
 
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("sim_scanner")
@@ -263,6 +283,14 @@ def run_scan_cycle() -> Tuple[int, int]:
     Returns (markets_scanned, rows_written).
     """
     now_ts = time.time()
+
+    # Hourly housekeeping check for ban reviews
+    if now_ts - _LAST_HOUSEKEEPING_TS >= 3600.0:
+        try:
+            run_hourly_housekeeping(now_ts)
+        except Exception as hk_exc:
+            log.warning("Hourly housekeeping error: %s", hk_exc)
+
     espn_games = fetch_espn_nba_games()
     raw_markets = fetch_open_nba_markets()
 
@@ -329,6 +357,10 @@ def run_scan_cycle() -> Tuple[int, int]:
         if line_key in seen_prop_cuts:
             continue  # Avoid duplicate 3PT / milestone markets
         seen_prop_cuts.add(line_key)
+
+        # Check ban_list (filter candidates before simulation / logging)
+        if ban_list.check(canonical_name, stat, cutoff_line, athlete_id=athlete_id, now=now_ts):
+            continue
 
         group_key = (canonical_name, stat)
         if group_key not in groups:

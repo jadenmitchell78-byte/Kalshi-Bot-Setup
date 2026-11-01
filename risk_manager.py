@@ -14,9 +14,12 @@ import sqlite3
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import ban_list
+
 DB_PATH = os.environ.get("SIM_LOG_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "sim_log.db"))
 
 # Veto reason codes
+BANNED = "BANNED"
 APPROVED = "APPROVED"
 STAT_UNVALIDATED = "STAT_UNVALIDATED"
 GAME_STARTED = "GAME_STARTED"
@@ -304,6 +307,15 @@ def evaluate_candidate(
             quarter_kelly=0.0, is_live=False, action="VETO", flags=[],
             reasons=[(code, desc)], entry=p_mkt, cand_id=c.cand_id,
         )
+
+    # 0. Ban list check (First veto)
+    try:
+        ban_rec = ban_list.check(c.player, c.stat, c.line, athlete_id=getattr(c, "athlete_id", None), now=now)
+        if ban_rec:
+            desc = ban_list.reminder_text(ban_rec)
+            return _veto(BANNED, desc)
+    except Exception:
+        pass
 
     # 1. Validated stat
     if stat_norm not in cfg.validated_stats:

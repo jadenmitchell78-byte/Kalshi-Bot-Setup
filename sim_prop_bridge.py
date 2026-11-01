@@ -95,7 +95,35 @@ def resolve_espn_athlete(query_name: str, sport: str = "NBA") -> Dict[str, Any]:
     return fetch_espn_player_profile(query_name, sport=sport)
 
 
-def run_bridge_player_simulation(
+# ==============================================================================
+# IMPORT & RE-EXPORT FULL SIMULATOR BRIDGE ENGINES (NBA & NFL)
+# ==============================================================================
+try:
+    import sim_prop_bridge as _root_spb
+except ImportError:
+    import sys
+    from pathlib import Path
+    _base_dir = Path(__file__).resolve().parent.parent
+    if str(_base_dir) not in sys.path:
+        sys.path.insert(0, str(_base_dir))
+    import sim_prop_bridge as _root_spb
+
+ARCHETYPE_WEIGHTS = _root_spb.ARCHETYPE_WEIGHTS
+assign_archetype = _root_spb.assign_archetype
+NFL_ARCHETYPE_WEIGHTS = _root_spb.NFL_ARCHETYPE_WEIGHTS
+assign_nfl_archetype = _root_spb.assign_nfl_archetype
+ESPNSyncEngine = _root_spb.ESPNSyncEngine
+ESPNNFLSyncEngine = _root_spb.ESPNNFLSyncEngine
+redistribute_team_usage = _root_spb.redistribute_team_usage
+redistribute_nfl_usage = _root_spb.redistribute_nfl_usage
+draw_distribution = _root_spb.draw_distribution
+simulate_prop_edge = _root_spb.simulate_prop_edge
+simulate_nfl_prop_edge = _root_spb.simulate_nfl_prop_edge
+build_kalshi_v2_order = _root_spb.build_kalshi_v2_order
+run_bridge_nfl_player_simulation = _root_spb.run_bridge_nfl_player_simulation
+
+
+def run_casual_video_simulation(
     sport: str,
     player_query: str,
     stat_query: str,
@@ -485,6 +513,17 @@ def run_bridge_player_simulation(
     real_kalshi_ticker = ticker if has_open_market else None
     is_projection_only = not has_open_market
 
+    # Ban list check: veto pick if banned
+    try:
+        import ban_list
+        b_rec = ban_list.check(p_name, stat_norm, target_line, athlete_id=athlete_id)
+        if b_rec:
+            is_orderable = False
+            gate_status = "BANNED"
+            gate_note = ban_list.reminder_text(b_rec)
+    except Exception:
+        pass
+
     fair_cents = max(1, min(99, int(round(true_prob * 100.0))))
     fee_margin = int(round(kalshi_fee_prob(true_prob) * 100.0)) + int(MIN_EDGE_AFTER_FEES_PCT)
     buy_below_cents = max(1, min(95, fair_cents - fee_margin))
@@ -497,6 +536,12 @@ def run_bridge_player_simulation(
     ]
     combo_dict: Dict[str, Any] = {}
     for partner_cand in valid_teammates[:8]:
+        try:
+            import ban_list
+            if ban_list.check(partner_cand, "PTS"):
+                continue
+        except Exception:
+            pass
         try:
             partner_ladders = search_kalshi_markets(partner_cand, sport=sport_u, stat_query="PTS")
         except Exception:
@@ -640,3 +685,29 @@ def run_bridge_player_simulation(
             card_html += f"\n\n🏀 <b>Closest Open Kalshi Markets ({stat_norm}):</b>\n" + "\n".join(closest)
 
     return card_html, clean_kb
+
+
+def run_bridge_player_simulation(*args, **kwargs) -> Tuple[str, Any]:
+    """
+    Universal Entry Point:
+    1. Direct simulator call:
+       run_bridge_player_simulation("Donovan Mitchell", "PTS", line=26.5, yes_cents=48)
+       run_bridge_player_simulation("Patrick Mahomes", "PASS_YDS", line=245.5, yes_cents=52)
+       -> Returns (card_html, sim_data_dict) with 10k Monte Carlo edge analytics.
+    2. Bot casual / video card call:
+       run_bridge_player_simulation("NBA", "Donovan Mitchell", "PTS", line_query=26.5, ...)
+       -> Returns (card_html, reply_markup) for Telegram UI.
+    """
+    KNOWN_SPORTS = {"NBA", "NFL", "MLB", "NHL", "CFB", "WNBA", "TENNIS", "CBB"}
+    is_casual_call = False
+
+    if args and str(args[0]).upper() in KNOWN_SPORTS and len(args) >= 3:
+        is_casual_call = True
+    elif "sport" in kwargs and any(k in kwargs for k in ("athlete_id", "known_name", "stat_query")):
+        is_casual_call = True
+
+    if is_casual_call:
+        return run_casual_video_simulation(*args, **kwargs)
+
+    return _root_spb.run_bridge_player_simulation(*args, **kwargs)
+

@@ -144,9 +144,11 @@ def _edge(p, ask, fee_rate=0.07):
 
 
 # ----------------------------------------------------------------------------- the card
-def format_team_card(team, game, sim, market=None, items=(), top_n=5, w_model=0.25, min_edge=0.05):
+def format_team_card(team, game, sim, market=None, items=(), top_n=5, w_model=0.25, min_edge=0.05, projections=None):
     """game: {'home','away','tip_text'}; market: {'home_bid','home_ask','away_bid','away_ask'} (0-1) or None.
-    items: [(Candidate, Decision)] from risk_manager.evaluate()."""
+    items: [(Candidate, Decision)] from risk_manager.evaluate().
+    projections: optional list of formatted strings with key players' projection ladders when no open Kalshi markets exist.
+    """
     home, away = game["home"], game["away"]
     L = [f"🏀 <b>{escape(away)} @ {escape(home)}</b> · {escape(game.get('tip_text', ''))}",
          "<b>Moneyline sim</b> (model unvalidated)",
@@ -164,18 +166,25 @@ def format_team_card(team, game, sim, market=None, items=(), top_n=5, w_model=0.
     else:
         L.append("• No Kalshi moneyline price found; projection only")
 
-    approved = sorted([(c, d) for c, d in items if d.action != "VETO"], key=lambda t: -(t[1].edge or 0))
-    vetoed = [d for _, d in items if d.action == "VETO"]
-    L.append(f"<b>Props</b>: {len(items)} checked, {len(approved)} approved, {len(vetoed)} passed")
-    for c, d in approved[:top_n]:
-        side = "O" if c.side == "YES" else "U"
-        tag = " PRELIM" if "PRELIMINARY" in d.flags else ""
-        L.append(f"• {escape(c.player)} {escape(c.stat)} {side}{c.line:g}: sim "
-                 f"{(c.p_yes if c.side == 'YES' else 1 - c.p_yes):.0%} vs {d.entry:.0%} · edge {d.edge:+.1%} · "
-                 f"${d.stake:.2f} {'PAPER' if d.action == 'APPROVE_PAPER' else 'LIVE'}{tag}")
-    if vetoed:
-        top = Counter(d.reasons[0][0] for d in vetoed if d.reasons).most_common(3)
-        L.append("Passed because: " + ", ".join(f"{k.lower().replace('_', ' ')} ×{v}" for k, v in top))
+    if items:
+        approved = sorted([(c, d) for c, d in items if d.action != "VETO"], key=lambda t: -(t[1].edge or 0))
+        vetoed = [d for _, d in items if d.action == "VETO"]
+        L.append(f"<b>Props</b>: {len(items)} checked, {len(approved)} approved, {len(vetoed)} passed")
+        for c, d in approved[:top_n]:
+            side = "O" if c.side == "YES" else "U"
+            tag = " PRELIM" if "PRELIMINARY" in d.flags else ""
+            L.append(f"• {escape(c.player)} {escape(c.stat)} {side}{c.line:g}: sim "
+                     f"{(c.p_yes if c.side == 'YES' else 1 - c.p_yes):.0%} vs {d.entry:.0%} · edge {d.edge:+.1%} · "
+                     f"${d.stake:.2f} {'PAPER' if d.action == 'APPROVE_PAPER' else 'LIVE'}{tag}")
+        if vetoed:
+            top = Counter(d.reasons[0][0] for d in vetoed if d.reasons).most_common(3)
+            L.append("Passed because: " + ", ".join(f"{k.lower().replace('_', ' ')} ×{v}" for k, v in top))
+    else:
+        L.append("<b>Props</b>: No open Kalshi markets for this game yet.")
+        if projections:
+            for proj_line in projections:
+                L.append(proj_line)
+
     L.append("⚠ Props from one game are correlated: size them as a group.")
     return "\n".join(L)
 
@@ -403,8 +412,67 @@ def build_nba_results_table(seasons=(2025, 2026, 2027), verbose=False) -> List[T
     return results
 
 
-def fetch_kalshi_game_moneyline(home_team: str, away_team: str) -> Optional[Dict[str, float]]:
-    """Sweeps open Kalshi KXNBAGAME markets to find current moneyline bid/ask for home vs away."""
+ESPN_TO_KALSHI_TEAM: Dict[str, str] = {
+    "NO": "NOP", "NOP": "NOP",
+    "GS": "GSW", "GSW": "GSW",
+    "NY": "NYK", "NYK": "NYK",
+    "SA": "SAS", "SAS": "SAS",
+    "UTAH": "UTA", "UTA": "UTA",
+    "WSH": "WAS", "WAS": "WAS",
+    "PHX": "PHX", "BKN": "BKN", "CHA": "CHA",
+}
+
+
+def to_kalshi_team(t: str) -> str:
+    t_up = (t or "").upper().strip()
+    return ESPN_TO_KALSHI_TEAM.get(t_up, t_up)
+
+
+SERIES_STAT_MAP: Dict[str, str] = {
+    "KXNBAPTS": "PTS",
+    "KXNBAREB": "REB",
+    "KXNBAAST": "AST",
+    "KXNBA3PT": "3PM",
+    "KXNBATHREES": "3PM",
+    "KXNBAPRA": "PRA",
+}
+
+
+def extract_player_candidate(market: Dict[str, Any]) -> str:
+    """Extracts raw player name candidate from title, rules_primary, or ticker."""
+    title = str(market.get("title") or "")
+    if ":" in title:
+        part = title.split(":", 1)[0].strip()
+        if not any(sw in part.lower() for sw in ("point", "pts", "rebound", "reb", "assist", "ast", "three", "3pt", "pra")):
+            return part
+
+    rules = str(market.get("rules_primary") or "")
+    m_rules = re.search(r"if\s+([A-Z][a-zA-Z\.\'\-\s]+?)\s+(?:records|scores|has|gets|makes)", rules)
+    if m_rules:
+        cand = m_rules.group(1).strip()
+        if len(cand.split()) >= 2:
+            return cand
+
+    cleaned_title = re.sub(r"\b(Points|Rebounds|Assists|Three-Pointers|Threes|3-Point Field Goals|PRA)\b", "", title, flags=re.I).strip()
+    if cleaned_title and len(cleaned_title.split()) >= 2:
+        return cleaned_title
+
+    tk = str(market.get("ticker") or "")
+    parts = tk.split("-")
+    if len(parts) >= 3:
+        entity = parts[2]
+        m_ent = re.match(r"^[A-Z]{3}([A-Z]+?)\d*$", entity)
+        if m_ent:
+            return m_ent.group(1)
+
+    return ""
+
+
+def fetch_kalshi_game_moneyline(home_team: str, away_team: str, date_code: Optional[str] = None, tip_ts: Optional[float] = None) -> Optional[Dict[str, float]]:
+    """
+    Sweeps open Kalshi KXNBAGAME markets to find current moneyline bid/ask for home vs away.
+    Matches event ticker against ESPN date code (e.g. 26OCT31) and both team codes (mapping ESPN NO->NOP, GS->GSW, NY->NYK).
+    """
     try:
         url = "https://api.elections.kalshi.com/trade-api/v2/markets?status=open&series_ticker=KXNBAGAME&limit=200"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -412,44 +480,161 @@ def fetch_kalshi_game_moneyline(home_team: str, away_team: str) -> Optional[Dict
             data = json.loads(resp.read().decode())
         markets = data.get("markets", [])
 
-        home_clean = home_team.upper()
-        away_clean = away_team.upper()
+        if not date_code:
+            if tip_ts:
+                dt = datetime.datetime.fromtimestamp(tip_ts - 5 * 3600, tz=datetime.timezone.utc)
+            else:
+                dt = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=5)
+            date_code = dt.strftime("%y%b%d").upper()
+        else:
+            date_code = date_code.upper()
+
+        h_kalshi = to_kalshi_team(home_team)
+        a_kalshi = to_kalshi_team(away_team)
+        combo1 = f"{a_kalshi}{h_kalshi}"
+        combo2 = f"{h_kalshi}{a_kalshi}"
 
         home_mkt = None
         away_mkt = None
 
         for m in markets:
-            tk = str(m.get("ticker") or "").upper()
+            ev_ticker = str(m.get("event_ticker") or "").upper()
+            m_ticker = str(m.get("ticker") or "").upper()
+
+            # Date check
+            if date_code and (date_code not in ev_ticker and date_code not in m_ticker):
+                continue
+
+            # Team match check
+            has_teams = (
+                (combo1 in ev_ticker)
+                or (combo2 in ev_ticker)
+                or (combo1 in m_ticker)
+                or (combo2 in m_ticker)
+                or ((h_kalshi in ev_ticker or home_team.upper() in ev_ticker) and (a_kalshi in ev_ticker or away_team.upper() in ev_ticker))
+            )
+            if not has_teams:
+                continue
+
+            last_tk_part = m_ticker.split("-")[-1] if "-" in m_ticker else ""
+            yes_sub = str(m.get("yes_sub_title") or "").upper()
             title = str(m.get("title") or "").upper()
-            sub = str(m.get("subtitle") or "").upper()
-            blob = f"{tk} {title} {sub}"
 
-            if home_clean in blob and away_clean in blob:
-                yes_sub = str(m.get("yes_sub_title") or "").upper()
-                if home_clean in yes_sub or tk.endswith(f"-{home_clean}"):
-                    home_mkt = m
-                elif away_clean in yes_sub or tk.endswith(f"-{away_clean}"):
-                    away_mkt = m
+            if last_tk_part == h_kalshi or h_kalshi in yes_sub or home_team.upper() in yes_sub:
+                home_mkt = m
+            elif last_tk_part == a_kalshi or a_kalshi in yes_sub or away_team.upper() in yes_sub:
+                away_mkt = m
+            elif (h_kalshi in title or home_team.upper() in title) and ("WIN" in title or "BEAT" in title):
+                home_mkt = m
+            elif (a_kalshi in title or away_team.upper() in title) and ("WIN" in title or "BEAT" in title):
+                away_mkt = m
 
-        if home_mkt:
-            hb = home_mkt.get("yes_bid")
-            ha = home_mkt.get("yes_ask")
-            hb_val = (float(hb) / 100.0) if hb and float(hb) > 1.5 else (float(hb) if hb else None)
-            ha_val = (float(ha) / 100.0) if ha and float(ha) > 1.5 else (float(ha) if ha else None)
-
+        if home_mkt or away_mkt:
+            hb_val = ha_val = ab_val = aa_val = None
+            if home_mkt:
+                hb = home_mkt.get("yes_bid")
+                ha = home_mkt.get("yes_ask")
+                hb_val = (float(hb) / 100.0) if hb and float(hb) > 1.5 else (float(hb) if hb else None)
+                ha_val = (float(ha) / 100.0) if ha and float(ha) > 1.5 else (float(ha) if ha else None)
             if away_mkt:
                 ab = away_mkt.get("yes_bid")
                 aa = away_mkt.get("yes_ask")
                 ab_val = (float(ab) / 100.0) if ab and float(ab) > 1.5 else (float(ab) if ab else None)
                 aa_val = (float(aa) / 100.0) if aa and float(aa) > 1.5 else (float(aa) if aa else None)
             else:
-                ab_val = round(1.0 - ha_val, 3) if ha_val else None
-                aa_val = round(1.0 - hb_val, 3) if hb_val else None
+                if ha_val is not None:
+                    ab_val = round(1.0 - ha_val, 3)
+                if hb_val is not None:
+                    aa_val = round(1.0 - hb_val, 3)
+            if home_mkt is None:
+                if aa_val is not None:
+                    hb_val = round(1.0 - aa_val, 3)
+                if ab_val is not None:
+                    ha_val = round(1.0 - ab_val, 3)
 
             return {"home_bid": hb_val, "home_ask": ha_val, "away_bid": ab_val, "away_ask": aa_val}
     except Exception:
         pass
     return None
+
+
+def fetch_open_kalshi_game_props(home_team: str, away_team: str, date_code: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Sweeps open Kalshi prop series (KXNBAPTS, KXNBAREB, KXNBAAST, KXNBA3PT, KXNBATHREES, KXNBAPRA)
+    and filters for markets belonging to the game's teams with usable prices.
+    """
+    series_list = ["KXNBAPTS", "KXNBAREB", "KXNBAAST", "KXNBA3PT", "KXNBATHREES", "KXNBAPRA"]
+
+    def _fetch_series(s: str) -> List[Dict[str, Any]]:
+        url = f"https://api.elections.kalshi.com/trade-api/v2/markets?status=open&series_ticker={s}&limit=200"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+                return data.get("markets", [])
+        except Exception:
+            return []
+
+    all_mkts: List[Dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        for res in executor.map(_fetch_series, series_list):
+            all_mkts.extend(res)
+
+    h_kalshi = to_kalshi_team(home_team)
+    a_kalshi = to_kalshi_team(away_team)
+    combo1 = f"{a_kalshi}{h_kalshi}"
+    combo2 = f"{h_kalshi}{a_kalshi}"
+
+    import player_index
+    from build_backtest_csv import normalize_team_abbr
+
+    matched_markets: List[Dict[str, Any]] = []
+    seen_tickers: Set[str] = set()
+
+    for m in all_mkts:
+        tk = str(m.get("ticker") or "").upper()
+        if not tk or tk in seen_tickers:
+            continue
+        ev = str(m.get("event_ticker") or "").upper()
+
+        # Check usable prices: must have a valid ask
+        ya = m.get("yes_ask")
+        yb = m.get("yes_bid")
+        if ya is None and yb is None:
+            continue
+        try:
+            ya_val = (float(ya) / 100.0) if ya and float(ya) > 1.5 else (float(ya) if ya else None)
+        except (ValueError, TypeError):
+            continue
+        if ya_val is None or ya_val <= 0 or ya_val >= 1.0:
+            continue
+
+        # Date code filter if provided
+        if date_code and (date_code not in tk and date_code not in ev):
+            continue
+
+        has_teams = (
+            (combo1 in tk)
+            or (combo2 in tk)
+            or (combo1 in ev)
+            or (combo2 in ev)
+            or ((h_kalshi in ev or home_team.upper() in ev) and (a_kalshi in ev or away_team.upper() in ev))
+        )
+
+        if not has_teams:
+            cand_str = extract_player_candidate(m)
+            if cand_str:
+                _, cands = player_index.resolve_decision(cand_str, "NBA")
+                if cands:
+                    p_tm = normalize_team_abbr(cands[0].get("team") or "")
+                    if p_tm in (home_team, away_team, h_kalshi, a_kalshi):
+                        has_teams = True
+
+        if has_teams:
+            seen_tickers.add(tk)
+            matched_markets.append(m)
+
+    return matched_markets
 
 
 def generate_team_card_response(team_query: str, bankroll: float = 100.0) -> Tuple[str, Optional[Dict[str, Any]]]:
@@ -459,9 +644,10 @@ def generate_team_card_response(team_query: str, bankroll: float = 100.0) -> Tup
        If ambiguous (e.g. 'LA'), returns interactive buttons.
     2. Finds today's pre-game matchup from ESPN scoreboard.
     3. Runs walk-forward build_ratings and simulate_game.
-    4. Fetches Kalshi moneyline prices from KXNBAGAME.
-    5. Gathers rotation player candidates, evaluates them with risk_manager,
-       and builds formatted HTML card via format_team_card.
+    4. Fetches Kalshi moneyline prices from KXNBAGAME with date/team mapping.
+    5. Gathers real open Kalshi prop markets (KXNBAPTS, KXNBAREB, KXNBAAST, KXNBA3PT, KXNBAPRA),
+       evaluates them through risk_manager (skipping unpriced lines), or prints projection ladders
+       if no Kalshi prop markets are open.
     """
     cands = resolve_team(team_query)
     if not cands:
@@ -479,7 +665,8 @@ def generate_team_card_response(team_query: str, bankroll: float = 100.0) -> Tup
     espn_games = fetch_espn_nba_games()
     game_info = espn_games.get(team)
 
-    today_str = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=7)).strftime("%Y-%m-%d")
+    today_utc = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=7)
+    today_str = today_utc.strftime("%Y-%m-%d")
 
     if not game_info:
         city, nick, _ = NBA_TEAMS.get(team, ("", team, []))
@@ -489,6 +676,12 @@ def generate_team_card_response(team_query: str, bankroll: float = 100.0) -> Tup
     away = game_info.get("away", "OPP")
     tip_ts = game_info.get("tipoff_ts")
     tip_text = datetime.datetime.fromtimestamp(tip_ts).strftime("%I:%M %p") if tip_ts else "Today"
+
+    # Compute date code (e.g. 26OCT31)
+    if tip_ts:
+        d_code = datetime.datetime.fromtimestamp(tip_ts - 5 * 3600, tz=datetime.timezone.utc).strftime("%y%b%d").upper()
+    else:
+        d_code = today_utc.strftime("%y%b%d").upper()
 
     game_dict = {
         "home": home,
@@ -503,45 +696,95 @@ def generate_team_card_response(team_query: str, bankroll: float = 100.0) -> Tup
         R = {"ratings": {home: 0.0, away: 0.0}, "total_tend": {home: 0.0, away: 0.0}, "hfa": 2.5, "league_total": 224.0, "n_games": 0}
 
     sim = simulate_game(R, home, away, n=20000)
-    mkt = fetch_kalshi_game_moneyline(home, away)
+    mkt = fetch_kalshi_game_moneyline(home, away, date_code=d_code, tip_ts=tip_ts)
 
     import player_index
     import risk_manager as rm
-    from auto_market_index import search_kalshi_markets, fetch_espn_player_profile
+    import ban_list
+    from auto_market_index import fetch_espn_player_profile, parse_strike_from_market
+    from build_backtest_csv import normalize_team_abbr
     from sim_core import core_simulate, make_rng, prior_for
 
-    risk_candidates: List[rm.Candidate] = []
-    team_players = [p for p in player_index.get_index("NBA") if p.get("team") == team]
+    # Fetch open Kalshi prop markets for this game's teams
+    open_props = fetch_open_kalshi_game_props(home, away, date_code=d_code)
 
-    for p in team_players[:7]:
-        p_name = p.get("name")
-        p_id = str(p.get("id") or "")
-        ladders = search_kalshi_markets(p_name, sport="NBA")
-        if not ladders:
-            continue
+    items: List[Tuple[rm.Candidate, Any]] = []
+    projections: List[str] = []
 
-        for st in ("PTS", "AST", "REB", "3PM"):
-            st_rungs = [r for r in ladders if r.get("stat") == st and float(r.get("line", 0)) > 0]
-            if not st_rungs:
+    if open_props:
+        groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        seen_prop_cuts: Set[Tuple[str, str, float]] = set()
+
+        for m in open_props:
+            cand_str = extract_player_candidate(m)
+            if not cand_str:
                 continue
+            verdict, pcands = player_index.resolve_decision(cand_str, "NBA")
+            if not pcands:
+                continue
+            pinfo = pcands[0]
+            p_name = pinfo.get("name") or cand_str
+            p_id = str(pinfo.get("id") or "")
+            p_team = normalize_team_abbr(pinfo.get("team") or "")
 
-            profile = fetch_espn_player_profile(p_name, sport="NBA", athlete_id=p_id, known_name=p_name, known_team=team)
-            avg = float((profile.get("season_averages") or {}).get(st, 15.0))
-            rng = make_rng(f"{p_name}:{st}:{today_str}")
+            series = str(m.get("series_ticker") or "").upper()
+            stat = SERIES_STAT_MAP.get(series)
+            if not stat:
+                for s_pref, s_stat in SERIES_STAT_MAP.items():
+                    if str(m.get("ticker", "")).startswith(s_pref):
+                        stat = s_stat
+                        break
+            if not stat:
+                stat = "PTS"
+
+            strike = parse_strike_from_market(m)
+            if strike <= 0:
+                continue
+            cutoff_line = strike - 0.5 if strike.is_integer() else strike
+            line_key = (p_name, stat, round(cutoff_line, 2))
+            if line_key in seen_prop_cuts:
+                continue
+            if ban_list.check(p_name, stat, cutoff_line, athlete_id=p_id):
+                continue
+            seen_prop_cuts.add(line_key)
+
+            grp_key = (p_name, stat)
+            if grp_key not in groups:
+                groups[grp_key] = {
+                    "player": p_name,
+                    "athlete_id": p_id,
+                    "team": p_team,
+                    "stat": stat,
+                    "rungs": [],
+                }
+            groups[grp_key]["rungs"].append({
+                "ticker": m.get("ticker"),
+                "line": cutoff_line,
+                "yes_bid": m.get("yes_bid"),
+                "yes_ask": m.get("yes_ask"),
+            })
+
+        risk_candidates: List[rm.Candidate] = []
+        for (p_name, stat), g in groups.items():
+            profile = fetch_espn_player_profile(p_name, sport="NBA", athlete_id=g["athlete_id"], known_name=p_name, known_team=g["team"])
+            avg = float((profile.get("season_averages") or {}).get(stat, 15.0))
+            gp = int(profile.get("games_played") or 20)
+            s_min = float(profile.get("minutes_avg") or 30.0)
+            pos = str(profile.get("position") or "G")
+            rng = make_rng(f"{p_name}:{stat}:{today_str}")
             draws_arr, _ = core_simulate(
-                stat=st, season_avg=avg, games_played=int(profile.get("games_played") or 20),
-                season_min=float(profile.get("minutes_avg") or 30.0), is_home=(home == team),
-                position=str(profile.get("position") or "G"), n=5000, rng=rng, prior=prior_for(st, "G")
+                stat=stat, season_avg=avg, games_played=gp, season_min=s_min,
+                is_home=(home == g["team"]), position=pos, n=5000, rng=rng, prior=prior_for(stat, pos)
             )
 
-            for rung in st_rungs[:2]:
+            for rung in g["rungs"]:
                 line_val = float(rung["line"])
                 p_over = float((draws_arr > line_val).mean())
                 cand = rm.Candidate(
-                    f"c_{p_id}_{st}_{line_val}",
+                    f"c_{g['athlete_id']}_{stat}_{line_val:g}",
                     p_name,
                     game_info.get("game_id", f"{home}:{away}"),
-                    st,
+                    stat,
                     line_val,
                     "YES",
                     p_over,
@@ -554,12 +797,49 @@ def generate_team_card_response(team_query: str, bankroll: float = 100.0) -> Tup
                 )
                 risk_candidates.append(cand)
 
-    st_dict = {"bankroll": bankroll, "daily_pnl": 0.0, "open_positions": []}
-    decisions = rm.evaluate(risk_candidates, st_dict, rm.RiskConfig(live_enabled=False), now=time.time())
-    dec_map = {d.candidate.cand_id: d for d in decisions if d.candidate}
-    items = [(c, dec_map[c.cand_id]) for c in risk_candidates if c.cand_id in dec_map]
+        if risk_candidates:
+            st_dict = {"bankroll": bankroll, "daily_pnl": 0.0, "open_positions": []}
+            decisions = rm.evaluate(risk_candidates, st_dict, rm.RiskConfig(live_enabled=False), now=time.time())
+            dec_map = {d.candidate.cand_id: d for d in decisions if d.candidate}
+            items = [(c, dec_map[c.cand_id]) for c in risk_candidates if c.cand_id in dec_map]
 
-    card_html = format_team_card(team, game_dict, sim, market=mkt, items=items, top_n=5)
+    if not items:
+        # No open Kalshi prop markets found or usable.
+        # Build projection ladders for top rotation players on this team.
+        team_players = [p for p in player_index.get_index("NBA") if normalize_team_abbr(p.get("team") or "") == team]
+        for p in team_players[:5]:
+            p_name = p.get("name")
+            p_id = str(p.get("id") or "")
+            if ban_list.check(p_name, "PTS", athlete_id=p_id):
+                continue
+            profile = fetch_espn_player_profile(p_name, sport="NBA", athlete_id=p_id, known_name=p_name, known_team=team)
+            avg_pts = float((profile.get("season_averages") or {}).get("PTS", 0.0))
+            if avg_pts < 8.0:
+                continue
+            gp = int(profile.get("games_played") or 20)
+            s_min = float(profile.get("minutes_avg") or 30.0)
+            pos = str(profile.get("position") or "G")
+            rng = make_rng(f"{p_name}:PTS:{today_str}")
+            draws_arr, _ = core_simulate(
+                stat="PTS", season_avg=avg_pts, games_played=gp, season_min=s_min,
+                is_home=(home == team), position=pos, n=5000, rng=rng, prior=prior_for("PTS", pos)
+            )
+            proj = float(draws_arr.mean())
+            if proj >= 25:
+                milestones = [20, 25, 30]
+            elif proj >= 18:
+                milestones = [15, 20, 25]
+            elif proj >= 12:
+                milestones = [10, 15, 20]
+            else:
+                milestones = [10, 12, 15]
+
+            ladders_text = ", ".join(f"{m}+ {float((draws_arr >= m).mean()):.0%}" for m in milestones)
+            projections.append(f"• <b>{escape(p_name)}</b>: Proj {proj:.1f} PTS · {ladders_text}")
+            if len(projections) >= 4:
+                break
+
+    card_html = format_team_card(team, game_dict, sim, market=mkt, items=items, top_n=5, projections=projections)
     keyboard = {"inline_keyboard": [
         [{"text": "📺 WATCH STREAM", "url": "https://streamed.su/watch/basketball"},
          {"text": "🔙 MENU HUD", "callback_data": "menu_refresh_hud"}]
@@ -729,6 +1009,12 @@ def _selftest():
         assert resolve_team(q) == want, (q, resolve_team(q))
     assert resolve_team("zzz") == []
 
+    # Kalshi team code mappings
+    assert to_kalshi_team("NO") == "NOP" and to_kalshi_team("NOP") == "NOP"
+    assert to_kalshi_team("GS") == "GSW" and to_kalshi_team("GSW") == "GSW"
+    assert to_kalshi_team("NY") == "NYK" and to_kalshi_team("NYK") == "NYK"
+    assert to_kalshi_team("SA") == "SAS" and to_kalshi_team("UTAH") == "UTA"
+
     # spot check: parse_completed_event matches real ESPN payload format (Oct 22, 2025: PHI @ BOS 117-116, ID 401809936)
     test_ev = {
         "id": "401809936", "date": "2025-10-23T02:30Z",
@@ -806,6 +1092,18 @@ def _selftest():
         print(card)
         print("=" * 60)
         assert reasons_ok, "Neither 'edge too small' nor 'unconfirmed near tip' found in card"
+
+    # card when no open Kalshi markets exist
+    card_empty = format_team_card(
+        "PHI", {"home": "PHI", "away": "BOS", "tip_text": "7:00 PM"},
+        simulate_game(R, teams[0], teams[1], n=2000),
+        {"home_bid": 0.55, "home_ask": 0.57, "away_bid": 0.44, "away_ask": 0.46},
+        items=[],
+        projections=["• <b>Tyrese Maxey</b>: Proj 26.2 PTS · 20+ 84%, 25+ 61%, 30+ 35%"]
+    )
+    assert "No open Kalshi markets for this game yet" in card_empty, card_empty
+    assert "no usable price" not in card_empty.lower(), card_empty
+    assert "Tyrese Maxey" in card_empty, card_empty
     print("self-test OK  (team lookup, rating recovery r=%.2f, home edge %.1f pts)\n" % (corr, R["hfa"]))
     print("EXAMPLE CARD (made-up numbers; tags shown raw):")
     print(card)

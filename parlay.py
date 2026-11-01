@@ -153,6 +153,12 @@ def build_optimal_parlays(
     deduped: List[SlipLeg] = []
     seen_entities = set()
     for leg in sorted_legs:
+        try:
+            import ban_list
+            if ban_list.check(leg.player_name, getattr(leg, "stat_type", ""), getattr(leg, "line", None)):
+                continue
+        except Exception:
+            pass
         ent = _leg_entity_key(leg)
         if ent not in seen_entities and getattr(leg, "anti_snipe_ok", True):
             seen_entities.add(ent)
