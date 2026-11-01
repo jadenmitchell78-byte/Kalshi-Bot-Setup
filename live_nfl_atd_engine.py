@@ -354,6 +354,9 @@ class DriveMomentumAnalyzer:
             if "timeout" in p_type or "end period" in p_type:
                 continue
 
+            # Flag: check if penalty was declined or offsetting
+            is_penalty_declined = "declined" in p_text or "offsetting" in p_text
+
             if "sack" in p_type or "sacked" in p_text:
                 sacks_recent += 1
                 consec_incompletions = 0
@@ -361,15 +364,19 @@ class DriveMomentumAnalyzer:
             elif "incomplete" in p_type or "incomplete" in p_text:
                 consec_incompletions += 1
                 consec_completions = 0
-            elif "penalty" in p_type or "penalty" in p_text:
+            elif ("penalty" in p_type or "penalty" in p_text or "flag" in p_text) and not is_penalty_declined:
                 if any(k in p_text for k in [
-                    "offensive holding", "false start", "illegal formation",
-                    "offensive pass interference", "intentional grounding", "delay of game"
+                    "offensive holding", "holding, offense", "false start", "illegal formation",
+                    "offensive pass interference", "pass interference, offense",
+                    "intentional grounding", "delay of game", "illegal shift", "illegal motion",
+                    "chop block", "ineligible receiver", "illegal block"
                 ]):
                     off_penalties_recent += 1
                 elif any(k in p_text for k in [
-                    "defensive pass interference", "defensive holding",
-                    "roughing the passer", "unnecessary roughness", "neutral zone infraction"
+                    "defensive pass interference", "pass interference, defense",
+                    "defensive holding", "holding, defense",
+                    "roughing the passer", "unnecessary roughness", "neutral zone infraction",
+                    "encroachment", "illegal contact", "face mask"
                 ]):
                     def_bailout_penalty = True
                     consec_incompletions = 0
@@ -402,13 +409,14 @@ class DriveMomentumAnalyzer:
             reasons.append(f"Sack (-{sacks_recent})")
             is_stalled = True
 
-        if off_penalties_recent > 0 and distance >= 12:
+        if off_penalties_recent > 0:
             drive_td_mult *= 0.62
             pos_mods["RB1"] *= 0.35
             pos_mods["RB2_VULTURE"] *= 0.20
             pos_mods["WR1"] *= 1.30
             pos_mods["WR2"] *= 1.35
             pos_mods["TE1"] *= 1.25
+            pos_mods["RB3_PASS"] *= 1.55
             reasons.append("Off. Penalty Setback")
             is_stalled = True
 
@@ -437,6 +445,7 @@ class DriveMomentumAnalyzer:
             if def_bailout_penalty:
                 drive_td_mult *= 1.25
                 pos_mods["RB1"] *= 1.20
+                pos_mods["RB2_VULTURE"] *= 1.15
                 reasons.append("Def. Penalty Auto 1st")
             if explosive_gains > 0:
                 drive_td_mult *= 1.22
@@ -1118,22 +1127,31 @@ class LeagueWideATDOrchestrator:
 
     def _parse_scoreboard(self, sb_json: dict) -> dict:
         active_meta = {}
-        for ev in sb_json.get("events", []):
+        events = sb_json.get("events", [])
+
+        # Safety check: if ESPN returns an empty/invalid scoreboard feed, don't fallback to ghosts
+        if not events:
+            return active_meta
+
+        for ev in events:
             event_id = str(ev.get("id"))
             short_name = ev.get("shortName", "NFL")
-            if self.filter_team and self.filter_team not in short_name.upper():
-                continue
 
             comp = ev.get("competitions", [{}])[0]
-            state = comp.get("status", {}).get("type", {}).get("state", "pre").lower()
+            status_obj = comp.get("status", {}) or ev.get("status", {})
+            state = status_obj.get("type", {}).get("state", "pre").lower()
 
-            if state in ("in", "pre"):
+            # STRICT FILTER: Only ingest games explicitly verified as live ("in") right now
+            if state == "in":
+                if self.filter_team and self.filter_team not in short_name.upper():
+                    continue
+
                 sit = comp.get("situation", {})
-                ytg = int(sit.get("yardLine", 65) or 65)
-                last_play_id = sit.get("lastPlay", {}).get("id", "pregame")
+                ytg = int(sit.get("yardLine", 75) or 75)
+                last_play_id = sit.get("lastPlay", {}).get("id", "live_active")
 
                 if event_id not in self.workers:
-                    print(f"[🟢 GAME LIVE] Spawning worker for {short_name} (ID: {event_id})")
+                    print(f"[🟢 VERIFIED LIVE] Spawning worker for active game: {short_name} (ID: {event_id})")
                     self.workers[event_id] = GameSessionWorker(
                         event_id, short_name, self.alert_engine, self.roster_builder
                     )
@@ -1152,6 +1170,12 @@ class LeagueWideATDOrchestrator:
     def _save_and_render_dashboard(self):
         snapshots = [w.latest_board_snapshot for w in self.workers.values() if w.latest_board_snapshot]
         if not snapshots:
+            # Clean up disk snapshot if no live games are active so /atd doesn't show stale drives
+            try:
+                with open(STATE_SNAPSHOT_FILE, "w") as f:
+                    json.dump({"updated_at": time.strftime("%H:%M:%S"), "games": []}, f, indent=2)
+            except Exception:
+                pass
             return
 
         snapshots.sort(key=lambda s: s["yards_to_goal"])
@@ -1200,7 +1224,7 @@ def scan_live_nfl_atd_board(target_query: Optional[str] = None) -> Tuple[str, di
     1. Reads live_atd_state.json written on every tick by the background orchestrator.
     2. If target_query is specified (/atd kc), formats the deep 7-player card for that team.
     3. If no argument is given, formats the multi-game RedZone Threat Board.
-    4. Falls back to on-demand ESPN call if no background snapshot is present yet.
+    4. Falls back to verified ESPN scoreboard schedule if no live games are active right now.
     """
     q_clean = (target_query or "").upper().strip()
 
@@ -1254,8 +1278,16 @@ def scan_live_nfl_atd_board(target_query: Optional[str] = None) -> Tuple[str, di
         }
         return "\n".join(lines), kb
 
-    # Mode C: Fallback to On-Demand Live/Upcoming Demonstration if radar hasn't ticked
-    return _build_fallback_card(q_clean or "KC")
+    # Mode C: Fallback to Verified ESPN Scoreboard Slate if no live games are active right now
+    try:
+        r = requests.get(SCOREBOARD_URL, timeout=4)
+        if r.status_code == 200:
+            events = r.json().get("events", [])
+            return _build_standby_slate_card(events, q_clean)
+    except Exception:
+        pass
+
+    return _build_standby_slate_card([], q_clean)
 
 
 def _format_snapshot_to_card(snap: dict) -> Tuple[str, dict]:
@@ -1319,29 +1351,68 @@ def _format_snapshot_to_card(snap: dict) -> Tuple[str, dict]:
     return "\n".join(lines), kb
 
 
-def _build_fallback_card(team_query: str) -> Tuple[str, dict]:
-    """Generates an initial demo or upcoming matchup card if no live NFL games are currently ticking."""
-    t_clean = team_query.upper().strip()
-    mock_players = [
-        {"name": "Kenneth Walker III", "role": "RB1", "conditional_td_share": 0.32, "drive_td_prob": 0.153, "full_game_atd_prob": 0.448, "fair_full_game_odds": "+123", "market_tier": "ATD (1+)", "fatigue_mult": 1.0, "matchup_mult": 1.15, "market_odds": "N/A", "edge_pct": 0.0},
-        {"name": "Rashee Rice", "role": "WR1", "conditional_td_share": 0.26, "drive_td_prob": 0.124, "full_game_atd_prob": 0.382, "fair_full_game_odds": "+162", "market_tier": "ATD (1+)", "fatigue_mult": 1.0, "matchup_mult": 1.25, "market_odds": "N/A", "edge_pct": 0.0},
-        {"name": "Travis Kelce", "role": "TE1", "conditional_td_share": 0.22, "drive_td_prob": 0.105, "full_game_atd_prob": 0.334, "fair_full_game_odds": "+199", "market_tier": "ATD (1+)", "fatigue_mult": 1.0, "matchup_mult": 1.30, "market_odds": "N/A", "edge_pct": 0.0},
-        {"name": "Xavier Worthy", "role": "WR2", "conditional_td_share": 0.10, "drive_td_prob": 0.048, "full_game_atd_prob": 0.185, "fair_full_game_odds": "+440", "market_tier": "ATD (1+)", "fatigue_mult": 1.0, "matchup_mult": 1.10, "market_odds": "N/A", "edge_pct": 0.0},
-        {"name": "Patrick Mahomes", "role": "QB", "conditional_td_share": 0.06, "drive_td_prob": 0.029, "full_game_atd_prob": 0.120, "fair_full_game_odds": "+733", "market_tier": "ATD (1+)", "fatigue_mult": 1.0, "matchup_mult": 1.00, "market_odds": "N/A", "edge_pct": 0.0},
-        {"name": "Emmett Johnson", "role": "RB2_VULTURE", "conditional_td_share": 0.04, "drive_td_prob": 0.019, "full_game_atd_prob": 0.082, "fair_full_game_odds": "+1120", "market_tier": "ATD (1+)", "fatigue_mult": 1.0, "matchup_mult": 1.05, "market_odds": "N/A", "edge_pct": 0.0},
+def _build_standby_slate_card(events: list, team_query: Optional[str] = None) -> Tuple[str, dict]:
+    """
+    Renders actual upcoming and final NFL games from ESPN's scoreboard feed.
+    Zero mock games, zero ghost teams, and zero synthetic in-progress drives.
+    """
+    t_clean = (team_query or "").upper().strip()
+    lines = [
+        "🏈 <b>NFL REDZONE ATD RADAR — SLATE STANDBY</b> 🏈",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "ℹ️ <i>No live NFL games currently in-progress.</i>\n",
     ]
-    mock_snap = {
-        "matchup": f"{t_clean} Telemetry Slate",
-        "offense": t_clean,
-        "situation": "1st & 10 at OPP 28 (28 yds to EZ)",
-        "yards_to_goal": 28,
-        "drive_td_prob": 0.478,
-        "momentum_state": "⚡ ON SCHEDULE",
-        "momentum_reason": "Standard Progression",
-        "vulture_alert": False,
-        "players": mock_players
+
+    matched_event = None
+    if t_clean:
+        for ev in events:
+            s_name = ev.get("shortName", "").upper()
+            name = ev.get("name", "").upper()
+            comps = ev.get("competitions", [{}])[0].get("competitors", [])
+            abbrs = [c.get("team", {}).get("abbreviation", "").upper() for c in comps]
+            if t_clean in abbrs or any(t_clean in x for x in (s_name, name)):
+                matched_event = ev
+                break
+
+    if matched_event:
+        short_name = matched_event.get("shortName", "NFL")
+        comp = matched_event.get("competitions", [{}])[0]
+        status_type = comp.get("status", {}).get("type", {})
+        detail = status_type.get("detail", status_type.get("shortDetail", "Upcoming"))
+        broadcasts = comp.get("broadcasts", [{}])
+        b_names = ", ".join([b.get("names", [""])[0] for b in broadcasts if b.get("names")])
+        tv_str = f" ({b_names})" if b_names else ""
+
+        lines.append(
+            f"📍 <b>Target Matchup:</b> <b>{short_name}</b>{tv_str}\n"
+            f"• Status: <code>{detail}</code>\n"
+            f"• <i>Radar is armed and will automatically engage sub-second RedZone tracking at kickoff.</i>\n"
+        )
+    else:
+        lines.append("📋 <b>Today's Verified NFL Slate (ESPN):</b>")
+        upcoming_count = 0
+        for ev in events[:8]:
+            short_name = ev.get("shortName", "NFL")
+            comp = ev.get("competitions", [{}])[0]
+            status_type = comp.get("status", {}).get("type", {})
+            detail = status_type.get("detail", status_type.get("shortDetail", "Upcoming"))
+            state = status_type.get("state", "pre").lower()
+            badge = "⏰" if state == "pre" else ("🏁" if state == "post" else "🟢")
+            lines.append(f"• {badge} <b>{short_name}</b> — <code>{detail}</code>")
+            upcoming_count += 1
+
+        if upcoming_count == 0:
+            lines.append("• <i>No scheduled games found on today's active NFL week.</i>")
+
+    lines.append("\n<i>Tip: Use /atd <team> (e.g. /atd kc) to check a specific matchup.</i>")
+    kb = {
+        "inline_keyboard": [
+            [{"text": "⚡ Refresh Scoreboard", "callback_data": "atd_refresh_board"}],
+            [{"text": "📺 Watch Live Wire", "url": "https://streamed.su/watch/american-football"}],
+            [{"text": "🔙 Back to HUD", "callback_data": "menu_refresh_hud"}]
+        ]
     }
-    return _format_snapshot_to_card(mock_snap)
+    return "\n".join(lines), kb
 
 
 # ──────────────────────────────────────────────────────────────────────────────
