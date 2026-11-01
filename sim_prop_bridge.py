@@ -98,15 +98,16 @@ def resolve_espn_athlete(query_name: str, sport: str = "NBA") -> Dict[str, Any]:
 # ==============================================================================
 # IMPORT & RE-EXPORT FULL SIMULATOR BRIDGE ENGINES (NBA & NFL)
 # ==============================================================================
-try:
-    import sim_prop_bridge as _root_spb
-except ImportError:
-    import sys
-    from pathlib import Path
-    _base_dir = Path(__file__).resolve().parent.parent
-    if str(_base_dir) not in sys.path:
-        sys.path.insert(0, str(_base_dir))
-    import sim_prop_bridge as _root_spb
+import importlib.util
+from pathlib import Path
+
+_root_file = Path(__file__).resolve().parent.parent / "sim_prop_bridge.py"
+if _root_file.exists():
+    _spec = importlib.util.spec_from_file_location("root_sim_prop_bridge", str(_root_file))
+    _root_spb = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_root_spb)
+else:
+    raise ImportError(f"Cannot find root simulator bridge at {_root_file}")
 
 ARCHETYPE_WEIGHTS = _root_spb.ARCHETYPE_WEIGHTS
 assign_archetype = _root_spb.assign_archetype
