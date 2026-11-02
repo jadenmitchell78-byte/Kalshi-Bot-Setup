@@ -1524,7 +1524,7 @@ def execute_live_kalshi_fills(
             "time_in_force": "good_till_canceled",
         }
 
-        order_path = "/trade-api/v2/portfolio/events/orders"  # V2 create-order; signed and posted with this identical path
+        order_path = "/trade-api/v2/portfolio/orders"  # V2 create-order; signed and posted with this identical path
         try:
             resp = requests.post(
                 f"{KALSHI_BASE_URL.rstrip('/')}{order_path}",

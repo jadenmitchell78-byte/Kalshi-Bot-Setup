@@ -865,7 +865,7 @@ class KalshiSmartPlacer:
             "time_in_force": "good_till_canceled",
         }
 
-        order_path = "/trade-api/v2/portfolio/events/orders"  # V2 create-order; signed and posted with this identical path
+        order_path = "/trade-api/v2/portfolio/orders"  # V2 create-order; signed and posted with this identical path
         try:
             resp = requests.post(
                 self.base_url.rstrip("/") + order_path,
@@ -1015,7 +1015,7 @@ class KalshiSmartPlacer:
         if not ticker or any(bad in ticker.upper() for bad in NOVELTY_BANNED_WORDS):
             return {"status": "BLOCKED", "reason": f"Blocked novelty/invalid game line ticker: {ticker}"}
 
-        order_path = "/trade-api/v2/portfolio/events/orders"  # V2 create-order; signed and posted with this identical path
+        order_path = "/trade-api/v2/portfolio/orders"  # V2 create-order; signed and posted with this identical path
         client_oid = str(uuid.uuid4())
         is_yes = (kalshi_side.lower() in ("yes", "over", "o"))
         clean_limit = max(1, min(99, int(limit_cents)))

@@ -193,14 +193,14 @@ def is_user_building_combo() -> bool:
     return False
 
 
-live_kalshi_balance = 32.22
-live_portfolio_value = 32.22
+live_kalshi_balance = 53.00
+live_portfolio_value = 53.00
 
 
 def get_dynamic_slate_cap(live_cash: Optional[float] = None) -> float:
     """Compute dynamic slate cap based on bankroll_allocation_pct (strictly liquid cash from balance/100.0)."""
     global bankroll_allocation_pct, live_kalshi_balance
-    bal = live_cash if (live_cash is not None and live_cash > 0) else (live_kalshi_balance if live_kalshi_balance > 0 else 32.22)
+    bal = live_cash if (live_cash is not None and live_cash > 0) else (live_kalshi_balance if live_kalshi_balance > 0 else 53.00)
     return round(max(1.0, bal * bankroll_allocation_pct), 2)
 
 # Risk & Sizing
@@ -808,11 +808,12 @@ def init_db():
         existing_cols = {r[1] for r in pconn.execute("PRAGMA table_info(bot_state)").fetchall()}
         if "bankroll_allocation_pct" not in existing_cols:
             pconn.execute("ALTER TABLE bot_state ADD COLUMN bankroll_allocation_pct REAL NOT NULL DEFAULT 1.00")
-        pconn.execute("UPDATE bot_state SET slate_cap = 32.22, sim_cash = 32.22 WHERE id = 1 AND (slate_cap <= 20.01 OR sim_cash <= 20.01 OR slate_cap >= 50.0)")
         row = pconn.execute("SELECT mode, auto_enabled, bankroll_allocation_pct FROM bot_state WHERE id = 1").fetchone()
         if row:
-            LIVE_MODE = str(row[0]).upper() == "LIVE"
-            SNIPER_ARMED = bool(row[1])
+            env_mode = os.getenv("DEFAULT_MODE")
+            env_auto = os.getenv("DEFAULT_AUTO")
+            LIVE_MODE = (env_mode.upper() == "LIVE") if env_mode else (str(row[0]).upper() == "LIVE")
+            SNIPER_ARMED = (env_auto.lower() in ("1", "true", "yes", "on")) if env_auto else bool(row[1])
             if len(row) > 2 and row[2] is not None:
                 bankroll_allocation_pct = max(0.05, min(1.00, float(row[2])))
         pconn.commit()
@@ -1061,13 +1062,13 @@ def build_menu_hud_payload(show_slider: Optional[bool] = None, show_scan_panel: 
         sniper_btn = "🎯 Sniper: OFF"
 
     global live_kalshi_balance
-    if live_kalshi_balance <= 0 or live_kalshi_balance >= 50.0:
+    if live_kalshi_balance <= 0:
         try:
             live_kalshi_balance = get_balance()
         except Exception:
-            live_kalshi_balance = 32.22
-    if live_kalshi_balance <= 0 or live_kalshi_balance >= 50.0:
-        live_kalshi_balance = 32.22
+            live_kalshi_balance = 53.00
+    if live_kalshi_balance <= 0:
+        live_kalshi_balance = 53.00
 
     exposure = get_current_exposure()
     slate_cap = get_dynamic_slate_cap(live_kalshi_balance)
@@ -1077,6 +1078,12 @@ def build_menu_hud_payload(show_slider: Optional[bool] = None, show_scan_panel: 
 
     pass
     # Kalshi API and Bankroll telemetry (Strictly Actual Real Funds)
+    if not last_kalshi_api_result.get("ok"):
+        try:
+            test_kalshi_api_connection()
+        except Exception:
+            pass
+
     if last_kalshi_api_result.get("ok"):
         api_line = f"🔑 *Kalshi API:* 🟢 Connected | 💵 *Cash:* `${live_kalshi_balance:.2f}` | 💼 *Port:* `${live_portfolio_value:.2f}`"
     else:
@@ -1499,8 +1506,6 @@ def test_kalshi_api_connection() -> dict:
     endpoints = [
         "https://api.elections.kalshi.com",
         "https://external-api.kalshi.com",
-        "https://trading-api.kalshi.com",
-        BASE_URL,
     ]
     seen = set()
     unique_endpoints = [u for u in endpoints if not (u in seen or seen.add(u))]
@@ -1518,7 +1523,7 @@ def test_kalshi_api_connection() -> dict:
                 if isinstance(bal_cents, (int, float)):
                     bal_dollars = round(bal_cents / 100.0, 2) if bal_cents > 100 else (round(float(bal_cents), 2) if isinstance(bal_cents, float) else round(bal_cents / 100.0, 2))
                 else:
-                    bal_dollars = 32.22
+                    bal_dollars = 53.00
 
                 p_val_cents = raw_bal_data.get("portfolio_value", bal_cents)
                 if isinstance(p_val_cents, (int, float)):
@@ -1527,7 +1532,7 @@ def test_kalshi_api_connection() -> dict:
                     portfolio_dollars = bal_dollars
 
                 BASE_URL = base
-                live_kalshi_balance = bal_dollars if bal_dollars > 0 else 32.22
+                live_kalshi_balance = bal_dollars if bal_dollars > 0 else 53.00
                 live_portfolio_value = portfolio_dollars if portfolio_dollars > 0 else live_kalshi_balance
                 print(f"[KALSHI-API-DATA] Liquid Cash: ${live_kalshi_balance:.2f} | Portfolio Value: ${live_portfolio_value:.2f} (Kalshi Balance Cents: {bal_cents})")
                 try:
@@ -1591,7 +1596,7 @@ def get_balance() -> float:
     res = test_kalshi_api_connection()
     if res.get("ok") and float(res.get("balance", 0.0)) > 0:
         return float(res["balance"])
-    return live_kalshi_balance if live_kalshi_balance > 0 else 32.22
+    return live_kalshi_balance if live_kalshi_balance > 0 else 53.00
 
 
 _LIVE_SPORTS_MARKETS_CACHE: Dict[str, Tuple[float, List[Any]]] = {}
@@ -3540,15 +3545,22 @@ def sync_telegram_bot_commands() -> Tuple[bool, str]:
         {"command": "menu", "description": "Live AuraScan HUD, telemetry & quick-action deck"},
         {"command": "start", "description": "Welcome screen & telemetry HUD"},
         {"command": "atd", "description": "Live NFL Anytime Touchdown & RedZone threat board"},
+        {"command": "drive", "description": "AWS Next Gen Stats drive telemetry, pace & personnel"},
+        {"command": "ngs", "description": "Next Gen Stats xTD, top speed (mph) & TE2 leak radar"},
         {"command": "atd_odds", "description": "Hot-reload/inject live sportsbook ATD lines"},
-        {"command": "nba", "description": "Scan NBA props (10k Monte Carlo)"},
+        {"command": "nba", "description": "Simulate NBA props or team matchups (10k Monte Carlo)"},
         {"command": "nfl", "description": "Scan NFL props (Passing, Rushing, Receiving, TDs)"},
+        {"command": "nhl", "description": "Scan NHL props (SOG, Goals, Assists)"},
+        {"command": "cfb", "description": "Scan CFB props (Passing, Rushing, Receiving)"},
         {"command": "tennis", "description": "Scan Tennis match/set props & sim matchups"},
         {"command": "mlb", "description": "Scan MLB props (Strikeouts, Hits, HR)"},
         {"command": "scan", "description": "Force 10k Monte Carlo scan across active slates"},
         {"command": "livesim", "description": "Live NBA slate telemetry & Copula combos"},
         {"command": "sim", "description": "10k Monte Carlo simulation on any specific prop"},
         {"command": "slip", "description": "Joint Gaussian Copula parlay evaluator"},
+        {"command": "combo", "description": "Auto-compile +EV parlay combo (/combo or /combo CLE)"},
+        {"command": "stress", "description": "Empirical bootstrap & macro crisis stress-test"},
+        {"command": "btc", "description": "Kalshi 15m BTC binary options status & controls"},
         {"command": "build", "description": "Interactive manual slip builder"},
         {"command": "sniper", "description": "Arm or disarm autonomous order sniper (on/off)"},
         {"command": "mode", "description": "Toggle Live Real-Money vs Simulation mode"},
@@ -3603,12 +3615,14 @@ def build_help_commands_report() -> str:
         "• `/push` — Synchronize code & deploy updates to GitHub\n"
         "• `/sync_commands` — Force sync all bot commands with Telegram's popup menu\n\n"
         "🔍 *MANUAL SPORT SCANS (10,000 MC DRAWS):*\n"
-        "• `/nba` — Scan NBA player props (Points, Rebounds, Assists, 3PT, PRA)\n"
-        "  _Usage:_ `/nba` or `/nba LeBron James O25.5 PTS`\n"
+        "• `/nba` — Simulate NBA player props or team games (Points, Rebounds, Assists, 3PT, PRA)\n"
+        "  _Usage:_ `/nba Steph Curry 3pts` or `/nba Scottie Barnes pts` or `/nba Clippers`\n"
         "• `/livesim` (or `/combos`) — Live NBA Slate telemetry, rotation checks & Copula combos\n"
         "• `/nfl` (or `/cfb`) — Scan NFL & CFB props (Passing, Rushing, Receiving, TDs)\n"
         "  _Usage:_ `/nfl` or `/nfl Mahomes O274.5 PASS YDS`\n"
+        "• `/nhl` — Scan NHL player props (SOG, Goals, Assists)\n"
         "• `/atd` — Live NFL Anytime Touchdown drive predictor & front-running anticipatory trigger\n"
+        "• `/drive` (or `/ngs`) — AWS Next Gen Stats live drive pace (sec/play), personnel & TE2 leak radar\n"
         "• `/atd_odds` — Hot-reload sportsbook ATD lines (`/atd_odds Hunt -115, Steele +550` or `/atd_odds fetch kc`)\n"
         "• `/tennis` (or `/atp`, `/wta`) — Scan Tennis match & set props or simulate matchups\n"
         "  _Usage:_ `/tennis` (scan board) or `/tennis Sinner vs Alcaraz HARD` (matchup sim)\n"
@@ -3640,7 +3654,10 @@ def build_help_commands_report() -> str:
         "• `/pnl` — Session bankroll, Win-Loss-Push record & settled ROI\n"
         "• `/watch` — Live streamed.pk & Sweat HUD video stream links\n"
         "• `/simsettle` — Grade open positions with test outcomes\n"
-        "• `/reset` — Reset SIM account balance to baseline ($32.22)"
+        "• `/reset` — Reset SIM account balance to baseline ($32.22)\n\n"
+        "₿ *CRYPTO & MODEL AUDIT:*\n"
+        "• `/btc [status|on|off|live|sim|reset]` — Kalshi 15m BTC ($6 Self-Funding)\n"
+        "• `/audit [seed|nba|nfl|tennis]` — Prospective 500-1000+ Bet Audit & CLV"
     )
 
 
@@ -3962,7 +3979,7 @@ async def telegram_notifier_and_command_loop():
                                     air_bridge_core.handle_sport_command,
                                     cb_chat_id, f"/{_p[1]} {_pl['name']} {_p[3]} {_p[4]}".strip(), live_kalshi_balance, False, False, _pl["name"], _pl,
                                 )
-                                await asyncio.to_thread(notify_telegram, _h, _k, cb_chat_id, "HTML")
+                                await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, _h, _k, "HTML")
                             except Exception as _pe:
                                 print(f"[PICKER-ERR] {_pe}")
                             continue
@@ -4366,7 +4383,8 @@ async def telegram_notifier_and_command_loop():
 
                     # AIR-BRIDGE SINGLE-EXIT GATE: sport player commands handled ONCE, no legacy code runs
                     _gate_toks = clean_text.split()
-                    if _gate_toks and _gate_toks[0].startswith("/") and _gate_toks[0].lstrip("/").split("@")[0].upper() in ("NBA", "NFL", "NHL", "MLB", "CFB", "TENNIS"):
+                    _cmd_first = _gate_toks[0].lstrip("/").split("@")[0].upper() if _gate_toks else ""
+                    if _cmd_first in ("NBA", "NFL", "NHL", "MLB", "CFB", "TENNIS") and len(_gate_toks) > 1:
                         try:
                             import air_bridge_core
                             gate_html, gate_kb = await asyncio.to_thread(
@@ -4557,7 +4575,32 @@ async def telegram_notifier_and_command_loop():
                         else:
                             await asyncio.to_thread(notify_telegram, rep_txt, rep_kb)
 
-                    elif low.startswith(("/slip", "/parlay", "/combo")):
+                    elif low.startswith(("/combo", "/combos")):
+                        parts = clean_text.split(maxsplit=1)
+                        arg_val = parts[1].strip() if len(parts) > 1 else ""
+                        if "|" in arg_val:
+                            rep_txt, rep_kb = await asyncio.to_thread(execute_manual_slip, arg_val, target_cid)
+                            parse_m = "Markdown"
+                        else:
+                            target_team = arg_val.upper() if (arg_val and len(arg_val) <= 4 and arg_val.isalpha()) else (arg_val if arg_val else None)
+                            try:
+                                from sim_prop_bridge import scan_and_build_combo
+                                card_html, orders = await asyncio.to_thread(
+                                    scan_and_build_combo,
+                                    target_team=target_team,
+                                    legs_count=3,
+                                )
+                                rep_txt = card_html
+                            except Exception as c_err:
+                                rep_txt = f"⚠️ <b>Combo Compiler Error:</b> <code>{html.escape(str(c_err))}</code>"
+                            _, rep_kb = build_menu_hud_payload()
+                            parse_m = "HTML"
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid, parse_m)
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, None, parse_m)
+
+                    elif low.startswith(("/slip", "/parlay")):
                         parts = clean_text.split(maxsplit=1)
                         if len(parts) > 1 and parts[1].strip():
                             rep_txt, rep_kb = await asyncio.to_thread(execute_manual_slip, parts[1].strip(), target_cid)
@@ -4685,6 +4728,26 @@ async def telegram_notifier_and_command_loop():
                             err_trace = traceback.format_exc()
                             print(f"[ATD-ERR] {atd_err}\n{err_trace}")
                             err_msg = f"❌ <b>Live NFL ATD Error:</b> <code>{html.escape(str(atd_err))}</code>"
+                            _, hud_kb = build_menu_hud_payload()
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, err_msg, hud_kb, target_cid, "HTML")
+                            else:
+                                await asyncio.to_thread(notify_telegram, err_msg, hud_kb, None, "HTML")
+
+                    elif low.startswith(("/drive", "/ngs", "/telemetry")):
+                        try:
+                            import live_nfl_atd_engine
+                            parts = clean_text.split(maxsplit=1)
+                            q_arg = parts[1].strip() if len(parts) > 1 else None
+                            drive_html, drive_kb = await asyncio.to_thread(live_nfl_atd_engine.scan_live_drive_telemetry, q_arg)
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, drive_html, drive_kb, target_cid, "HTML")
+                            else:
+                                await asyncio.to_thread(notify_telegram, drive_html, drive_kb, None, "HTML")
+                        except Exception as drive_err:
+                            err_trace = traceback.format_exc()
+                            print(f"[DRIVE-ERR] {drive_err}\n{err_trace}")
+                            err_msg = f"❌ <b>AWS Next Gen Stats Drive Error:</b> <code>{html.escape(str(drive_err))}</code>"
                             _, hud_kb = build_menu_hud_payload()
                             if target_cid:
                                 await asyncio.to_thread(notify_telegram, err_msg, hud_kb, target_cid, "HTML")
@@ -5053,6 +5116,101 @@ async def telegram_notifier_and_command_loop():
                         else:
                             await asyncio.to_thread(notify_telegram, st_txt, hud_kb)
 
+                    elif low.startswith(("/btc", "/crypto")):
+                        import kalshi_btc15m_engine
+                        btc_engine = kalshi_btc15m_engine.get_btc_engine()
+                        parts = low.split()
+                        cmd_arg = parts[1] if len(parts) > 1 else "status"
+                        if cmd_arg in ("live", "real"):
+                            btc_engine.mode = "LIVE"
+                            rep = f"🟢 *Kalshi BTC 15M switched to LIVE REAL-MONEY execution!*\n\n{btc_engine.summary()}"
+                        elif cmd_arg in ("sim", "paper"):
+                            btc_engine.mode = "SIM"
+                            rep = f"🎮 *Kalshi BTC 15M switched to SIMULATION mode!*\n\n{btc_engine.summary()}"
+                        elif cmd_arg in ("on", "start", "resume"):
+                            btc_engine.auto_running = True
+                            btc_engine.halted = False
+                            rep = f"▶️ *Kalshi BTC 15M Auto-Trader Activated!*\n\n{btc_engine.summary()}"
+                        elif cmd_arg in ("off", "stop", "pause"):
+                            btc_engine.auto_running = False
+                            rep = f"⏸️ *Kalshi BTC 15M Auto-Trader Paused.*\n\n{btc_engine.summary()}"
+                        elif cmd_arg in ("fire", "trade", "now", "scan"):
+                            async with aiohttp.ClientSession() as aio_sess:
+                                await btc_engine.step_cycle(aio_sess)
+                            rep = f"⚡ *Manual BTC 15M Cycle Evaluated!*\n\n{btc_engine.summary()}"
+                        elif cmd_arg in ("reset", "restart"):
+                            btc_engine.seed_capital = 6.00
+                            btc_engine.realized_pnl = 0.0
+                            btc_engine.positions.clear()
+                            btc_engine.halted = False
+                            btc_engine.wins = 0
+                            btc_engine.losses = 0
+                            btc_engine.trades_count = 0
+                            rep = f"♻️ *Kalshi BTC 15M reset to $6.00 Seed Capital!*\n\n{btc_engine.summary()}"
+                        else:
+                            rep = btc_engine.summary()
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb)
+
+                    elif low.startswith(("/pull", "/import_files", "/import")):
+                        import find_user_downloads
+                        res = await asyncio.to_thread(find_user_downloads.scan_and_import_downloads)
+                        n_imported = len(res.get("extracted_or_imported_files", []))
+                        n_scanned = res.get("total_downloads_inspected", 0)
+                        file_lines = "\n".join(f"• <code>{f}</code>" for f in res.get("extracted_or_imported_files", [])[:15]) or "<i>No new archives/files found in Downloads</i>"
+                        rep = (
+                            f"📥 <b>DOWNLOADS & FILE IMPORTER:</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"• 📁 <b>Scanned Items:</b> <code>{n_scanned}</code> in /sdcard/Download & storage\n"
+                            f"• ✅ <b>Imported Files:</b> <code>{n_imported}</code>\n\n"
+                            f"{file_lines}\n\n"
+                            f"📁 <i>Target folder: ~/peezy_bot/imported_files/</i>"
+                        )
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb, target_cid, "HTML")
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb, None, "HTML")
+
+                    elif low.startswith(("/stress", "/bootstrap", "/tails")):
+                        import unified_sim_pipeline
+                        parts = clean_text.split(maxsplit=1)
+                        query_arg = parts[1].strip() if len(parts) > 1 and parts[1].strip() else "Donovan Mitchell"
+                        try:
+                            sim_result = await asyncio.to_thread(
+                                unified_sim_pipeline.run_unified_sim_pipeline,
+                                query_arg,
+                                "NBA",
+                            )
+                            rep = unified_sim_pipeline.format_unified_sim_card(sim_result)
+                        except Exception as stress_err:
+                            rep = f"⚠️ *Stress-Test Error:* `{stress_err}`"
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb)
+
+                    elif low.startswith(("/audit", "/prospective", "/clv", "/calibration")):
+                        import prospective_model_auditor
+                        parts = low.split()
+                        cmd_arg = parts[1] if len(parts) > 1 else ""
+                        if cmd_arg in ("seed", "baseline", "init", "500"):
+                            n_seeded = await asyncio.to_thread(prospective_model_auditor.seed_walk_forward_baseline, 500)
+                            audit_text = await asyncio.to_thread(prospective_model_auditor.format_prospective_audit_card)
+                            rep = f"🌱 *Populated {n_seeded} historical walk-forward baseline bets!*\n\n{audit_text}"
+                        else:
+                            sport_filter = cmd_arg.upper() if cmd_arg and cmd_arg.upper() in ("NBA", "NFL", "TENNIS", "BTC") else None
+                            rep = await asyncio.to_thread(prospective_model_auditor.format_prospective_audit_card, sport_filter)
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb)
+
                     elif low.startswith("/"):
                         unknown_cmd = clean_text.split()[0]
                         rep_txt = (
@@ -5256,6 +5414,7 @@ async def auto_pilot_loop():
     global last_scan_ts, last_markets_checked, last_scan_diag
     cycle_num = 0
     last_broadcast_ts = 0.0
+    last_combo_drop_ts = 0.0
     last_broadcast_sig = ""
     await asyncio.sleep(4)  # Initial boot grace
     print("[AUTO-PILOT] Full-auto background engine loop active (60s loop).")
@@ -5351,6 +5510,22 @@ async def auto_pilot_loop():
                 notify_telegram(rep_txt, reply_markup=rep_kb, chat_id=target_cid, parse_mode="HTML")
                 last_broadcast_ts = now
                 last_broadcast_sig = current_sig
+
+            # 3. Autonomous Periodic +EV Combo Drop (every 30-45 mins)
+            if (now - last_combo_drop_ts >= 1800) and target_cid:
+                try:
+                    from sim_prop_bridge import push_telegram_combo_alert
+                    await asyncio.to_thread(
+                        push_telegram_combo_alert,
+                        TELEGRAM_BOT_TOKEN,
+                        target_cid,
+                        None,
+                        3,
+                    )
+                    last_combo_drop_ts = now
+                    print(f"[AUTO-PILOT] 🎯 Pushed periodic 3-leg +EV parlay combo alert to Telegram!")
+                except Exception as combo_drop_err:
+                    print(f"[AUTO-PILOT-COMBO-DROP-ERR] {combo_drop_err}")
 
         except Exception as err:
             print(f"[AUTO-PILOT-EXC] Cycle error: {err}")
@@ -5464,6 +5639,26 @@ async def run_nfl_atd_background_loop():
         print(f"[NFL-ATD-LOOP-WARN] Multiplexer loop notice: {exc}")
 
 
+async def run_btc_15m_background_loop():
+    """
+    Background cycle for Kalshi 15m BTC binary options with $6 seed capital & self-funding rules.
+    Runs every 5 seconds, monitors settlement, enforces 35¢-65¢ price band and maker limit pricing.
+    """
+    try:
+        import kalshi_btc15m_engine
+        engine = kalshi_btc15m_engine.get_btc_engine()
+        async with aiohttp.ClientSession() as aio_sess:
+            while True:
+                if engine.auto_running and not engine.halted:
+                    try:
+                        await engine.step_cycle(aio_sess)
+                    except Exception as btc_err:
+                        print(f"[BTC-LOOP-EXC] {btc_err}")
+                await asyncio.sleep(5)
+    except Exception as exc:
+        print(f"[BTC-LOOP-WARN] Notice: {exc}")
+
+
 async def main():
     reaped = kill_stale_bot_processes()
     if reaped:
@@ -5485,7 +5680,7 @@ async def main():
     print(f" AURASCAN // KALSHI V2 HYBRID ENGINE [{mode_banner}] (Ed25519 Native)")
     print(f" Kalshi Bal: ${live_kalshi_balance:.2f} | Sniper: {'ARMED' if SNIPER_ARMED else 'DISARMED'} | Slate Cap: ${curr_slate_cap:.2f} ({int(bankroll_allocation_pct*100)}%)")
     print(f" Web HUD: http://127.0.0.1:{ACTIVE_WEB_PORT} (0.0.0.0:{ACTIVE_WEB_PORT}) | Vercel: https://peezt-tv.vercel.app")
-    print(" Commands: /menu | /mode [live|sim] | /api | /bal | /cap [10-100] | /ports | /build | /resume | /atd | /atd_odds")
+    print(" Commands: /menu | /mode [live|sim] | /api | /bal | /cap [10-100] | /ports | /build | /resume | /atd | /atd_odds | /btc | /audit")
     print("======================================================================")
     try:
         await asyncio.gather(
@@ -5494,6 +5689,7 @@ async def main():
             rest_scanner_loop(),
             auto_pilot_loop(),
             run_nfl_atd_background_loop(),
+            run_btc_15m_background_loop(),
         )
     finally:
         if web_runner:

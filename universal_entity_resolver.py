@@ -185,7 +185,10 @@ def build_universal_roster_index(sport: str = "NBA", force_refresh: bool = False
         "UFC": "mma/ufc",
     }
     espn_path = path_map.get(sport_u, "basketball/nba")
-    url = f"https://site.api.espn.com/apis/site/v2/sports/{espn_path}/scoreboard"
+    utc_now = datetime.datetime.now(datetime.timezone.utc)
+    today_str = (utc_now - datetime.timedelta(hours=7)).strftime("%Y%m%d")
+    today_iso = (utc_now - datetime.timedelta(hours=7)).strftime("%Y-%m-%d")
+    url = f"https://site.api.espn.com/apis/site/v2/sports/{espn_path}/scoreboard?dates={today_str}"
 
     players_by_key: Dict[str, Dict[str, Any]] = {}
     active_teams: Set[str] = set()
@@ -194,7 +197,24 @@ def build_universal_roster_index(sport: str = "NBA", force_refresh: bool = False
         r = requests.get(url, timeout=5)
         if r.status_code == 200:
             events = r.json().get("events", [])
+            if not events:
+                fb_url = f"https://site.api.espn.com/apis/site/v2/sports/{espn_path}/scoreboard"
+                try:
+                    fb_r = requests.get(fb_url, timeout=5)
+                    if fb_r.status_code == 200:
+                        events = fb_r.json().get("events", [])
+                except Exception:
+                    pass
+
             for ev in events:
+                raw_date_iso = ev.get("date", "")
+                st_obj = ev.get("status", {}).get("type", {})
+                ev_state = str(st_obj.get("state") or "pre").lower()
+
+                # Skip completed games from prior dates
+                if raw_date_iso and raw_date_iso[:10] < today_iso and ev_state == "post":
+                    continue
+
                 ev_id = ev.get("id")
                 comps = ev.get("competitions", [{}])[0]
                 competitors = comps.get("competitors", [])
@@ -383,6 +403,8 @@ _KNOWN_SUPERSTARS = {
         {"name": "Kevin Durant", "team": "PHX", "jersey": "35", "pos": "PF"},
         {"name": "Jayson Tatum", "team": "BOS", "jersey": "0", "pos": "SF"},
         {"name": "Jaylen Brown", "team": "BOS", "jersey": "7", "pos": "SG"},
+        {"name": "Paul George", "team": "PHI", "jersey": "8", "pos": "SF"},
+        {"name": "Donovan Mitchell", "team": "CLE", "jersey": "45", "pos": "SG"},
         {"name": "Trae Young", "team": "ATL", "jersey": "11", "pos": "PG"},
         {"name": "Zion Williamson", "team": "NOP", "jersey": "1", "pos": "PF"},
         {"name": "De'Aaron Fox", "team": "SAC", "jersey": "5", "pos": "PG"},
@@ -431,17 +453,26 @@ def resolve_athlete_universal(query_str: str, sport: str = "NBA") -> Dict[str, A
     sport_u = sport.upper()
     roster_index = build_universal_roster_index(sport_u)
     clean_q = clean_token(query_str)
+    q_tokens = clean_q.split()
 
     # 1. Exact match in indexed keys
     if clean_q in roster_index:
         return roster_index[clean_q]
 
-    # 2. Check if clean_q matches any sub-token
-    for k, entry in roster_index.items():
-        if clean_q == entry["last_name"] or clean_q == entry["first_name"]:
-            return entry
-        if clean_q in entry["clean_full"] or entry["clean_full"] in clean_q:
-            return entry
+    # 2. Multi-token queries: exact full name or full token subset (never match just a single word)
+    if len(q_tokens) > 1:
+        for k, entry in roster_index.items():
+            if clean_q == entry.get("clean_full"):
+                return entry
+        for k, entry in roster_index.items():
+            ent_toks = set(entry.get("clean_full", "").split())
+            if all(qt in ent_toks for qt in q_tokens):
+                return entry
+    else:
+        # Single token: exact match on first or last name
+        for k, entry in roster_index.items():
+            if clean_q == entry.get("last_name") or clean_q == entry.get("first_name"):
+                return entry
 
     # 3. Fuzzy match using SequenceMatcher
     best_entry = None

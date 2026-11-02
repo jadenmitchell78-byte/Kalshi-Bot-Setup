@@ -1,5 +1,5 @@
 # ~/peezy_bot/auto_market_index.py
-"""
+r"""
 Universal Daily Kalshi Market Auto-Indexer & Zero-Dictionary ESPN Resolver:
 1. get_all_daily_kalshi_markets(force_refresh=False):
    - Sweeps Kalshi /trade-api/v2/events?status=open&with_nested_markets=true (paginated up to 4 pages)
@@ -98,6 +98,26 @@ SPORT_PATH_MAP = {
     "ATP": "tennis",
     "WTA": "tennis",
 }
+
+
+def derive_espn_season(dt: Optional[datetime.datetime] = None, sport: str = "NBA") -> int:
+    """
+    Derives the ESPN season year dynamically from a date (defaulting to current UTC date).
+    ESPN convention:
+    - Fall-to-spring sports (NBA, NFL, NHL, CFB, CBB):
+      August through December (months 8-12) maps to the next calendar year (current_year + 1).
+      January through July (months 1-7) maps to the current calendar year.
+      e.g. November 2026 -> season 2027 (the 2026-27 championship season).
+    - Summer/calendar-year sports (MLB, WNBA):
+      Maps to current calendar year regardless of month.
+    """
+    if dt is None:
+        dt = datetime.datetime.now(datetime.timezone.utc)
+    sp_u = str(sport or "NBA").upper()
+    if sp_u in ("MLB", "WNBA"):
+        return dt.year
+    return dt.year + 1 if dt.month >= 8 else dt.year
+
 
 STAT_STEMS: Dict[str, List[str]] = {
     "pts": ["point", "pts", "points"],
@@ -500,6 +520,100 @@ def search_kalshi_markets(
 _ESPN_ATHLETE_CACHE: Dict[str, Any] = {}
 
 
+def parse_espn_gamelog_data(gl_data: Dict[str, Any]) -> Tuple[List[Dict[str, float]], Dict[str, float]]:
+    """
+    Parses ESPN athlete gamelog payload into:
+    1. recent_logs: list of per-game stat dictionaries (PTS, REB, AST, 3PM, MIN, etc.)
+    2. season_averages: per-game averages computed across regular season events or from category totals.
+    Accepts real ESPN responses across both category-nested events and seasonType-level events.
+    """
+    recent_logs: List[Dict[str, float]] = []
+    season_averages: Dict[str, float] = {}
+
+    def _extract_val(raw_v: Any) -> Optional[float]:
+        if raw_v is None:
+            return None
+        s_v = str(raw_v).strip()
+        if not s_v or s_v in ("-", "--", "N/A"):
+            return None
+        if "-" in s_v and not s_v.startswith("-"):
+            s_v = s_v.split("-")[0]
+        try:
+            return float(s_v)
+        except (ValueError, TypeError):
+            return None
+
+    gl_labels = [str(n).upper() for n in (gl_data.get("labels") or gl_data.get("names") or [])]
+    gl_names = [str(n).upper() for n in (gl_data.get("names") or [])]
+    st_list = gl_data.get("seasonTypes") or []
+    for st_type in st_list:
+        st_disp = str(st_type.get("displayName") or st_type.get("name") or "").lower()
+        st_id = str(st_type.get("id") or st_type.get("type") or "")
+        if any(bad in st_disp for bad in ("postseason", "playoff", "play-in", "preseason", "all-star")):
+            continue
+        # Accept if explicitly "regular", ID is "2", or it's the sole seasonType entry
+        if st_disp and "regular" not in st_disp and st_id not in ("2", "") and len(st_list) > 1:
+            continue
+
+        cats = st_type.get("categories") or []
+        if not cats and st_type.get("events"):
+            cats = [st_type]
+        if not cats and gl_data.get("events"):
+            cats = [{"events": gl_data.get("events"), "labels": gl_labels, "names": gl_names}]
+
+        for cat in cats:
+            cat_labels = [str(n).upper() for n in (cat.get("labels") or gl_labels or cat.get("names") or [])]
+            cat_names = [str(n).upper() for n in (cat.get("names") or gl_names or [])]
+            for ev_row in (cat.get("events") or []):
+                vals = ev_row.get("stats") or []
+                if cat_labels and vals:
+                    row_map: Dict[str, float] = {}
+                    for col_i, raw_v in enumerate(vals):
+                        fv = _extract_val(raw_v)
+                        if fv is None:
+                            continue
+                        lbl = cat_labels[col_i] if col_i < len(cat_labels) else ""
+                        nm_col = cat_names[col_i] if col_i < len(cat_names) else ""
+                        if lbl:
+                            row_map[lbl] = fv
+                        if nm_col:
+                            row_map[nm_col] = fv
+                        if any(k in lbl for k in ("3PT", "3PM", "FG3", "3P")) and "%" not in lbl and "PCT" not in lbl:
+                            row_map["3PM"] = fv
+                            row_map["3PT"] = fv
+                        if any(k in nm_col for k in ("3PT", "3PM", "FG3", "3P")) and "%" not in nm_col and "PCT" not in nm_col:
+                            row_map["3PM"] = fv
+                            row_map["3PT"] = fv
+                    if row_map:
+                        recent_logs.append(row_map)
+
+            tot_vals = cat.get("totals") or []
+            if cat_labels and tot_vals:
+                n_ev = max(1, len(cat.get("events") or []))
+                for k_nm, raw_v in zip(cat_labels, tot_vals):
+                    fv = _extract_val(raw_v)
+                    if fv is not None and k_nm not in season_averages:
+                        if "PCT" in k_nm or "%" in k_nm or "AVG" in k_nm:
+                            season_averages[k_nm] = fv
+                        else:
+                            season_averages[k_nm] = round(fv / n_ev, 2)
+                if "GP" not in season_averages:
+                    season_averages["GP"] = float(len(cat.get("events") or []))
+
+    if recent_logs:
+        if "GP" not in season_averages or not season_averages.get("GP"):
+            season_averages["GP"] = float(len(recent_logs))
+        for stat_k in ("PTS", "REB", "AST", "3PM", "MIN"):
+            if stat_k not in season_averages or season_averages.get(stat_k) is None:
+                s_vals = [r[stat_k] for r in recent_logs if stat_k in r]
+                if s_vals:
+                    season_averages[stat_k] = round(sum(s_vals) / len(s_vals), 2)
+                    if stat_k == "3PM":
+                        season_averages["3PT"] = season_averages["3PM"]
+
+    return recent_logs, season_averages
+
+
 def fetch_espn_player_profile(
     player_query: str,
     sport: str = "NBA",
@@ -585,6 +699,9 @@ def fetch_espn_player_profile(
     season_averages: Dict[str, float] = {}
     prior_season_averages: Dict[str, float] = {}
     recent_logs: List[Dict[str, float]] = []
+    fetch_source = "ESPN"
+    fetch_season = str(derive_espn_season(sport=sport_u))
+    fetch_status_code = "200"
     if eff_athlete_id:
         def _extract_stat_value(raw_v: Any) -> Optional[float]:
             if raw_v is None:
@@ -600,9 +717,10 @@ def fetch_espn_player_profile(
             except (ValueError, TypeError):
                 return None
 
-        ov_url = f"https://site.web.api.espn.com/apis/common/v3/sports/{sport_path}/athletes/{eff_athlete_id}/overview"
+        ov_url = f"https://site.web.api.espn.com/apis/common/v3/sports/{sport_path}/athletes/{eff_athlete_id}/overview?season={fetch_season}"
         try:
             r_ov = requests.get(ov_url, headers=headers, timeout=5)
+            fetch_status_code = str(r_ov.status_code)
             if r_ov.status_code != 200:
                 log.warning("ESPN athlete overview HTTP %d for athlete_id=%s (%s)", r_ov.status_code, eff_athlete_id, ov_url)
             else:
@@ -614,7 +732,13 @@ def fetch_espn_player_profile(
                 splits = statistics.get("splits", [])
                 # splits[0] is current Regular Season; splits[1:] contains Career or Prior Season baseline
                 for sp_idx, sp in enumerate(splits):
-                    target_dict = season_averages if sp_idx == 0 else prior_season_averages
+                    sp_disp = str(sp.get("displayName") or sp.get("name") or "").lower()
+                    if "career" in sp_disp:
+                        target_dict = prior_season_averages
+                    elif sp_idx == 0:
+                        target_dict = season_averages
+                    else:
+                        target_dict = prior_season_averages
                     for stat_entry in sp.get("stats", []):
                         if isinstance(stat_entry, dict):
                             name = (stat_entry.get("abbreviation") or stat_entry.get("shortDisplayName") or stat_entry.get("name") or "").upper()
@@ -669,54 +793,49 @@ def fetch_espn_player_profile(
             log.warning("ESPN athlete overview request failed for athlete_id=%s: %s", eff_athlete_id, exc)
 
         # Step 2b: Always query dedicated gamelog endpoint if recent_logs or 3PM/PTS are missing
-        if not recent_logs or "PTS" not in season_averages:
-            gl_url = f"https://site.web.api.espn.com/apis/common/v3/sports/{sport_path}/athletes/{eff_athlete_id}/gamelog"
+        has_3pm_in_logs = any("3PM" in r or "3PT" in r for r in recent_logs)
+        if not recent_logs or "PTS" not in season_averages or "3PM" not in season_averages or not has_3pm_in_logs:
+            gl_url = f"https://site.web.api.espn.com/apis/common/v3/sports/{sport_path}/athletes/{eff_athlete_id}/gamelog?season={fetch_season}"
             try:
                 r_gl = requests.get(gl_url, headers=headers, timeout=5)
+                fetch_status_code = str(r_gl.status_code)
                 if r_gl.status_code != 200:
                     log.warning("ESPN athlete gamelog HTTP %d for athlete_id=%s (%s)", r_gl.status_code, eff_athlete_id, gl_url)
                 else:
                     gl_data = r_gl.json()
-                    gl_labels = [str(n).upper() for n in (gl_data.get("labels") or gl_data.get("names") or [])]
-                    gl_names = [str(n).upper() for n in (gl_data.get("names") or [])]
-                    for st_type in (gl_data.get("seasonTypes") or []):
-                        st_disp = str(st_type.get("displayName") or st_type.get("name") or "").lower()
-                        if any(bad in st_disp for bad in ("postseason", "playoff", "play-in", "preseason", "all-star")):
-                            continue
-                        if st_disp and "regular" not in st_disp:
-                            continue
-                        for cat in (st_type.get("categories") or []):
-                            cat_labels = [str(n).upper() for n in (cat.get("labels") or gl_labels or cat.get("names") or [])]
-                            cat_names = [str(n).upper() for n in (cat.get("names") or gl_names or [])]
-                            for ev_row in (cat.get("events") or []):
-                                vals = ev_row.get("stats") or []
-                                if cat_labels and vals:
-                                    row_map = {}
-                                    for col_i, raw_v in enumerate(vals):
-                                        fv = _extract_stat_value(raw_v)
-                                        if fv is None:
-                                            continue
-                                        if col_i < len(cat_labels):
-                                            row_map[cat_labels[col_i]] = fv
-                                        if col_i < len(cat_names):
-                                            row_map[cat_names[col_i]] = fv
-                                    if row_map:
-                                        recent_logs.append(row_map)
-                            # Also check category totals/averages if season_averages was empty
-                            tot_vals = cat.get("totals") or []
-                            if cat_labels and tot_vals and not season_averages:
-                                n_ev = max(1, len(cat.get("events") or []))
-                                for k_nm, raw_v in zip(cat_labels, tot_vals):
-                                    fv = _extract_stat_value(raw_v)
-                                    if fv is not None:
-                                        # Totals in gamelog are season sums for counting stats unless "%" or "AVG"
-                                        if "PCT" in k_nm or "%" in k_nm or "AVG" in k_nm:
-                                            season_averages[k_nm] = fv
-                                        else:
-                                            season_averages[k_nm] = round(fv / n_ev, 2)
-                                season_averages["GP"] = float(len(cat.get("events") or []))
+                    parsed_logs, parsed_avgs = parse_espn_gamelog_data(gl_data)
+                    for r in parsed_logs:
+                        recent_logs.append(r)
+                    for k_nm, fv in parsed_avgs.items():
+                        if k_nm not in season_averages or season_averages.get(k_nm) is None:
+                            season_averages[k_nm] = fv
             except Exception as exc:
                 log.warning("ESPN athlete gamelog request failed for athlete_id=%s: %s", eff_athlete_id, exc)
+
+        # Ensure season_averages has 3PM computed from authentic game logs if missing from overview
+        if ("3PM" not in season_averages or season_averages.get("3PM") is None) and recent_logs:
+            threes_found = [r["3PM"] for r in recent_logs if "3PM" in r]
+            if threes_found:
+                season_averages["3PM"] = round(sum(threes_found) / len(threes_found), 2)
+                season_averages["3PT"] = season_averages["3PM"]
+                season_averages["3PM"] = round(sum(threes_found) / len(threes_found), 2)
+                season_averages["3PT"] = season_averages["3PM"]
+
+        # Ensure prior_season_averages parses career/prior splits from overview if empty
+        if not prior_season_averages or "3PM" not in prior_season_averages:
+            for sp in splits[1:]:
+                raw_stats = sp.get("stats", [])
+                if stat_labels and raw_stats and isinstance(raw_stats[0], (str, int, float)):
+                    for col_i, raw_v in enumerate(raw_stats):
+                        fv = _extract_stat_value(raw_v)
+                        if fv is None:
+                            continue
+                        lbl = stat_labels[col_i] if col_i < len(stat_labels) else ""
+                        if lbl:
+                            prior_season_averages[lbl] = fv
+                        if any(k in lbl for k in ("3PT", "3PM", "FG3", "3P")) and "%" not in lbl and "PCT" not in lbl:
+                            prior_season_averages["3PM"] = fv
+                            prior_season_averages["3PT"] = fv
 
     # Step 3: Query Today's Live Scoreboard for Matchup, Teammates, Injuries & Opponent Stats
     matchup = f"{team_abbr} Game"
@@ -727,9 +846,41 @@ def fetch_espn_player_profile(
     opp_team = ""
     opp_factor = 1.0
     is_home: Optional[bool] = None
-    games_played = int(season_averages.get("GP") or season_averages.get("GAMESPLAYED") or season_averages.get("G") or len(recent_logs) or 0)
+    has_game_today: bool = False
+    game_id: Optional[str] = None
+    game_status: str = "NO_GAME_TODAY"
+    game_status_detail: str = ""
+    tip_text: str = "No game scheduled today"
+    is_player_out: bool = False
+    player_out_reason: str = ""
+    games_played = max(int(season_averages.get("GP") or season_averages.get("GAMESPLAYED") or season_averages.get("G") or 0), len(recent_logs))
 
-    sb_url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/scoreboard"
+    # Team abbreviation normalizer for reliable scoreboard matching across GS/GSW, SA/SAS, etc.
+    def _norm_team_abbr(t: str) -> str:
+        s = str(t or "").upper().strip()
+        aliases = {
+            "GSW": "GS", "GOLDEN STATE": "GS", "WARRIORS": "GS",
+            "PHX": "PHX", "PHO": "PHX", "PHOENIX": "PHX", "SUNS": "PHX",
+            "NOP": "NO", "NEW ORLEANS": "NO", "PELICANS": "NO",
+            "SAS": "SA", "SAN ANTONIO": "SA", "SPURS": "SA",
+            "UTA": "UTAH", "UTAH JAZZ": "UTAH", "JAZZ": "UTAH",
+            "NYK": "NY", "NEW YORK": "NY", "KNICKS": "NY",
+            "BKN": "BKN", "BROOKLYN": "BKN", "NETS": "BKN",
+            "LAC": "LAC", "LA CLIPPERS": "LAC", "CLIPPERS": "LAC",
+            "LAL": "LAL", "LA LAKERS": "LAL", "LAKERS": "LAL",
+            "WAS": "WSH", "WASHINGTON": "WSH", "WIZARDS": "WSH",
+        }
+        return aliases.get(s, s)
+
+    def _team_codes_match(t1: str, t2: str) -> bool:
+        if not t1 or not t2:
+            return False
+        return _norm_team_abbr(t1) == _norm_team_abbr(t2) or t1.upper() == t2.upper()
+
+    utc_now = datetime.datetime.now(datetime.timezone.utc)
+    today_str = (utc_now - datetime.timedelta(hours=7)).strftime("%Y%m%d")
+    today_iso = (utc_now - datetime.timedelta(hours=7)).strftime("%Y-%m-%d")
+    sb_url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/scoreboard?dates={today_str}"
     try:
         r_sb = requests.get(sb_url, headers=headers, timeout=5)
         if r_sb.status_code != 200:
@@ -737,7 +888,35 @@ def fetch_espn_player_profile(
         else:
             sb_data = r_sb.json()
             events = sb_data.get("events", [])
+            if not events:
+                # Fallback to general scoreboard if date filter returned empty
+                fb_sb_url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/scoreboard"
+                try:
+                    r_fb = requests.get(fb_sb_url, headers=headers, timeout=5)
+                    if r_fb.status_code == 200:
+                        events = r_fb.json().get("events", [])
+                except Exception:
+                    pass
+
             for ev in events:
+                dt_str = ev.get("date")
+                ev_game_date = ""
+                if dt_str:
+                    try:
+                        utc_dt = datetime.datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+                        us_dt = utc_dt - datetime.timedelta(hours=7)
+                        ev_game_date = us_dt.strftime("%Y-%m-%d")
+                    except Exception:
+                        pass
+
+                st_obj = ev.get("status") or {}
+                typ_obj = st_obj.get("type") or {}
+                ev_state = str(typ_obj.get("state") or "pre").lower()
+
+                # Skip completed games from prior days so they never hijack today's lookup
+                if ev_game_date and ev_game_date < today_iso and ev_state == "post":
+                    continue
+
                 comps = ev.get("competitions", [{}])[0]
                 competitors = comps.get("competitors", [])
                 team_match = False
@@ -745,13 +924,14 @@ def fetch_espn_player_profile(
                 for c in competitors:
                     c_team = c.get("team", {})
                     c_abbr = (c_team.get("abbreviation") or "").upper()
-                    if c_abbr == team_abbr.upper():
+                    if _team_codes_match(c_abbr, team_abbr):
                         team_match = True
                         is_home = (c.get("homeAway") == "home")
                     else:
                         opp_abbr = c_abbr
 
                 if team_match:
+                    has_game_today = True
                     opp_team = opp_abbr
                     home_c = next((c for c in competitors if c.get("homeAway") == "home"), {})
                     away_c = next((c for c in competitors if c.get("homeAway") == "away"), {})
@@ -759,16 +939,19 @@ def fetch_espn_player_profile(
                     a_abbr = away_c.get("team", {}).get("abbreviation", "AWAY")
                     matchup = f"{a_abbr} @ {h_abbr}"
 
-                    dt_str = ev.get("date")
-                    if dt_str:
-                        try:
-                            utc_dt = datetime.datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-                            us_dt = utc_dt - datetime.timedelta(hours=7)
-                            game_date = us_dt.strftime("%Y-%m-%d")
-                        except Exception as dt_exc:
-                            log.debug("Scoreboard date parse warning: %s", dt_exc)
+                    game_status = ev_state
+                    game_status_detail = str(typ_obj.get("shortDetail") or typ_obj.get("detail") or "")
+                    tip_text = game_status_detail or "Today"
 
-                    game_id = ev.get("id")
+                    if ev_game_date:
+                        game_date = ev_game_date
+                    if dt_str and not game_status_detail:
+                        try:
+                            tip_text = (utc_dt - datetime.timedelta(hours=4)).strftime("%I:%M %p ET")
+                        except Exception:
+                            pass
+
+                    game_id = str(ev.get("id") or "")
                     if game_id:
                         sum_url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/summary?event={game_id}"
                         try:
@@ -780,24 +963,29 @@ def fetch_espn_player_profile(
                                 box = sum_data.get("boxscore", {})
                                 for player_team in box.get("players", []):
                                     pt_abbr = player_team.get("team", {}).get("abbreviation", "").upper()
-                                    if pt_abbr == team_abbr.upper():
+                                    if _team_codes_match(pt_abbr, team_abbr):
                                         for stat_cat in player_team.get("statistics", []):
                                             for ath in stat_cat.get("athletes", []):
                                                 a_name = ath.get("athlete", {}).get("displayName")
                                                 if a_name and strip_accents(a_name) != strip_accents(full_name):
                                                     if a_name not in active_teammates:
                                                         active_teammates.append(a_name)
-                                # Parse team injuries from ESPN summary
+                                # Parse team injuries from ESPN summary (checking both queried player and teammates)
                                 for inj_team in (sum_data.get("injuries") or []):
                                     it_abbr = (inj_team.get("team", {}).get("abbreviation") or "").upper()
-                                    if it_abbr == team_abbr.upper():
+                                    if _team_codes_match(it_abbr, team_abbr):
                                         for inj_item in (inj_team.get("injuries") or []):
                                             inj_status = str(inj_item.get("status") or "").lower()
                                             inj_name = (inj_item.get("athlete") or {}).get("displayName")
-                                            if inj_name and strip_accents(inj_name) != strip_accents(full_name):
-                                                if any(s in inj_status for s in ("out", "doubtful", "injured reserve", "ir", "suspended")):
-                                                    if inj_name not in out_teammates:
-                                                        out_teammates.append(inj_name)
+                                            if inj_name:
+                                                if strip_accents(inj_name) == strip_accents(full_name):
+                                                    if any(s in inj_status for s in ("out", "inactive", "injured reserve", "ir", "suspended", "doubtful")):
+                                                        is_player_out = True
+                                                        player_out_reason = str(inj_item.get("type", {}).get("description") or inj_status.title() or "Ruled OUT")
+                                                else:
+                                                    if any(s in inj_status for s in ("out", "doubtful", "injured reserve", "ir", "suspended")):
+                                                        if inj_name not in out_teammates:
+                                                            out_teammates.append(inj_name)
                         except Exception as sum_exc:
                             log.warning("ESPN summary request failed for event=%s: %s", game_id, sum_exc)
                     break
@@ -821,16 +1009,18 @@ def fetch_espn_player_profile(
                         matchup = s_name
                     for comp in ev0.get("competitions", [{}])[0].get("competitors", []):
                         c_ab = (comp.get("team", {}).get("abbreviation") or "").upper()
-                        if c_ab == team_abbr.upper():
+                        if _team_codes_match(c_ab, team_abbr):
                             is_home = (comp.get("homeAway") == "home")
                         elif c_ab:
                             opp_team = c_ab
+                    # Do NOT overwrite game_date with today: preserve the actual next game date and keep has_game_today = False
                     dt_val = ev0.get("date")
                     if dt_val:
                         try:
                             utc_dt = datetime.datetime.fromisoformat(dt_val.replace("Z", "+00:00"))
                             us_dt = utc_dt - datetime.timedelta(hours=7)
                             game_date = us_dt.strftime("%Y-%m-%d")
+                            tip_text = f"Next game: {us_dt.strftime('%b %d')}"
                         except Exception as dt_exc:
                             log.debug("Team nextEvent date parse warning: %s", dt_exc)
         except Exception as team_exc:
@@ -844,7 +1034,7 @@ def fetch_espn_player_profile(
         try:
             import player_index
             for p_idx in player_index.get_index(sport_u):
-                if str(p_idx.get("team") or "").upper() == team_abbr.upper():
+                if _team_codes_match(str(p_idx.get("team") or ""), team_abbr):
                     nm_idx = p_idx.get("name")
                     if nm_idx and strip_accents(nm_idx) != strip_accents(full_name):
                         active_teammates.append(nm_idx)
@@ -863,7 +1053,7 @@ def fetch_espn_player_profile(
                     items_list = ath_entry.get("items", [ath_entry]) if "items" in ath_entry else [ath_entry]
                     for item in items_list:
                         name = item.get("displayName") or item.get("fullName")
-                        if not name or strip_accents(name) == strip_accents(full_name):
+                        if not name:
                             continue
                         inj_list = item.get("injuries") or []
                         st_type = str((item.get("status") or {}).get("type") or (item.get("status") or {}).get("name") or "").lower()
@@ -871,6 +1061,13 @@ def fetch_espn_player_profile(
                             any(w in str(inj.get("status") or "").lower() for w in ("out", "doubtful", "ir", "injured reserve", "suspended"))
                             for inj in inj_list
                         ) or any(w in st_type for w in ("out", "doubtful", "ir", "inactive", "suspended"))
+
+                        if strip_accents(name) == strip_accents(full_name):
+                            if is_out:
+                                is_player_out = True
+                                player_out_reason = st_type.title() if st_type else "Ruled OUT / Inactive"
+                            continue
+
                         if is_out:
                             if name not in out_teammates:
                                 out_teammates.append(name)
@@ -920,22 +1117,25 @@ def fetch_espn_player_profile(
                     break
         return round(sum(vals) / len(vals), 2) if vals else None
 
-    def _pick_stat(keys: Tuple[str, ...], default_val: float) -> float:
+    def _pick_stat(keys: Tuple[str, ...], default_val: float) -> Optional[float]:
         for k in keys:
             if k in season_averages and season_averages[k] is not None:
                 return float(season_averages[k])
         log_avg = _avg_from_logs(keys)
         if log_avg is not None:
             return log_avg
+        if games_played <= 0 and not recent_logs:
+            return None
         return default_val
 
     pos_u = str(position or "").upper()
     default_3pm = 0.3 if "C" in pos_u and "G" not in pos_u else (1.5 if "F" in pos_u and "G" not in pos_u else 2.2)
 
+    threes_keys = ("3PM", "3PT", "FG3M", "3P", "THREES", "3PM-3PA", "3PTM", "THREEPOINTFIELDGOALSMADE", "FG3", "3POINTS")
     pts = _pick_stat(("PTS", "POINTS", "AVG"), 18.5)
     reb = _pick_stat(("REB", "REBOUNDS", "TREB"), 5.5)
     ast = _pick_stat(("AST", "ASSISTS"), 4.2)
-    three_pt = _pick_stat(("3PM", "3PT", "FG3M", "3P", "THREES"), default_3pm)
+    three_pt = _pick_stat(threes_keys, default_3pm)
     minutes_avg = _pick_stat(("MIN", "MPG", "MINUTES"), 31.5)
     pass_yds = _pick_stat(("YDS", "PASS_YDS", "PASSINGYARDS"), 235.0)
     rush_yds = _pick_stat(("RUSH_YDS", "RUSHINGYARDS"), 60.0)
@@ -947,7 +1147,7 @@ def fetch_espn_player_profile(
         "PTS": _avg_from_logs(("PTS", "POINTS", "AVG"), 5),
         "REB": _avg_from_logs(("REB", "REBOUNDS", "TREB"), 5),
         "AST": _avg_from_logs(("AST", "ASSISTS"), 5),
-        "3PM": _avg_from_logs(("3PM", "3PT", "FG3M", "3P", "THREES"), 5),
+        "3PM": _avg_from_logs(threes_keys, 5),
         "MIN": _avg_from_logs(("MIN", "MPG", "MINUTES"), 5),
         "PRA": None,
     }
@@ -963,12 +1163,17 @@ def fetch_espn_player_profile(
     prior_pts = _pick_prior_stat(("PTS", "POINTS", "AVG"))
     prior_reb = _pick_prior_stat(("REB", "REBOUNDS", "TREB"))
     prior_ast = _pick_prior_stat(("AST", "ASSISTS"))
-    prior_3pm = _pick_prior_stat(("3PM", "3PT", "FG3M", "3P", "THREES"))
+    prior_3pm = _pick_prior_stat(threes_keys)
     prior_pra = (
         round(prior_pts + prior_reb + prior_ast, 2)
         if (prior_pts is not None and prior_reb is not None and prior_ast is not None)
         else None
     )
+
+    has_game_log = bool(games_played > 0 and (recent_logs or (pts is not None and pts > 0)))
+    final_fetch_status = fetch_status_code
+    if final_fetch_status == "200" and not has_game_log:
+        final_fetch_status = "incomplete"
 
     result = {
         "_ts": time.time(),
@@ -982,10 +1187,22 @@ def fetch_espn_player_profile(
         "opp_team": opp_team or "OPP",
         "opp_factor": opp_factor,
         "is_home": is_home,
+        "has_game_today": has_game_today,
+        "game_id": game_id,
+        "game_status": game_status,
+        "game_status_detail": game_status_detail,
+        "tip_text": tip_text,
+        "is_player_out": is_player_out,
+        "player_out_reason": player_out_reason,
         "games_played": games_played,
-        "minutes_avg": round(minutes_avg, 1),
+        "has_game_log": has_game_log,
+        "fetch_source": fetch_source,
+        "fetch_season": fetch_season,
+        "fetch_status_code": final_fetch_status,
+        "minutes_avg": round(minutes_avg, 1) if minutes_avg is not None else None,
         "last5_minutes": last5_averages["MIN"],
         "last5_averages": last5_averages,
+        "recent_logs": recent_logs,
         "recent_logs_count": len(recent_logs),
         "game_date": game_date,
         "active_teammates": active_teammates,

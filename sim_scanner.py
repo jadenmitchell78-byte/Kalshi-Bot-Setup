@@ -141,8 +141,9 @@ def fetch_espn_nba_games() -> Dict[str, Dict[str, Any]]:
             competitors = comp.get("competitors") or []
             home_c = next((c for c in competitors if c.get("homeAway") == "home"), {})
             away_c = next((c for c in competitors if c.get("homeAway") == "away"), {})
-            home = normalize_team_abbr((home_c.get("team") or {}).get("abbreviation") or "")
-            away = normalize_team_abbr((away_c.get("team") or {}).get("abbreviation") or "")
+            from team_card import resolve_competitor_abbr
+            home = resolve_competitor_abbr(home_c) or normalize_team_abbr((home_c.get("team") or {}).get("abbreviation") or "")
+            away = resolve_competitor_abbr(away_c) or normalize_team_abbr((away_c.get("team") or {}).get("abbreviation") or "")
 
             tipoff_ts = None
             raw_dt = ev.get("date")
@@ -166,10 +167,15 @@ def fetch_espn_nba_games() -> Dict[str, Dict[str, Any]]:
                 "date_clean": d_clean,
             }
 
-            if home:
-                team_map[home] = game_info
-            if away:
-                team_map[away] = game_info
+            today_str_num = (utc_now - datetime.timedelta(hours=7)).strftime("%Y%m%d")
+            for tm_key in (home, away):
+                if not tm_key:
+                    continue
+                existing = team_map.get(tm_key)
+                if not existing:
+                    team_map[tm_key] = game_info
+                elif existing.get("date_clean") != today_str_num and d_clean == today_str_num:
+                    team_map[tm_key] = game_info
 
     _ESPN_SCOREBOARD_CACHE = {"ts": now_ts, "games": team_map}
     return team_map

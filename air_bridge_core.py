@@ -17,6 +17,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+from auto_market_index import derive_espn_season
 from sim_prop_bridge import (
     ESPNSyncEngine,
     ESPNNFLSyncEngine,
@@ -159,6 +160,35 @@ def _prob_to_american(p: float) -> str:
     return f"+{round((1 - p) / p * 100)}"
 
 
+def validate_card_has_no_none_fields(card_text: str) -> Tuple[bool, Optional[str]]:
+    """
+    Strictly checks that no user-facing card text contains 'None' in any field.
+    Flags patterns where None is printed as a field value.
+    """
+    patterns = [
+        r":\s*None\b",
+        r"(?<![a-zA-Z0-9\"'=])>\s*None\b",
+        r"\bNone\s*/",
+        r"/\s*None\b",
+        r"±\s*None\b",
+        r"\(\s*None\s*\)",
+        r"<code>None</code>",
+        r"<b>None</b>",
+        r"\bNone\s*±",
+        r"Proj Mean:\s*None\b",
+        r"Hit Rate \([^)]*None[^)]*\)",
+        r"Center Rung \([^)]*None[^)]*\)",
+        r"Season \w*:\s*None\b",
+        r"L5 \w*:\s*None\b",
+        r"Percentiles \([^)]*None[^)]*\)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, card_text, re.IGNORECASE)
+        if m:
+            return False, f"Forbidden None field matching '{pat}': '{m.group(0)}'"
+    return True, None
+
+
 def _leg_block(name: str, team: str, side: str, line: Any, stat: str, matchup: str,
                ask: Any, true_prob: Any, edge: Optional[float],
                buy_below_cents: Optional[int] = None,
@@ -167,43 +197,59 @@ def _leg_block(name: str, team: str, side: str, line: Any, stat: str, matchup: s
                buy_ladder_str: str = "",
                is_orderable: bool = False,
                is_experimental: bool = False,
-               gate_note: str = "") -> str:
+               gate_note: str = "",
+               game_id: Optional[str] = None,
+               tip_text: Optional[str] = None,
+               game_date: Optional[str] = None) -> str:
     edge_s = f" | {edge:+.1f}% Fee-Adj Edge" if edge is not None else ""
     fair = f"{float(true_prob):.0f}" if true_prob is not None else "?"
-    stat_lbl = f"{stat} (Experimental)" if is_experimental else str(stat)
+    stat_clean = str(stat or "3PM").strip()
+    stat_lbl = f"{stat_clean} (Experimental)" if is_experimental else stat_clean
     m_txt = str(matchup or "")
     if not m_txt or "Matchup" in m_txt or m_txt.endswith(" Game"):
         m_txt = "Next game: schedule not posted yet"
+    meta_parts = []
+    if tip_text and tip_text not in ("TBD", "No game scheduled today"):
+        meta_parts.append(f"<code>{tip_text}</code>")
+    if game_id:
+        meta_parts.append(f"Game ID: <code>{game_id}</code>")
+    if game_date:
+        meta_parts.append(f"({game_date})")
+    if meta_parts:
+        m_txt = f"{m_txt} · {' · '.join(meta_parts)}"
     try:
         has_quote = ask is not None and float(ask) > 5 and edge is not None
     except (TypeError, ValueError):
         has_quote = False
     buy_lim = buy_below_cents if buy_below_cents is not None else max(1, int(round(float(true_prob or 50.0) - 8)))
+    line_disp = f" {line}" if (line is not None and str(line) != "None") else ""
     if has_quote and is_orderable:
         icon = "✅"
-        headline = f"{html.escape(str(name))} ({html.escape(str(team))}) — {side} {line} {html.escape(stat_lbl)}"
+        headline = f"{html.escape(str(name))} ({html.escape(str(team))}) — {html.escape(stat_lbl)}{line_disp}"
         price_txt = f"{ask}¢ Ask  <i>(Fair Value: {fair}¢{edge_s} ≥ +5% Gate)</i>"
     elif has_quote and not is_orderable:
         icon = "🧪" if is_experimental else "⏸"
-        headline = f"{html.escape(str(name))} ({html.escape(str(team))}) — {side} {line} {html.escape(stat_lbl)}"
+        headline = f"{html.escape(str(name))} ({html.escape(str(team))}) — {html.escape(stat_lbl)}{line_disp}"
         price_txt = f"{ask}¢ Ask  <i>(Fair: {fair}¢{edge_s} — Pass, need ≤{buy_lim}¢ for +5% edge)</i>"
     elif str(side).upper() == "PROJECTION":
         icon = "🧪" if is_experimental else "📊"
-        mean_lbl = f" (Proj Mean: {proj_mean})" if proj_mean is not None else ""
+        mean_lbl = f" (Proj Mean: {proj_mean})" if (proj_mean is not None and str(proj_mean) != "None") else ""
         headline = f"{html.escape(str(name))} ({html.escape(str(team))}) — {html.escape(stat_lbl)} Distribution{mean_lbl}"
-        if buy_ladder_str:
+        if buy_ladder_str and proj_mean is not None and str(proj_mean) != "None":
             price_txt = f"<i>Projection only (no open market). +5% Edge Buy-Below: {buy_ladder_str}</i>"
+        elif proj_mean is not None and str(proj_mean) != "None":
+            price_txt = f"<i>Projection only. Worth buying {html.escape(stat_clean)} below ~{buy_lim}¢ (+5% post-fee edge) if a market opens.</i>"
         else:
-            price_txt = f"<i>Projection only. Worth buying below ~{buy_lim}¢ (+5% post-fee edge) if a market opens.</i>"
+            price_txt = "<i>Projection only (insufficient sample for pricing).</i>"
     else:
         icon = "🧪" if is_experimental else "📊"
-        headline = f"{html.escape(str(name))} ({html.escape(str(team))}) — {side} {line} {html.escape(stat_lbl)}"
-        price_txt = f"<i>Projection only (fair {fair}¢). Worth buying below ~{buy_lim}¢ (+5% post-fee edge) if a market opens.</i>"
-    ladder_line = f"\n📈 <b>Calibrated Ladder (20–80% {html.escape(str(stat))}):</b> {prob_ladder_str}" if prob_ladder_str else ""
+        headline = f"{html.escape(str(name))} ({html.escape(str(team))}) — {html.escape(stat_lbl)}{line_disp}"
+        price_txt = f"<i>Projection only. Worth buying {html.escape(stat_clean)} below ~{buy_lim}¢ (+5% post-fee edge) if a market opens.</i>"
+    ladder_line = f"\n📈 <b>Calibrated Ladder (20–80% {html.escape(stat_clean)}):</b> {prob_ladder_str}" if (prob_ladder_str and proj_mean is not None and str(proj_mean) != "None") else ""
     gate_line = f"\n🛡 <b>Gate:</b> <i>{html.escape(gate_note)}</i>" if gate_note else ""
     return (
         f"{icon} <b>{headline}</b>\n"
-        f"🏟 <i>{html.escape(m_txt)}</i>{ladder_line}\n"
+        f"🏟 <i>{m_txt}</i>{ladder_line}\n"
         f"🏷 <b>Kalshi Price:</b> {price_txt}{gate_line}"
     )
 
@@ -232,6 +278,9 @@ def format_casual_slip_card(sport: str, result: Dict[str, Any], bankroll: float 
         ask1, tp1, ev1, buy_below_cents=buy_below, prob_ladder_str=prob_ladder_str,
         proj_mean=sim.get("mean"), buy_ladder_str=buy_ladder_str,
         is_orderable=orderable, is_experimental=is_experimental, gate_note=gate_note,
+        game_id=sim.get("game_id") or conf.get("game_id"),
+        tip_text=sim.get("tip_text") or conf.get("tip_text"),
+        game_date=sim.get("game_date") or conf.get("game_date"),
     )
 
     legs_txt = leg1
@@ -242,9 +291,12 @@ def format_casual_slip_card(sport: str, result: Dict[str, Any], bankroll: float 
             combo["partner"], combo.get("team", sport), combo.get("side", "OVER"),
             combo.get("line", ""), combo.get("stat", ""),
             combo.get("matchup", sim.get("matchup", "")), ask2, tp2, 0.0,
+            game_id=sim.get("game_id") or conf.get("game_id"),
+            tip_text=sim.get("tip_text") or conf.get("tip_text"),
+            game_date=sim.get("game_date") or conf.get("game_date"),
         )
 
-    stat = sim.get("stat", "")
+    stat = str(sim.get("stat") or "3PM").strip()
     avg = result.get("season_avg")
     gp = conf.get("games_played", 0)
     min_season = conf.get("minutes_season")
@@ -257,39 +309,54 @@ def format_casual_slip_card(sport: str, result: Dict[str, Any], bankroll: float 
     out_tm = conf.get("out_teammates") or []
     inj_adj = conf.get("injury_adj_pct", 0.0)
 
+    # Gate on valid sample and projection
+    mean_val = sim.get("mean")
+    if gp <= 0 or mean_val is None or str(mean_val) == "None":
+        p_name = sim.get("player") or "Player"
+        f_src = sim.get("fetch_source") or "ESPN"
+        f_yr = sim.get("fetch_season") or str(derive_espn_season(sport=sport))
+        f_code = sim.get("fetch_status_code") or "404"
+        return (
+            f"⚠️ <b>Data Unavailable</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"Data unavailable for {html.escape(p_name)}: no game log found ({html.escape(str(f_src))}, {html.escape(str(f_yr))}, {html.escape(str(f_code))}).\n\n"
+            f"<i>Simulations, probability ladders, and pricing are strictly gated to confirmed active season game logs.</i>"
+        )
+
     conf_parts = [f"GP: {gp}"]
-    if min_season is not None:
-        conf_parts.append(f"MIN: {min_season:.1f} (Proj {min_proj:.1f})" if min_proj else f"MIN: {min_season:.1f}")
+    if min_season is not None and str(min_season) != "None":
+        conf_parts.append(f"MIN: {min_season:.1f} (Proj {min_proj:.1f})" if (min_proj is not None and str(min_proj) != "None") else f"MIN: {min_season:.1f}")
     if isinstance(avg, (int, float)):
         conf_parts.append(f"Season {stat}: {avg:.1f}")
-    if prior_avg is not None and gp < 20:
+    if prior_avg is not None and str(prior_avg) != "None" and (gp < 20 or prior_src == "fallback"):
         conf_parts.append(f"Prior ({prior_src}): {prior_avg:.1f}")
-    if l5_avg is not None:
+    if l5_avg is not None and str(l5_avg) != "None":
         conf_parts.append(f"L5 {stat}: {l5_avg:.1f}")
     if opp_adj:
         conf_parts.append(f"Opp Adj: {opp_adj:+.1f}%")
     if home_away and home_away != "Neutral":
         conf_parts.append(str(home_away))
-    if out_tm:
+    if out_tm and (inj_adj > 0 or stat == "AST"):
         conf_parts.append(f"Out: {', '.join(out_tm)} ({inj_adj:+.1f}%)")
     conf_line = " · ".join(conf_parts)
 
     side_u = str(sim.get("side", "PROJECTION")).upper()
+    proj_mean_disp = f"{float(mean_val):.2f}" if isinstance(mean_val, (int, float)) else str(mean_val)
     if side_u == "PROJECTION":
         why = (
             f"{sim.get('player', 'Player')} averages {avg:.1f} {stat}"
-            + (f" (L5: {l5_avg:.1f})" if l5_avg is not None else "")
-            + f"; adjusted sim projects a mean of {sim.get('mean')} {stat}."
+            + (f" (L5: {l5_avg:.1f})" if l5_avg is not None and str(l5_avg) != "None" else "")
+            + f"; adjusted sim projects a mean of {proj_mean_disp} {stat}."
             if isinstance(avg, (int, float))
-            else f"Adjusted sim projects a mean of {sim.get('mean')} {stat}."
+            else f"Adjusted sim projects a mean of {proj_mean_disp} {stat}."
         )
     else:
         why = (
             f"{sim.get('player', 'Player')} averages {avg:.1f} {stat}"
-            + (f" (L5: {l5_avg:.1f})" if l5_avg is not None else "")
-            + f"; adjusted sim projects {sim.get('mean')} vs a {sim.get('line')} line."
+            + (f" (L5: {l5_avg:.1f})" if l5_avg is not None and str(l5_avg) != "None" else "")
+            + f"; adjusted sim projects {proj_mean_disp} vs a {sim.get('line')} line."
             if isinstance(avg, (int, float))
-            else f"Adjusted sim projects {sim.get('mean')} {stat} vs a {sim.get('line')} line."
+            else f"Adjusted sim projects {proj_mean_disp} {stat} vs a {sim.get('line')} line."
         )
     hits = result.get("hits", 0)
 
@@ -305,7 +372,7 @@ def format_casual_slip_card(sport: str, result: Dict[str, Any], bankroll: float 
         if live_note:
             status += f"\n   <i>{html.escape(live_note)}</i>"
         contract_note = str(sim.get("real_kalshi_ticker"))
-        hit_rate_label = f"Hit Rate ({side_u} {sim.get('line', '')})"
+        hit_rate_label = f"Hit Rate ({stat} {side_u} {sim.get('line', '')})"
     elif has_open_market and sim.get("real_kalshi_ticker"):
         header_banner = (
             f"🧪 <b>PEEZY EXPERIMENTAL // {sport.upper()} (PRA)</b>"
@@ -316,7 +383,7 @@ def format_casual_slip_card(sport: str, result: Dict[str, Any], bankroll: float 
         buy_lim = buy_below if buy_below is not None else max(1, int(round(float(tp1 or 50.0) - 8)))
         status = f"⏸ <code>{html.escape(str(sim.get('real_kalshi_ticker')))}</code> — {html.escape(gate_note or f'Need ≤{buy_lim}¢ for +5% edge')}"
         contract_note = f"{sim.get('real_kalshi_ticker')} (Logged to picks.db — Gated Pass)"
-        hit_rate_label = f"Hit Rate ({side_u} {sim.get('line', '')})"
+        hit_rate_label = f"Hit Rate ({stat} {side_u} {sim.get('line', '')})"
     else:
         header_banner = (
             f"🧪 <b>PEEZY EXPERIMENTAL // {sport.upper()} (PRA)</b>"
@@ -327,12 +394,28 @@ def format_casual_slip_card(sport: str, result: Dict[str, Any], bankroll: float 
         buy_lim = buy_below if buy_below is not None else max(1, int(round(float(tp1 or 50.0) - 8)))
         if side_u == "PROJECTION" and buy_ladder_str:
             status = f"📋 Projection only — +5% post-fee buy-below targets: {buy_ladder_str}"
-            contract_note = f"None — projection only ({buy_ladder_str})"
-            hit_rate_label = f"Center Rung (> {sim.get('line', '')})"
+            contract_note = f"Unlisted — projection only ({buy_ladder_str})"
+            line_val = sim.get('line')
+            line_s = f" > {line_val}" if (line_val is not None and str(line_val) != "None") else ""
+            hit_rate_label = f"Center Rung ({stat}{line_s})"
+        elif buy_lim is not None and buy_below is not None:
+            line_val = sim.get('line')
+            line_s = f" {line_val}" if (line_val is not None and str(line_val) != "None") else ""
+            status = f"📋 Projection only — worth buying {stat}{line_s} below ~{buy_lim}¢ (+5% post-fee edge) if a market opens"
+            contract_note = f"Unlisted — projection only (fair {float(tp1):.0f}¢, buy ≤ {buy_lim}¢)"
+            hit_rate_label = f"Hit Rate ({stat} {side_u}{line_s})"
         else:
-            status = f"📋 Projection only — worth buying {side_u} {sim.get('line', '')} below ~{buy_lim}¢ (+5% post-fee edge) if a market opens"
-            contract_note = f"None — projection only (fair {float(tp1):.0f}¢, buy ≤ {buy_lim}¢)"
-            hit_rate_label = f"Hit Rate ({side_u} {sim.get('line', '')})"
+            status = "📋 Projection only (pricing unavailable: insufficient sample)"
+            contract_note = "Unlisted — projection only"
+            line_val = sim.get('line')
+            line_s = f" > {line_val}" if (line_val is not None and str(line_val) != "None") else ""
+            hit_rate_label = f"Center Rung ({stat}{line_s})"
+
+    p10_str = f"{float(sim.get('p10')):.1f}" if (sim.get('p10') is not None and str(sim.get('p10')) != 'None') else "N/A"
+    p50_str = f"{float(sim.get('p50')):.1f}" if (sim.get('p50') is not None and str(sim.get('p50')) != 'None') else "N/A"
+    p90_str = f"{float(sim.get('p90')):.1f}" if (sim.get('p90') is not None and str(sim.get('p90')) != 'None') else "N/A"
+    std_val = sim.get('std', 1.5)
+    std_str = f"{float(std_val):.2f}" if (std_val is not None and str(std_val) != 'None') else "1.50"
 
     return (
         f"{header_banner}\n"
@@ -345,9 +428,9 @@ def format_casual_slip_card(sport: str, result: Dict[str, Any], bankroll: float 
         f"<blockquote expandable>🧠 <b>Tap to View 10k Sim &amp; AI Breakdown</b>\n"
         f"• <b>Why We Like It:</b> {html.escape(why)}\n"
         f"• <b>Season Avg:</b> {f'{avg:.1f}' if isinstance(avg, (int, float)) else 'n/a'} {stat}"
-        + (f" (L5: {l5_avg:.1f})" if l5_avg is not None else "")
-        + f" ➡️ <b>Sim Proj:</b> {sim.get('mean')} ± {sim.get('std', 1.5)} {stat}\n"
-        f"• <b>Percentiles (P10 / P50 / P90):</b> {sim.get('p10')} / {sim.get('p50')} / {sim.get('p90')}\n"
+        + (f" (L5: {l5_avg:.1f})" if l5_avg is not None and str(l5_avg) != "None" else "")
+        + f" ➡️ <b>Sim Proj:</b> {proj_mean_disp} ± {std_str} {stat}\n"
+        f"• <b>Percentiles (P10 / P50 / P90):</b> {p10_str} / {p50_str} / {p90_str}\n"
         f"• <b>{hit_rate_label}:</b> {hits:,}/10,000 Sims ({tp1}%)\n"
         f"• <b>Contract:</b> <code>{html.escape(contract_note)}</code></blockquote>"
     )
@@ -437,6 +520,15 @@ def handle_sport_command(chat_id: Any, text: str, bankroll: float = 15.58,
         except Exception:
             logging.exception("team_card generation failed for %s", player)
 
+    # Intercept Tennis commands (e.g. /TENNIS Alcaraz vs Sinner, /TENNIS Djokovic 22.5, /TENNIS Swiatek clay)
+    if sport.upper() in ("TENNIS", "ATP", "WTA"):
+        try:
+            from tennis_sim import run_tennis_simulation
+            tennis_card, _ = run_tennis_simulation(text, bankroll=bankroll, default_line=line)
+            return tennis_card, _safe_keyboard("TENNIS")
+        except Exception:
+            logging.exception("tennis simulation failed for %s", text)
+
     fallback_note = ""
     if not forced_name and not matched_athlete:
         try:
@@ -461,12 +553,17 @@ def handle_sport_command(chat_id: Any, text: str, bankroll: float = 15.58,
         if verdict == "none":
             return (f"❓ No {sport} player close to <b>{html.escape(player)}</b>. Check the spelling and try again.", None)
         if verdict == "ambiguous":
-            # Ties are never auto-picked. callback_data stays well under Telegram's 64-byte limit: sim|SPORT|ID|STAT|LINE
-            rows = []
-            for c in cands[:4]:
-                cb = f"sim|{sport}|{c['id']}|{stat}|{line if line is not None else ''}"
-                rows.append([{"text": f"{c['name']} ({c['team']})", "callback_data": cb}])
-            return (f"🤔 Did you mean one of these for <b>{html.escape(player)}</b>?", {"inline_keyboard": rows})
+            if len(cands) == 1:
+                # Exactly one candidate found: auto-select without prompting single-button "Did you mean"
+                matched_athlete = cands[0]
+                player = matched_athlete["name"]
+            else:
+                # Ties are never auto-picked. callback_data stays well under Telegram's 64-byte limit: sim|SPORT|ID|STAT|LINE
+                rows = []
+                for c in cands[:4]:
+                    cb = f"sim|{sport}|{c['id']}|{stat}|{line if line is not None else ''}"
+                    rows.append([{"text": f"{c['name']} ({c['team']})", "callback_data": cb}])
+                return (f"🤔 Did you mean one of these for <b>{html.escape(player)}</b>?", {"inline_keyboard": rows})
         if verdict == "confident":
             matched_athlete = cands[0]
             player = matched_athlete["name"]
@@ -495,10 +592,21 @@ def handle_sport_command(chat_id: Any, text: str, bankroll: float = 15.58,
             result = dict(spb.LAST_SIM_RESULT or {})
         if result:
             _s = result.get("sim", {})
+            # If the response is from any gate (DATA_UNAVAILABLE, NO_GAME_TODAY, GAME_NOT_PRE, PLAYER_OUT):
+            if _s.get("status") in ("DATA_UNAVAILABLE", "NO_GAME_TODAY", "GAME_NOT_PRE", "PLAYER_OUT") or result.get("status") == "DATA_UNAVAILABLE":
+                return result.get("card_html") or card_html, kb
             if not matched_id and (str(_s.get("team", "")).upper() == sport or _s.get("team") in (None, "")):
                 return (f"❓ Couldn't match <b>{html.escape(player)}</b> to a {sport} player on ESPN. "
                         f"Try the full name, e.g. <code>/{sport} VJ Edgecombe rebs</code>.", None)
-            return format_casual_slip_card(sport, result, bankroll) + fallback_note, _safe_keyboard(sport)
+            final_card = format_casual_slip_card(sport, result, bankroll) + fallback_note
+            ok, err_reason = validate_card_has_no_none_fields(final_card)
+            if not ok:
+                f_src = _s.get("fetch_source") or "ESPN"
+                f_yr = _s.get("fetch_season") or str(derive_espn_season(sport=sport))
+                f_code = _s.get("fetch_status_code") or "404"
+                logging.error("validate_card_has_no_none_fields failed for %s: %s | Card:\n%s", player, err_reason, final_card)
+                return (f"Data unavailable for {html.escape(player)}: no game log found ({html.escape(str(f_src))}, {html.escape(str(f_yr))}, {html.escape(str(f_code))})", _safe_keyboard(sport))
+            return final_card, _safe_keyboard(sport)
         return card_html, kb
     except Exception as exc:
         logging.exception("handle_sport_command sim failed for %s", player)

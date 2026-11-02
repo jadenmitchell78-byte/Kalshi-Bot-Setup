@@ -150,7 +150,10 @@ def format_team_card(team, game, sim, market=None, items=(), top_n=5, w_model=0.
     projections: optional list of formatted strings with key players' projection ladders when no open Kalshi markets exist.
     """
     home, away = game["home"], game["away"]
-    L = [f"🏀 <b>{escape(away)} @ {escape(home)}</b> · {escape(game.get('tip_text', ''))}",
+    game_id_txt = f" · Game ID: <code>{escape(str(game['game_id']))}</code>" if game.get("game_id") else ""
+    date_txt = f" ({escape(str(game['game_date']))})" if game.get("game_date") else ""
+    tip_str = escape(game.get('tip_text', ''))
+    L = [f"🏀 <b>{escape(away)} @ {escape(home)}</b> · {tip_str}{date_txt}{game_id_txt}",
          "<b>Moneyline sim</b> (model unvalidated)",
          f"• Model: {escape(home)} {sim['p_home']:.0%} / {escape(away)} {1 - sim['p_home']:.0%} "
          f"(margin {sim['mu_margin']:+.1f}, total {sim['mu_total']:.0f})"]
@@ -203,6 +206,137 @@ ESPN_TEAM_IDS: Dict[str, str] = {
     "PHX": "21", "POR": "22", "SAC": "23", "SAS": "24", "OKC": "25",
     "UTA": "26", "WAS": "27", "TOR": "28", "MEM": "29", "CHA": "30",
 }
+ESPN_ID_TO_TEAM: Dict[str, str] = {v: k for k, v in ESPN_TEAM_IDS.items()}
+
+# Canonical team abbreviation mapping - strictly full-token exact match (no prefix / substring)
+EXACT_TEAM_ALIASES: Dict[str, str] = {
+    "GS": "GSW", "GSW": "GSW",
+    "NY": "NYK", "NYK": "NYK",
+    "NO": "NOP", "NOP": "NOP",
+    "SA": "SAS", "SAS": "SAS",
+    "WSH": "WAS", "WAS": "WAS",
+    "UTAH": "UTA", "UTA": "UTA",
+    "LAC": "LAC", "LAL": "LAL",
+    "BKN": "BKN", "IND": "IND",
+    "TOR": "TOR", "BOS": "BOS",
+    "MIA": "MIA", "CHI": "CHI",
+    "CLE": "CLE", "DAL": "DAL",
+    "DEN": "DEN", "DET": "DET",
+    "HOU": "HOU", "MEM": "MEM",
+    "MIL": "MIL", "MIN": "MIN",
+    "OKC": "OKC", "ORL": "ORL",
+    "PHI": "PHI", "PHX": "PHX",
+    "POR": "POR", "SAC": "SAC",
+    "ATL": "ATL", "CHA": "CHA",
+}
+
+
+def resolve_competitor_abbr(comp_dict: Dict[str, Any]) -> Optional[str]:
+    """
+    Resolves competitor to canonical NBA team abbreviation strictly by exact numeric ESPN team ID
+    or exact full-token abbreviation. NEVER matches by prefix or substring (e.g. 'LA' -> LAC).
+    """
+    team_data = comp_dict.get("team") or {}
+    tid = str(team_data.get("id") or "").strip()
+    if tid and tid in ESPN_ID_TO_TEAM:
+        return ESPN_ID_TO_TEAM[tid]
+
+    raw_abbr = str(team_data.get("abbreviation") or "").strip().upper()
+    if raw_abbr in EXACT_TEAM_ALIASES:
+        return EXACT_TEAM_ALIASES[raw_abbr]
+    if raw_abbr in NBA_TEAMS:
+        return raw_abbr
+    return None
+
+
+def format_espn_tip_time(iso_date_str: str, detail_str: str = "") -> Tuple[str, str, float]:
+    """
+    Parses ESPN ISO UTC date (e.g. '2026-11-02T01:30:00Z' or '2026-11-01T20:00:00Z').
+    Converts to Eastern US Time (EDT/EST) for accurate local game date and tip time.
+    Returns: (tip_text, date_clean, timestamp)
+    """
+    ts = 0.0
+    date_clean = ""
+    tip_text = detail_str or "Today"
+    if iso_date_str:
+        try:
+            utc_dt = datetime.datetime.fromisoformat(iso_date_str.replace("Z", "+00:00"))
+            ts = utc_dt.timestamp()
+            # Eastern US time (UTC-4 EDT / UTC-5 EST)
+            eastern = datetime.timezone(datetime.timedelta(hours=-4))
+            dt_local = utc_dt.astimezone(eastern)
+            date_clean = dt_local.strftime("%Y-%m-%d")
+            tip_text = dt_local.strftime("%I:%M %p EDT")
+        except Exception:
+            pass
+
+    if not date_clean:
+        date_clean = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=5)).strftime("%Y-%m-%d")
+
+    if detail_str and any(w in detail_str.lower() for w in ("in progress", "half", "qtr", "ot", "final", "end")):
+        tip_text = detail_str
+
+    return tip_text, date_clean, ts
+
+
+def fetch_espn_today_scoreboard(raw_json: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, Any]]:
+    """
+    Fetches today's live ESPN NBA scoreboard and maps each game strictly by exact numeric
+    ESPN team ID (e.g. 12 for LAC, 13 for LAL, 9 for GSW, 28 for TOR) or canonical abbreviation.
+    If `raw_json` is provided (e.g. in unit tests), parses it directly without network requests.
+    Returns: team_abbr -> game_info
+    """
+    if raw_json is not None:
+        data = raw_json
+    else:
+        url = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return {}
+
+    team_map: Dict[str, Dict[str, Any]] = {}
+    for ev in data.get("events", []):
+        gid = str(ev.get("id") or "")
+        comps = ev.get("competitions") or [{}]
+        c = comps[0] if comps else {}
+        competitors = c.get("competitors") or []
+
+        home_c = next((comp for comp in competitors if comp.get("homeAway") == "home"), {})
+        away_c = next((comp for comp in competitors if comp.get("homeAway") == "away"), {})
+
+        home_abbr = resolve_competitor_abbr(home_c)
+        away_abbr = resolve_competitor_abbr(away_c)
+
+        if not home_abbr or not away_abbr:
+            continue
+
+        raw_dt = ev.get("date") or c.get("date") or ""
+        st_obj = ev.get("status") or c.get("status") or {}
+        typ_obj = st_obj.get("type") or {}
+        state = str(typ_obj.get("state") or "pre").lower()
+        detail = str(typ_obj.get("shortDetail") or typ_obj.get("detail") or "")
+
+        tip_text, date_clean, tip_ts = format_espn_tip_time(str(raw_dt), detail)
+
+        game_info = {
+            "game_id": gid,
+            "home": home_abbr,
+            "away": away_abbr,
+            "state": state,
+            "tip_text": tip_text,
+            "game_date": date_clean,
+            "tip_ts": tip_ts,
+            "detail": detail,
+        }
+
+        team_map[home_abbr] = game_info
+        team_map[away_abbr] = game_info
+
+    return team_map
 
 
 def get_espn_nba_team_ids() -> Dict[str, str]:
@@ -661,21 +795,33 @@ def generate_team_card_response(team_query: str, bankroll: float = 100.0) -> Tup
         return f"🤔 Which team did you mean for <b>{escape(team_query)}</b>?", {"inline_keyboard": rows}
 
     team = cands[0]
-    from sim_scanner import fetch_espn_nba_games
-    espn_games = fetch_espn_nba_games()
+    espn_games = fetch_espn_today_scoreboard()
     game_info = espn_games.get(team)
 
-    today_utc = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=7)
+    today_utc = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=5)
     today_str = today_utc.strftime("%Y-%m-%d")
 
     if not game_info:
         city, nick, _ = NBA_TEAMS.get(team, ("", team, []))
         return f"🏀 No scheduled game found for the <b>{city} {nick} ({team})</b> today ({today_str}).", None
 
+    state = game_info.get("state", "pre")
     home = game_info.get("home", team)
     away = game_info.get("away", "OPP")
-    tip_ts = game_info.get("tipoff_ts")
-    tip_text = datetime.datetime.fromtimestamp(tip_ts).strftime("%I:%M %p") if tip_ts else "Today"
+    gid = game_info.get("game_id", "")
+    tip_text = game_info.get("tip_text", "Today")
+    game_date = game_info.get("game_date") or today_str
+    tip_ts = game_info.get("tip_ts")
+
+    # Gate on game state: Refuse in-progress and completed games with clear informational message
+    if state in ("in", "post", "final") or any(w in tip_text.lower() for w in ("final", "end of", "half")):
+        state_label = "In Progress" if state == "in" else "Completed / Final"
+        return (
+            f"⚠️ <b>Game {state_label}</b>: <b>{escape(away)} @ {escape(home)}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🏟 Game ID: <code>{escape(str(gid))}</code> · Date: <code>{escape(str(game_date))}</code> · Status: <code>{escape(str(tip_text))}</code>\n\n"
+            f"<i>Live or completed games cannot be simulated for pre-game lines. Pre-game simulations are strictly gated to scheduled ('pre') matchups.</i>"
+        ), None
 
     # Compute date code (e.g. 26OCT31)
     if tip_ts:
@@ -687,6 +833,8 @@ def generate_team_card_response(team_query: str, bankroll: float = 100.0) -> Tup
         "home": home,
         "away": away,
         "tip_text": tip_text,
+        "game_id": gid,
+        "game_date": game_date,
     }
 
     # Build historical ratings
@@ -806,7 +954,20 @@ def generate_team_card_response(team_query: str, bankroll: float = 100.0) -> Tup
     if not items:
         # No open Kalshi prop markets found or usable.
         # Build projection ladders for top rotation players on this team.
-        team_players = [p for p in player_index.get_index("NBA") if normalize_team_abbr(p.get("team") or "") == team]
+        from sim_prop_bridge import ESPNSyncEngine
+        active_roster = ESPNSyncEngine.get_nba_team_roster(team)
+        if active_roster:
+            team_players = active_roster
+        else:
+            team_players = [p for p in player_index.get_index("NBA") if normalize_team_abbr(p.get("team") or "") == team]
+
+        if not team_players:
+            from build_backtest_csv import DEFAULT_NBA_ATHLETE_IDS
+            team_players = [
+                {"id": aid, "name": nm, "team": tm, "pos": pos}
+                for aid, nm, tm, pos in DEFAULT_NBA_ATHLETE_IDS
+                if tm == team
+            ]
         for p in team_players[:5]:
             p_name = p.get("name")
             p_id = str(p.get("id") or "")

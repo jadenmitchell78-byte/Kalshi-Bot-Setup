@@ -218,6 +218,10 @@ class DefensiveMatchupEngine:
         )
         mults["TE1"] = round(max(0.65, min(1.60, te_mod)), 3)
 
+        # TE2_LEAK (Noah Gray / Isaiah Likely / Colby Parkinson — thrives vs aggressive blitz and heavy box run-commit)
+        te2_mod = 1.0 + ((prwr - 0.50) * 0.45) + ((stuff - 0.50) * 0.40) + ((cb1 - 0.50) * 0.25)
+        mults["TE2_LEAK"] = round(max(0.65, min(1.80, te2_mod)), 3)
+
         return mults
 
 
@@ -393,7 +397,7 @@ class DriveMomentumAnalyzer:
         drive_td_mult = 1.0
         pos_mods = {
             "RB1": 1.0, "RB2_VULTURE": 1.0, "RB3_PASS": 1.0,
-            "WR1": 1.0, "WR2": 1.0, "TE1": 1.0, "QB": 1.0
+            "WR1": 1.0, "WR2": 1.0, "TE1": 1.0, "TE2_LEAK": 1.0, "QB": 1.0
         }
         reasons = []
         is_stalled = False
@@ -404,6 +408,7 @@ class DriveMomentumAnalyzer:
             pos_mods["RB2_VULTURE"] *= 0.20
             pos_mods["RB3_PASS"] *= 1.55
             pos_mods["TE1"] *= 1.25
+            pos_mods["TE2_LEAK"] *= 1.15
             pos_mods["WR1"] *= 1.25
             pos_mods["QB"] *= 1.35
             reasons.append(f"Sack (-{sacks_recent})")
@@ -416,6 +421,7 @@ class DriveMomentumAnalyzer:
             pos_mods["WR1"] *= 1.30
             pos_mods["WR2"] *= 1.35
             pos_mods["TE1"] *= 1.25
+            pos_mods["TE2_LEAK"] *= 1.15
             pos_mods["RB3_PASS"] *= 1.55
             reasons.append("Off. Penalty Setback")
             is_stalled = True
@@ -426,6 +432,7 @@ class DriveMomentumAnalyzer:
             pos_mods["RB2_VULTURE"] *= 0.15
             pos_mods["RB3_PASS"] *= 1.75
             pos_mods["TE1"] *= 1.35
+            pos_mods["TE2_LEAK"] *= 1.20
             pos_mods["QB"] *= 1.30
             reasons.append(f"{consec_incompletions} Straight Incomp.")
             is_stalled = True
@@ -438,6 +445,7 @@ class DriveMomentumAnalyzer:
             pos_mods["RB1"] *= 0.65
             pos_mods["RB2_VULTURE"] *= 0.65
             pos_mods["TE1"] *= 1.20
+            pos_mods["TE2_LEAK"] *= 1.25
             pos_mods["WR1"] *= 1.15
             reasons.append("Run Stuffed (TFL)")
 
@@ -446,16 +454,19 @@ class DriveMomentumAnalyzer:
                 drive_td_mult *= 1.25
                 pos_mods["RB1"] *= 1.20
                 pos_mods["RB2_VULTURE"] *= 1.15
+                pos_mods["TE2_LEAK"] *= 1.15
                 reasons.append("Def. Penalty Auto 1st")
             if explosive_gains > 0:
                 drive_td_mult *= 1.22
                 pos_mods["RB1"] *= 1.15
                 pos_mods["WR1"] *= 1.15
+                pos_mods["TE2_LEAK"] *= 1.10
                 reasons.append("Explosive 15+ Yd Gain")
             if consec_completions >= 3:
                 drive_td_mult *= 1.15
                 pos_mods["WR1"] *= 1.20
                 pos_mods["TE1"] *= 1.20
+                pos_mods["TE2_LEAK"] *= 1.15
                 reasons.append(f"Hot Passer ({consec_completions} Str. Comp)")
 
         if is_stalled or (down >= 3 and distance >= 9):
@@ -514,7 +525,7 @@ class GamePlanBayesianUpdater:
             script_mult = 1.0
             if total_scrimmage >= 3:
                 if drive_pass_rate >= 0.68:
-                    if role in ("WR1", "WR2", "TE1", "RB3_PASS"):
+                    if role in ("WR1", "WR2", "TE1", "TE2_LEAK", "RB3_PASS"):
                         script_mult = 1.30
                     elif role in ("RB1", "RB2_VULTURE"):
                         script_mult = 0.72
@@ -529,7 +540,7 @@ class GamePlanBayesianUpdater:
             game_carries = p.get("live_carries", 0)
             hot_hand_mult = 1.0
 
-            if role in ("WR1", "WR2", "TE1"):
+            if role in ("WR1", "WR2", "TE1", "TE2_LEAK"):
                 hot_hand_mult = 1.0 + (d_tgts * 0.28) + (min(8, game_tgts) * 0.06)
             elif role.startswith("RB") and game_carries >= 4:
                 hot_hand_mult = 1.0 + (min(12, game_carries) * 0.04)
@@ -548,6 +559,145 @@ class GamePlanBayesianUpdater:
             p["base_share"] = round(p["dynamic_base_share"] / total_weight, 4) if total_weight > 0 else p["base_share"]
 
         return updated_roster
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 5.5 AWS NEXT GEN STATS (NGS) DRIVE TELEMETRY & TE2 LEAK ENGINE
+# ──────────────────────────────────────────────────────────────────────────────
+class AWSNextGenDriveEngine:
+    """
+    Simulates NFL Next Gen Stats (AWS NGS) drive telemetry directly from ESPN play streams:
+      1. Drive Pace & Velocity: Calculates sec/play & tempo state (⚡ HURRY-UP, ⏱️ BALANCED, ⏳ CLOCK BLEED).
+      2. Offensive Personnel Inference: 11 Personnel (3-WR), 12 Personnel (2-TE), 13 Personnel (Jumbo 3-TE), 21/22 Heavy.
+      3. Cumulative Drive EPA (Expected Points Added) & Next Gen Expected Touchdown (xTD).
+      4. Noah Gray / TE2 Goal-Line Leak Factor: In 12/13 heavy personnel inside the 10-yard line,
+         defenses bracket TE1 (Kelce) and stack the box, triggering a 1.95x surge on TE2 leak designs.
+      5. Peak Ball-Carrier Top Speed (mph): Physics-calibrated proxy for explosive chunk gains.
+    """
+
+    @staticmethod
+    def analyze_drive_telemetry(current_drive: dict, yards_to_goal: int, down: int, distance: int, roster: list[dict] = None) -> dict:
+        plays = current_drive.get("plays", [])
+        play_count = len(plays)
+        drive_yards = int(current_drive.get("yards", 0) or 0)
+
+        # 1. Drive Time & Pace (sec/play)
+        time_elapsed_obj = current_drive.get("timeElapsed", {})
+        display_clock = time_elapsed_obj.get("displayValue", "") if isinstance(time_elapsed_obj, dict) else str(time_elapsed_obj)
+        total_seconds = 0
+        if ":" in display_clock:
+            try:
+                m_part, s_part = display_clock.split(":")
+                total_seconds = int(m_part) * 60 + int(s_part)
+            except Exception:
+                total_seconds = 0
+
+        if total_seconds > 0 and play_count > 0:
+            sec_per_play = round(total_seconds / play_count, 1)
+        elif play_count > 0:
+            sec_per_play = 27.5
+        else:
+            sec_per_play = 0.0
+
+        if sec_per_play > 0 and sec_per_play <= 22.0:
+            tempo_state = "⚡ HURRY-UP (2-MIN DRILL)"
+            tempo_mult = 1.18
+        elif sec_per_play > 34.0:
+            tempo_state = "⏳ CLOCK BLEED / BALL CONTROL"
+            tempo_mult = 0.88
+        else:
+            tempo_state = "⏱️ BALANCED TEMPO"
+            tempo_mult = 1.00
+
+        # 2. Cumulative Drive EPA & Expected Touchdown (xTD)
+        start_ytg = int(current_drive.get("start", {}).get("yardLine", 75) or 75)
+        start_ep = max(-1.5, 6.0 - 0.065 * start_ytg)
+        current_ep = max(-1.5, 6.0 - 0.065 * yards_to_goal)
+        drive_epa = round(current_ep - start_ep, 2)
+
+        if yards_to_goal <= 3:
+            xtd_base = 0.82
+        elif yards_to_goal <= 10:
+            xtd_base = 0.65
+        elif yards_to_goal <= 20:
+            xtd_base = 0.48
+        elif yards_to_goal <= 40:
+            xtd_base = 0.32
+        else:
+            xtd_base = max(0.08, 0.28 - (yards_to_goal - 40) * 0.0035)
+
+        epa_factor = 1.0 + max(-0.25, min(0.35, drive_epa * 0.06))
+        xtd = round(min(0.96, max(0.04, xtd_base * epa_factor * tempo_mult)), 3)
+
+        # 3. Personnel Grouping Inference
+        text_corpus = " ".join([p.get("text", "") for p in plays[-5:]]).lower()
+        if yards_to_goal <= 10:
+            if any(k in text_corpus for k in ["jumbo", "heavy", "goal line", "tight end", "fullback"]) or down in (1, 2):
+                personnel = "12 Personnel (2-TE Heavy)"
+                is_heavy_personnel = True
+            else:
+                personnel = "11 Personnel (3-WR Spread RedZone)"
+                is_heavy_personnel = False
+        elif any(k in text_corpus for k in ["shotgun", "no huddle", "empty", "spread"]):
+            personnel = "11 Personnel (3-WR Spread)"
+            is_heavy_personnel = False
+        elif any(k in text_corpus for k in ["tight end", "fullback", "i-formation"]):
+            personnel = "12 Personnel (2-TE, 1-RB)"
+            is_heavy_personnel = True
+        else:
+            personnel = "11 Personnel (Standard 1-RB, 1-TE, 3-WR)"
+            is_heavy_personnel = False
+
+        # 4. Noah Gray / TE2 Goal-Line Leak Factor
+        te2_leak_active = False
+        te2_leak_mult = 1.0
+        if yards_to_goal <= 10 and is_heavy_personnel:
+            te2_leak_active = True
+            te2_leak_mult = 1.95
+            leak_reason = "Heavy 12/13 personnel keys run/TE1 bracket; TE2 leak open in flat/seam"
+        elif yards_to_goal <= 15:
+            te2_leak_active = True
+            te2_leak_mult = 1.35
+            leak_reason = "High-low TE flood concept inside the 15"
+        else:
+            leak_reason = "Standard field spacing"
+
+        # 5. Peak Ball-Carrier Top Speed (mph)
+        top_speed_mph = 0.0
+        top_speed_desc = "None"
+        for p in plays:
+            yds = int(p.get("statYardage", 0) or 0)
+            if yds >= 12:
+                calc_speed = round(min(22.4, 16.5 + math.log(max(1, yds - 5)) * 1.65), 1)
+                if calc_speed > top_speed_mph:
+                    top_speed_mph = calc_speed
+                    text = p.get("text", "")
+                    carrier = text.split("pass from")[0] if "pass from" in text else text
+                    carrier_name = carrier.split(" for ")[0].replace("pass complete to ", "").strip()
+                    top_speed_carrier = carrier_name[:20] if carrier_name else "Ball Carrier"
+                    top_speed_desc = f"{top_speed_carrier} — {calc_speed} mph ({yds}-yd gain)"
+
+        pos_modifiers = {
+            "TE2_LEAK": te2_leak_mult
+        }
+
+        return {
+            "sec_per_play": sec_per_play,
+            "tempo_state": tempo_state,
+            "personnel": personnel,
+            "is_heavy_personnel": is_heavy_personnel,
+            "drive_epa": drive_epa,
+            "xtd": xtd,
+            "te2_leak_active": te2_leak_active,
+            "te2_leak_mult": te2_leak_mult,
+            "leak_reason": leak_reason,
+            "peak_speed_mph": top_speed_mph,
+            "peak_speed_desc": top_speed_desc,
+            "play_count": play_count,
+            "drive_yards": drive_yards,
+            "elapsed_time": display_clock or f"{total_seconds}s",
+            "pos_modifiers": pos_modifiers
+        }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -595,13 +745,14 @@ class AutoTeamRosterBuilder:
         tes = pos_buckets["TE"]
         qbs = pos_buckets["QB"]
 
-        if len(rbs) >= 1: roster.append({"name": rbs[0], "role": "RB1", "base_share": 0.30, "seed_base_share": 0.30})
+        if len(rbs) >= 1: roster.append({"name": rbs[0], "role": "RB1", "base_share": 0.28, "seed_base_share": 0.28})
         if len(rbs) >= 2: roster.append({"name": rbs[1], "role": "RB2_VULTURE", "base_share": 0.10, "seed_base_share": 0.10})
-        if len(rbs) >= 3: roster.append({"name": rbs[2], "role": "RB3_PASS", "base_share": 0.06, "seed_base_share": 0.06})
+        if len(rbs) >= 3: roster.append({"name": rbs[2], "role": "RB3_PASS", "base_share": 0.05, "seed_base_share": 0.05})
         if len(wrs) >= 1: roster.append({"name": wrs[0], "role": "WR1", "base_share": 0.20, "seed_base_share": 0.20})
         if len(wrs) >= 2: roster.append({"name": wrs[1], "role": "WR2", "base_share": 0.12, "seed_base_share": 0.12})
-        if len(tes) >= 1: roster.append({"name": tes[0], "role": "TE1", "base_share": 0.14, "seed_base_share": 0.14})
-        if len(qbs) >= 1: roster.append({"name": qbs[0], "role": "QB", "base_share": 0.08, "seed_base_share": 0.08})
+        if len(tes) >= 1: roster.append({"name": tes[0], "role": "TE1", "base_share": 0.13, "seed_base_share": 0.13})
+        if len(tes) >= 2: roster.append({"name": tes[1], "role": "TE2_LEAK", "base_share": 0.06, "seed_base_share": 0.06})
+        if len(qbs) >= 1: roster.append({"name": qbs[0], "role": "QB", "base_share": 0.06, "seed_base_share": 0.06})
 
         return roster
 
@@ -633,8 +784,8 @@ class AutoTeamRosterBuilder:
                             role = "RB1" if idx == 0 else "RB2_VULTURE"
                             base = 0.26 if idx == 0 else 0.10
                         else:
-                            role = "WR1" if idx == 0 else "WR2"
-                            base = 0.20 if idx == 0 else 0.12
+                            role = "WR1" if idx == 0 else ("WR2" if idx == 1 else "TE2_LEAK")
+                            base = 0.20 if idx == 0 else (0.12 if idx == 1 else 0.07)
 
                         roster_map[name] = {
                             "name": name,
@@ -668,37 +819,37 @@ def calculate_situational_atd_shares(
     if yards_to_goal <= 2:
         zone_weights = {
             "RB1": 1.65, "RB2_VULTURE": 1.85, "RB3_PASS": 0.30,
-            "TE1": 0.90, "WR1": 0.55, "WR2": 0.35, "QB": 1.70
+            "TE1": 0.90, "TE2_LEAK": 1.45, "WR1": 0.55, "WR2": 0.35, "QB": 1.70
         }
     elif yards_to_goal <= 9:
         zone_weights = {
             "RB1": 1.30, "RB2_VULTURE": 1.25, "RB3_PASS": 0.75,
-            "TE1": 1.35, "WR1": 1.15, "WR2": 0.70, "QB": 1.15
+            "TE1": 1.35, "TE2_LEAK": 1.65, "WR1": 1.15, "WR2": 0.70, "QB": 1.15
         }
     elif yards_to_goal <= 20:
         zone_weights = {
             "RB1": 0.95, "RB2_VULTURE": 0.65, "RB3_PASS": 1.15,
-            "TE1": 1.30, "WR1": 1.25, "WR2": 1.15, "QB": 0.85
+            "TE1": 1.30, "TE2_LEAK": 1.10, "WR1": 1.25, "WR2": 1.15, "QB": 0.85
         }
     else:
         zone_weights = {
             "RB1": 0.85, "RB2_VULTURE": 0.40, "RB3_PASS": 1.10,
-            "TE1": 1.05, "WR1": 1.20, "WR2": 1.45, "QB": 0.60
+            "TE1": 1.05, "TE2_LEAK": 0.70, "WR1": 1.20, "WR2": 1.45, "QB": 0.60
         }
 
     dd_weights = {r: 1.0 for r in zone_weights}
     if down == 3 and distance >= 4:
         dd_weights.update({
             "RB1": 0.45, "RB2_VULTURE": 0.20, "RB3_PASS": 2.10,
-            "TE1": 1.45, "WR1": 1.35, "WR2": 1.20, "QB": 1.40
+            "TE1": 1.45, "TE2_LEAK": 1.25, "WR1": 1.35, "WR2": 1.20, "QB": 1.40
         })
     elif down in (3, 4) and distance <= 2:
         dd_weights.update({
             "RB1": 1.35, "RB2_VULTURE": 1.65, "RB3_PASS": 0.25,
-            "TE1": 1.10, "WR1": 0.65, "WR2": 0.50, "QB": 1.80
+            "TE1": 1.10, "TE2_LEAK": 1.30, "WR1": 0.65, "WR2": 0.50, "QB": 1.80
         })
     elif down == 1 and yards_to_goal <= 5:
-        dd_weights.update({"RB1": 1.40, "RB2_VULTURE": 1.25})
+        dd_weights.update({"RB1": 1.40, "RB2_VULTURE": 1.25, "TE2_LEAK": 1.40})
 
     def_weights = DefensiveMatchupEngine.get_positional_matchup_multipliers(opp_abbr, yards_to_goal)
     fatigue_mods = fatigue_data.get("modifiers", {})
@@ -721,7 +872,7 @@ def calculate_situational_atd_shares(
 
         if vulture_alert and role == "RB2_VULTURE":
             f_mod *= 1.55
-        elif vulture_alert and role in ("TE1", "RB3_PASS"):
+        elif vulture_alert and role in ("TE1", "TE2_LEAK", "RB3_PASS"):
             f_mod *= 1.20
 
         adjusted = base * z_mod * d_mod * f_mod * m_mod * k_mod
@@ -858,13 +1009,21 @@ class FullGameATDAndAlertEngine:
             if (now - last_sent) < self.cooldown_sec:
                 continue
 
-            is_vulture_spike = (not is_stalled and vulture_flag and p["role"] in ("RB2_VULTURE", "RB3_PASS", "TE1") and p["drive_td_prob"] >= 0.12)
+            is_vulture_spike = (not is_stalled and vulture_flag and p["role"] in ("RB2_VULTURE", "RB3_PASS", "TE1", "TE2_LEAK") and p["drive_td_prob"] >= 0.12)
+            is_te2_leak = (not is_stalled and p["role"] == "TE2_LEAK" and yards_to_goal <= 12 and p["drive_td_prob"] >= 0.08)
             is_gl_favorite = (not is_stalled and yards_to_goal <= 8 and p["drive_td_prob"] >= 0.26)
             is_high_edge = (p["edge_pct"] >= (8.5 if is_stalled else 6.0))
 
-            if is_vulture_spike or is_high_edge or is_gl_favorite:
+            if is_vulture_spike or is_te2_leak or is_high_edge or is_gl_favorite:
                 self.last_alert_ts[name] = now
-                tag = "🦅 VULTURE SPIKE" if is_vulture_spike else ("💰 +EV EDGE" if is_high_edge else "🔥 GOAL LINE")
+                if is_te2_leak:
+                    tag = "🎯 TE2 LEAK SPIKE (Noah Gray Effect)"
+                elif is_vulture_spike:
+                    tag = "🦅 VULTURE SPIKE"
+                elif is_high_edge:
+                    tag = "💰 +EV EDGE"
+                else:
+                    tag = "🔥 GOAL LINE"
                 edge_str = f" | Edge: <b>+{p['edge_pct']}%</b> (Book: {p['market_odds']})" if p["market_odds"] != "N/A" else ""
                 triggered_lines.append(
                     f"<b>{tag}: {name} ({p['role']}) [{p['market_tier']}]</b>\n"
@@ -1019,6 +1178,14 @@ class GameSessionWorker:
         # 5. Analyze Drive Momentum & Drive Killers (Sacks, Penalties, Incompletions)
         momentum = DriveMomentumAnalyzer.analyze_drive_momentum(current_drive, down, distance)
 
+        # 5b. AWS Next Gen Stats Drive Telemetry & TE2 Leak Engine
+        ngs = AWSNextGenDriveEngine.analyze_drive_telemetry(current_drive, ytg, down, distance, roster)
+
+        # Combine momentum pos mods with NGS pos mods
+        combined_pos_mods = dict(momentum["pos_modifiers"])
+        for rk, rm in ngs.get("pos_modifiers", {}).items():
+            combined_pos_mods[rk] = combined_pos_mods.get(rk, 1.0) * rm
+
         # 6. Compute Drive TD Prob & Situational Shares
         base_drive_td = self._estimate_base_drive_td_prob(ytg, down, distance, opp_abbr)
         drive_td_prob = round(min(0.92, max(0.02, base_drive_td * momentum["drive_td_mult"])), 4)
@@ -1026,7 +1193,7 @@ class GameSessionWorker:
         player_shares = calculate_situational_atd_shares(
             roster, ytg, down, distance, fatigue_state,
             opp_abbr=opp_abbr,
-            momentum_pos_mods=momentum["pos_modifiers"]
+            momentum_pos_mods=combined_pos_mods
         )
 
         # 7. Full-Game Remaining ATD & 2+ TD Probabilities
@@ -1052,6 +1219,7 @@ class GameSessionWorker:
             "momentum_state": momentum["momentum_state"],
             "momentum_reason": momentum["reason"],
             "vulture_alert": fatigue_state.get("vulture_alert", False),
+            "ngs": ngs,
             "players": full_game_board,
             "updated_at": time.strftime("%H:%M:%S")
         }
@@ -1195,6 +1363,11 @@ class LeagueWideATDOrchestrator:
             vult = " | 🦅 VULTURE WINDOW" if snap["vulture_alert"] else ""
             print(f"📍 {snap['matchup']} ({snap['offense']} vs {snap['defense']}) | {snap['situation']}")
             print(f"   State: {snap['momentum_state']} ({snap['momentum_reason']}){vult}")
+            ngs = snap.get("ngs", {})
+            if ngs:
+                leak_str = " | 🎯 TE2 LEAK PRIMED" if ngs.get("te2_leak_active") else ""
+                speed_str = f" | {ngs.get('peak_speed_desc')}" if ngs.get("peak_speed_mph", 0) > 0 else ""
+                print(f"   📡 NGS: {ngs.get('personnel')} | {ngs.get('tempo_state')} ({ngs.get('xtd', 0)*100:.1f}% xTD){leak_str}{speed_str}")
             print(f"   Last Play: {snap['last_play']}")
             print(f"   Drive TD Prob: {snap['drive_td_prob']*100:.1f}%")
             print("-" * 78)
@@ -1293,11 +1466,17 @@ def scan_live_nfl_atd_board(target_query: Optional[str] = None) -> Tuple[str, di
 def _format_snapshot_to_card(snap: dict) -> Tuple[str, dict]:
     vult_banner = "\n⚠️ <b>RB1 Fatigue Active — Vulture Window Open!</b>" if snap.get("vulture_alert") else ""
     momentum_line = f"⚡ <b>Momentum:</b> <code>{snap.get('momentum_state')}</code> ({snap.get('momentum_reason')})\n" if snap.get("momentum_state") else ""
+    ngs = snap.get("ngs", {})
+    ngs_line = ""
+    if ngs:
+        leak_icon = " · 🎯 <b>TE2 Leak Active!</b>" if ngs.get("te2_leak_active") else ""
+        ngs_line = f"📡 <b>AWS NGS:</b> <code>{ngs.get('personnel', '11 Personnel')}</code> | <code>{ngs.get('tempo_state', 'BALANCED')}</code> ({ngs.get('xtd', 0)*100:.0f}% xTD){leak_icon}\n"
+
     lines = [
         f"🏈 <b>AURASCAN // LIVE NFL ATD &amp; MULTI-TD ENGINE</b> 🏈",
         f"━━━━━━━━━━━━━━━━━━━━━━━━",
         f"🏟 <b>{snap.get('matchup')}</b> — <code>{snap.get('situation')}</code>",
-        momentum_line +
+        momentum_line + ngs_line +
         f"🎯 <b>Drive TD Prob P(DriveTD):</b> <b>{snap.get('drive_td_prob', 0)*100:.1f}%</b>"
         f"{vult_banner}\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🔥 <b>LIVE ATD &amp; MULTI-TD ALLOCATIONS:</b>",
@@ -1316,6 +1495,8 @@ def _format_snapshot_to_card(snap: dict) -> Tuple[str, dict]:
         tag = ""
         if p.get("tds_scored_today", 0) >= 1:
             tag = f" 🎯 <i>({p['tds_scored_today']} TD Already Scored!)</i>"
+        elif "TE2_LEAK" in role:
+            tag = " 🎯 <i>(TE2 Leak)</i>"
         elif "VULTURE" in role:
             tag = " 🦅 <i>(Vulture)</i>"
         elif "RB1" in role:
@@ -1340,11 +1521,109 @@ def _format_snapshot_to_card(snap: dict) -> Tuple[str, dict]:
         "inline_keyboard": [
             [
                 {"text": "⚡ Refresh", "callback_data": f"atd_refresh_{offense_team}"},
-                {"text": "📺 Watch Live Wire", "url": "https://streamed.su/watch/american-football"},
+                {"text": "📡 Drive Telemetry", "callback_data": f"drive_refresh_{offense_team}"},
             ],
             [
                 {"text": "🏈 All RedZone Games", "callback_data": "atd_refresh_board"},
+                {"text": "📺 Watch Live Wire", "url": "https://streamed.su/watch/american-football"},
+            ],
+            [
                 {"text": "🔙 Back to HUD", "callback_data": "menu_refresh_hud"},
+            ]
+        ]
+    }
+    return "\n".join(lines), kb
+
+
+def scan_live_drive_telemetry(target_query: Optional[str] = None) -> Tuple[str, dict]:
+    """
+    Renders AWS Next Gen Stats drive telemetry:
+    - Drive Pace (sec/play) & tempo (Hurry-Up vs Balanced vs Clock Bleed)
+    - Personnel Grouping (11 vs 12 vs 13 heavy)
+    - Cumulative Drive EPA & Expected Touchdowns (xTD)
+    - Peak Carrier Top Speed (mph)
+    - Noah Gray / TE2 Goal-Line Leak Radar
+    """
+    q_clean = (target_query or "").upper().strip()
+
+    cached_games = []
+    if os.path.exists(STATE_SNAPSHOT_FILE):
+        try:
+            with open(STATE_SNAPSHOT_FILE, "r") as f:
+                cached_games = json.load(f).get("games", [])
+        except Exception:
+            cached_games = []
+
+    if not cached_games:
+        cached_games = [w.latest_board_snapshot for w in ORCHESTRATOR.workers.values() if w.latest_board_snapshot]
+
+    if q_clean and q_clean not in ("ALL", "BOARD", "SLATE", "REDZONE"):
+        for snap in cached_games:
+            if q_clean in (snap.get("offense", ""), snap.get("defense", ""), snap.get("matchup", "")):
+                return _format_drive_telemetry_card(snap)
+
+    if cached_games:
+        cached_games.sort(key=lambda s: s.get("yards_to_goal", 99))
+        return _format_drive_telemetry_card(cached_games[0])
+
+    try:
+        r = requests.get(SCOREBOARD_URL, timeout=4)
+        if r.status_code == 200:
+            events = r.json().get("events", [])
+            return _build_standby_slate_card(events, q_clean)
+    except Exception:
+        pass
+
+    return _build_standby_slate_card([], q_clean)
+
+
+def _format_drive_telemetry_card(snap: dict) -> Tuple[str, dict]:
+    ngs = snap.get("ngs", {})
+    off = snap.get("offense", "NFL")
+    matchup = snap.get("matchup", "NFL Game")
+    sit = snap.get("situation", "")
+    ytg = snap.get("yards_to_goal", 50)
+
+    speed_line = f"• 🏃 <b>Top Speed:</b> <code>{ngs.get('peak_speed_desc', 'In tracking...')}</code>\n" if ngs.get("peak_speed_mph", 0) > 0 else ""
+    leak_banner = f"\n🎯 <b>TE2 LEAK RADAR:</b> <code>PRIMED ({ngs.get('te2_leak_mult', 1.95):.2f}x)</code>\n<i>{ngs.get('leak_reason', 'Heavy personnel goal-line look')}</i>\n" if ngs.get("te2_leak_active") else ""
+
+    lines = [
+        f"📡 <b>AWS NEXT GEN STATS // DRIVE TELEMETRY</b> 📡",
+        f"━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"🏟 <b>{matchup}</b> ({off} Ball)",
+        f"📍 <b>Situation:</b> <code>{sit}</code>",
+        f"⚡ <b>Drive State:</b> <code>{snap.get('momentum_state')}</code>\n",
+        f"📊 <b>NEXT GEN DRIVE METRICS:</b>",
+        f"• ⏱️ <b>Pace & Tempo:</b> <code>{ngs.get('tempo_state', 'BALANCED')}</code> ({ngs.get('sec_per_play', 28.0)}s/play)",
+        f"• 👥 <b>Personnel:</b> <code>{ngs.get('personnel', '11 Personnel')}</code>",
+        f"• 📈 <b>Cumulative EPA:</b> <code>{'+' if ngs.get('drive_epa', 0) >= 0 else ''}{ngs.get('drive_epa', 0.0)} EPA</code>",
+        f"• 🎯 <b>Next Gen xTD:</b> <b>{ngs.get('xtd', 0.50)*100:.1f}% xTD</b> (Drive TD: {snap.get('drive_td_prob', 0)*100:.1f}%)",
+        speed_line +
+        f"• ⏱️ <b>Drive Velocity:</b> <code>{ngs.get('play_count', 0)} plays, {ngs.get('drive_yards', 0)} yds ({ngs.get('elapsed_time', '0:00')})</code>"
+        f"{leak_banner}",
+        f"━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"🎯 <b>TOP TOUCHDOWN CANDIDATES THIS PLAY:</b>"
+    ]
+    for idx, p in enumerate(snap.get("players", [])[:5], 1):
+        tier = p.get("market_tier", "ATD")
+        role_tag = f" 🎯 <i>(TE2 Leak)</i>" if p.get("role") == "TE2_LEAK" else ""
+        lines.append(
+            f"{idx}. <b>{p['name']}</b> ({p['role']}) [{tier}]{role_tag}\n"
+            f"   • Drive P(TD): <b>{p.get('drive_td_prob', 0)*100:.1f}%</b> | Full Game: <b>{p.get('full_game_atd_prob', 0)*100:.1f}%</b> (Fair: <code>{p.get('fair_full_game_odds')}</code>)"
+        )
+
+    kb = {
+        "inline_keyboard": [
+            [
+                {"text": "⚡ Refresh Drive", "callback_data": f"drive_refresh_{off}"},
+                {"text": "🏈 ATD Allocations", "callback_data": f"atd_refresh_{off}"}
+            ],
+            [
+                {"text": "🏈 All RedZone Games", "callback_data": "atd_refresh_board"},
+                {"text": "📺 Watch Live Wire", "url": "https://streamed.su/watch/american-football"}
+            ],
+            [
+                {"text": "🔙 Back to HUD", "callback_data": "menu_refresh_hud"}
             ]
         ]
     }

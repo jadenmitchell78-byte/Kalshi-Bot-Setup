@@ -49,13 +49,58 @@ _LOCK = threading.Lock()
 _UA = {"User-Agent": "Mozilla/5.0"}
 
 
+COMMON_ALIASES: Dict[str, str] = {
+    "luka": "luka doncic",
+    "steph": "stephen curry",
+    "curry": "stephen curry",
+    "giannis": "giannis antetokounmpo",
+    "lebron": "lebron james",
+    "bron": "lebron james",
+    "kawhi": "kawhi leonard",
+    "dame": "damian lillard",
+    "jokic": "nikola jokic",
+    "embiid": "joel embiid",
+    "wemby": "victor wembanyama",
+    "shai": "shai gilgeous alexander",
+    "sga": "shai gilgeous alexander",
+    "tatum": "jayson tatum",
+    "ant": "anthony edwards",
+    "haliburton": "tyrese haliburton",
+    "brunson": "jalen brunson",
+    "trae": "trae young",
+    "spida": "donovan mitchell",
+    "booker": "devin booker",
+    "kat": "karl anthony towns",
+    "ad": "anthony davis",
+    "chet": "chet holmgren",
+    "paolo": "paolo banchero",
+    "morant": "ja morant",
+    "kyrie": "kyrie irving",
+    "kd": "kevin durant",
+    "durant": "kevin durant",
+    "harden": "james harden",
+    "klay": "klay thompson",
+    "draymond": "draymond green",
+    "bam": "bam adebayo",
+    "sabonis": "domantas sabonis",
+    "fox": "de aaron fox",
+    "siakam": "pascal siakam",
+    "zion": "zion williamson",
+    "lamelo": "lamelo ball",
+    "pg": "paul george",
+    "pg13": "paul george",
+    "paul george": "paul george",
+}
+
+
 def normalize(name: str) -> str:
     """lowercase, strip accents (Doncic/Jokic), drop Jr./III and punctuation."""
     s = unicodedata.normalize("NFKD", str(name or ""))
     s = "".join(c for c in s if not unicodedata.combining(c)).lower()
     s = re.sub(r"[^a-z0-9\s]", " ", s)
     toks = [t for t in s.split() if t not in SUFFIXES]
-    return " ".join(toks)
+    res = " ".join(toks)
+    return COMMON_ALIASES.get(res, res)
 
 
 def _today() -> str:
@@ -228,7 +273,9 @@ def resolve_decision(query: str, sport: str) -> Tuple[str, List[Dict[str, Any]]]
     if not cands:
         return "none", []
     top = cands[0]
-    second = cands[1]["score"] if len(cands) > 1 else 0.0
+    if len(cands) == 1:
+        return "confident", [top]
+    second = cands[1]["score"]
     if top["score"] >= CONFIDENT_SCORE and (top["score"] - second) >= CONFIDENT_GAP:
         return "confident", [top]
     return "ambiguous", cands

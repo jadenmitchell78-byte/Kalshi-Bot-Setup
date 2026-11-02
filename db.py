@@ -191,6 +191,13 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_legs_status ON legs(status);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audits_ticker ON sim_audits(market_ticker);")
 
+        try:
+            from prospective_model_auditor import init_audit_tables, seed_walk_forward_baseline
+            init_audit_tables()
+            seed_walk_forward_baseline(500)
+        except Exception:
+            pass
+
 
 def get_runtime_state() -> Dict[str, Any]:
     with get_connection() as conn:
