@@ -4463,6 +4463,47 @@ async def telegram_notifier_and_command_loop():
                         await asyncio.to_thread(notify_telegram, gate_html, gate_kb, target_cid, "HTML")
                         continue
 
+                    if low.startswith(("/radar", "/nflradar", "/redzone")):
+                        try:
+                            import live_nfl_atd_engine
+                            parts = clean_text.split(maxsplit=1)
+                            q_arg = parts[1].strip() if len(parts) > 1 else None
+                            radar_html, radar_kb = await asyncio.to_thread(live_nfl_atd_engine.scan_live_nfl_atd_board, q_arg)
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, radar_html, radar_kb, target_cid, "HTML")
+                            else:
+                                await asyncio.to_thread(notify_telegram, radar_html, radar_kb, None, "HTML")
+                        except Exception as radar_err:
+                            err_msg = f"❌ <b>NFL Radar Error:</b> <code>{html.escape(str(radar_err))}</code>"
+                            _, hud_kb = build_menu_hud_payload()
+                            await asyncio.to_thread(notify_telegram, err_msg, hud_kb, target_cid, "HTML")
+                        continue
+
+                    if low in ("/nfl", "nfl"):
+                        try:
+                            import live_nfl_atd_engine
+                            radar_html, radar_kb = await asyncio.to_thread(live_nfl_atd_engine.scan_live_nfl_atd_board, None)
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, radar_html, radar_kb, target_cid, "HTML")
+                            else:
+                                await asyncio.to_thread(notify_telegram, radar_html, radar_kb, None, "HTML")
+                        except Exception:
+                            board_html = run_full_sport_board_scan("NFL", quant_sniper, bankroll=live_kalshi_balance)
+                            await asyncio.to_thread(notify_telegram, board_html, None, target_cid, "HTML")
+                        continue
+
+                    if low in ("/nba", "nba"):
+                        try:
+                            nba_html, nba_kb = await asyncio.to_thread(run_live_nba_sniper_cycle, True, target_cid)
+                            if target_cid:
+                                await asyncio.to_thread(notify_telegram, nba_html, nba_kb, target_cid, "HTML")
+                            else:
+                                await asyncio.to_thread(notify_telegram, nba_html, nba_kb, None, "HTML")
+                        except Exception:
+                            board_html = run_full_sport_board_scan("NBA", quant_sniper, bankroll=live_kalshi_balance)
+                            await asyncio.to_thread(notify_telegram, board_html, None, target_cid, "HTML")
+                        continue
+
                     if low.startswith("/menu") or low in ("menu", "hud", "hi", "hello"):
                         hud_text, hud_kb = build_menu_hud_payload()
                         if target_cid:

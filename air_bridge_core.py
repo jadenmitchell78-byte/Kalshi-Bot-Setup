@@ -520,6 +520,26 @@ def handle_sport_command(chat_id: Any, text: str, bankroll: float = 15.58,
         except Exception:
             logging.exception("team_card generation failed for %s", player)
 
+    # Intercept NFL team queries (e.g. /NFL bears, /NFL seahawks, /NFL kc, /NFL chi)
+    if sport.upper() in ("NFL", "CFB") and not forced_name and not forced_athlete:
+        try:
+            from atd_odds_store import NFL_TEAM_MAP
+            p_clean = player.upper().strip()
+            is_nfl_team = p_clean.lower() in NFL_TEAM_MAP or any(
+                tm in p_clean for tm in (
+                    "BEARS", "SEAHAWKS", "CHIEFS", "EAGLES", "BILLS", "LIONS", "COWBOYS",
+                    "PACKERS", "49ERS", "RAVENS", "BENGALS", "TEXANS", "COMMANDERS",
+                    "VIKINGS", "FALCONS", "BUCCANEERS", "CARDINALS", "BRONCOS", "CHARGERS",
+                    "RAMS", "SAINTS", "COLTS", "TITANS", "JAGUARS", "DOLPHINS", "PATRIOTS",
+                    "JETS", "GIANTS", "STEELERS", "BROWNS", "RAIDERS", "PANTHERS"
+                )
+            )
+            if is_nfl_team:
+                import live_nfl_atd_engine
+                return live_nfl_atd_engine.scan_live_nfl_atd_board(player)
+        except Exception:
+            logging.exception("NFL team card generation failed for %s", player)
+
     # Intercept Tennis commands (e.g. /TENNIS Alcaraz vs Sinner, /TENNIS Djokovic 22.5, /TENNIS Swiatek clay)
     if sport.upper() in ("TENNIS", "ATP", "WTA"):
         try:

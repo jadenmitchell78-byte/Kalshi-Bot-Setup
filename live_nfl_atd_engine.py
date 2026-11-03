@@ -41,6 +41,33 @@ DEFAULT_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8886914565:AAEAcvdNq4AMsoRG
 DEFAULT_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "5992267511")
 
 
+def fetch_all_espn_nfl_events() -> list:
+    """Sweeps default scoreboard plus today/tomorrow dates to capture Monday Night Football & upcoming games."""
+    import datetime
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    us_night = now_utc - datetime.timedelta(hours=7)
+    dates = [
+        "",  # default weekly view
+        f"?dates={us_night.strftime('%Y%m%d')}",
+        f"?dates={(us_night + datetime.timedelta(days=1)).strftime('%Y%m%d')}",
+        f"?dates={now_utc.strftime('%Y%m%d')}",
+    ]
+    seen_ids = set()
+    combined_events = []
+    for d_param in dates:
+        try:
+            r = requests.get(f"{SCOREBOARD_URL}{d_param}", timeout=4)
+            if r.status_code == 200:
+                for ev in r.json().get("events", []):
+                    eid = str(ev.get("id"))
+                    if eid and eid not in seen_ids:
+                        seen_ids.add(eid)
+                        combined_events.append(ev)
+        except Exception:
+            continue
+    return combined_events
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 1. SHARED ODDS STORE (Read/Written by both bot.py and live_nfl_atd_engine.py)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1254,19 +1281,26 @@ class LeagueWideATDOrchestrator:
             print(f"[🚀] Unified NFL Live ATD Engine Started{target_str}")
             last_sb_sync = 0.0
             live_event_meta = {}
+            upcoming_event_meta = {}
 
             while True:
                 now = time.time()
                 try:
                     if (now - last_sb_sync) >= 6.0:
                         last_sb_sync = now
-                        async with session.get(SCOREBOARD_URL, timeout=5) as resp:
-                            if resp.status == 200:
-                                sb_data = await resp.json()
-                                live_event_meta = self._parse_scoreboard(sb_data)
+                        all_evs = await self._fetch_scoreboard_events(session)
+                        live_event_meta, upcoming_event_meta = self._parse_scoreboard(all_evs)
 
                     if not live_event_meta:
-                        print(f"[{time.strftime('%H:%M:%S')}] 💤 No matching live NFL games right now. Radar idling (20s)...")
+                        # Clean disk snapshot so stale games from yesterday are not retained
+                        try:
+                            with open(STATE_SNAPSHOT_FILE, "w") as f:
+                                json.dump({"updated_at": time.strftime("%H:%M:%S"), "games": []}, f, indent=2)
+                        except Exception:
+                            pass
+                        up_cnt = len(upcoming_event_meta)
+                        up_str = f" ({up_cnt} upcoming/pregame)" if up_cnt > 0 else ""
+                        print(f"[{time.strftime('%H:%M:%S')}] 💤 No matching live NFL games right now{up_str}. Radar idling (20s)...")
                         await asyncio.sleep(20.0)
                         last_sb_sync = 0.0
                         continue
@@ -1289,17 +1323,43 @@ class LeagueWideATDOrchestrator:
                     print(f"[!] Orchestrator Error: {e}")
                     await asyncio.sleep(4.0)
 
+    async def _fetch_scoreboard_events(self, session: aiohttp.ClientSession) -> list:
+        import datetime
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        us_night = now_utc - datetime.timedelta(hours=7)
+        dates = [
+            "",
+            f"?dates={us_night.strftime('%Y%m%d')}",
+            f"?dates={(us_night + datetime.timedelta(days=1)).strftime('%Y%m%d')}",
+            f"?dates={now_utc.strftime('%Y%m%d')}",
+        ]
+        combined = []
+        seen = set()
+        for d in dates:
+            try:
+                async with session.get(f"{SCOREBOARD_URL}{d}", timeout=5) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        for ev in data.get("events", []):
+                            eid = str(ev.get("id"))
+                            if eid and eid not in seen:
+                                seen.add(eid)
+                                combined.append(ev)
+            except Exception:
+                continue
+        return combined
+
     async def _bounded_tick(self, session, worker: GameSessionWorker, odds: dict):
         async with self.sem:
             await worker.process_tick(session, odds)
 
-    def _parse_scoreboard(self, sb_json: dict) -> dict:
+    def _parse_scoreboard(self, events: list) -> Tuple[dict, dict]:
         active_meta = {}
-        events = sb_json.get("events", [])
+        upcoming_meta = {}
 
         # Safety check: if ESPN returns an empty/invalid scoreboard feed, don't fallback to ghosts
         if not events:
-            return active_meta
+            return active_meta, upcoming_meta
 
         for ev in events:
             event_id = str(ev.get("id"))
@@ -1308,6 +1368,12 @@ class LeagueWideATDOrchestrator:
             comp = ev.get("competitions", [{}])[0]
             status_obj = comp.get("status", {}) or ev.get("status", {})
             state = status_obj.get("type", {}).get("state", "pre").lower()
+
+            if state == "pre":
+                upcoming_meta[event_id] = {
+                    "short_name": short_name,
+                    "event": ev,
+                }
 
             # STRICT FILTER: Only ingest games explicitly verified as live ("in") right now
             if state == "in":
@@ -1333,7 +1399,7 @@ class LeagueWideATDOrchestrator:
                 print(f"[🏁 GAME FINAL] Closing worker for {short_name}")
                 del self.workers[event_id]
 
-        return active_meta
+        return active_meta, upcoming_meta
 
     def _save_and_render_dashboard(self):
         snapshots = [w.latest_board_snapshot for w in self.workers.values() if w.latest_board_snapshot]
@@ -1452,15 +1518,8 @@ def scan_live_nfl_atd_board(target_query: Optional[str] = None) -> Tuple[str, di
         return "\n".join(lines), kb
 
     # Mode C: Fallback to Verified ESPN Scoreboard Slate if no live games are active right now
-    try:
-        r = requests.get(SCOREBOARD_URL, timeout=4)
-        if r.status_code == 200:
-            events = r.json().get("events", [])
-            return _build_standby_slate_card(events, q_clean)
-    except Exception:
-        pass
-
-    return _build_standby_slate_card([], q_clean)
+    events = fetch_all_espn_nfl_events()
+    return _build_standby_slate_card(events, q_clean)
 
 
 def _format_snapshot_to_card(snap: dict) -> Tuple[str, dict]:
@@ -1648,8 +1707,12 @@ def _build_standby_slate_card(events: list, team_query: Optional[str] = None) ->
             s_name = ev.get("shortName", "").upper()
             name = ev.get("name", "").upper()
             comps = ev.get("competitions", [{}])[0].get("competitors", [])
-            abbrs = [c.get("team", {}).get("abbreviation", "").upper() for c in comps]
-            if t_clean in abbrs or any(t_clean in x for x in (s_name, name)):
+            abbrs = [str(c.get("team", {}).get("abbreviation") or "").upper() for c in comps]
+            display_names = [str(c.get("team", {}).get("displayName") or "").upper() for c in comps]
+            short_names = [str(c.get("team", {}).get("shortDisplayName") or "").upper() for c in comps]
+            team_names = [str(c.get("team", {}).get("name") or "").upper() for c in comps]
+            all_strs = abbrs + display_names + short_names + team_names + [s_name, name]
+            if any(t_clean in x or x in t_clean for x in all_strs if x):
                 matched_event = ev
                 break
 
