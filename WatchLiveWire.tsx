@@ -250,6 +250,9 @@ export function StreamPlayer({ streamUrl }: { streamUrl: string }) {
 const SPORT_ENDPOINTS: Record<string, string> = {
   NBA: 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard',
   NFL: 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard',
+  CFB: 'https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard',
+  NHL: 'https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard',
+  MLB: 'https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard',
   SOCCER: 'https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard',
 };
 
