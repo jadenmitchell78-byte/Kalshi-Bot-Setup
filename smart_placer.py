@@ -865,62 +865,74 @@ class KalshiSmartPlacer:
             "time_in_force": "good_till_canceled",
         }
 
-        order_path = "/trade-api/v2/portfolio/orders"  # V2 create-order; signed and posted with this identical path
-        try:
-            resp = requests.post(
-                self.base_url.rstrip("/") + order_path,
-                json=payload,
-                headers=self.sign_headers("POST", order_path),
-                timeout=8,
-            )
-            if resp.status_code in (200, 201):
-                order_data = resp.json().get("order") or resp.json().get("event_order") or {}
-                real_oid = order_data.get("order_id") or client_oid
+        order_paths = ["/trade-api/v2/portfolio/events/orders", "/trade-api/v2/portfolio/orders"]
+        candidate_bases = [self.base_url, "https://external-api.kalshi.com", "https://api.elections.kalshi.com"]
+        seen_b = set()
+        unique_bases = [b for b in candidate_bases if b and not (b in seen_b or seen_b.add(b))]
+
+        last_resp_text = ""
+        last_code = 500
+
+        for b_url in unique_bases:
+            for order_path in order_paths:
                 try:
-                    from bot import notify_telegram
-                    notify_telegram(f"✅ AUTO-SNIPER ORDER PLACED: {ticker} | {contracts}x {kalshi_side.upper()} @ {limit_cents}¢ | Order ID: {real_oid}")
-                except Exception:
-                    pass
-                return {
-                    "status": "PLACED",
-                    "order_id": real_oid,
-                    "ticker": ticker,
-                    "side": kalshi_side.upper(),
-                    "contracts": contracts,
-                    "limit_cents": limit_cents,
-                    "cost_usd": cost_usd,
-                    "style": exec_style,
-                    "note": pricing_note,
-                }
-            err_msg = resp.text[:180]
-            try:
-                from bot import notify_telegram
-                notify_telegram(f"⚠️ AUTO-SNIPER ORDER REJECTED BY KALSHI [HTTP {resp.status_code}]: {resp.text} | Payload: {json.dumps(payload)}")
-            except Exception:
-                pass
-            if "insufficient_balance" in err_msg.lower():
-                return {"status": "BALANCE_HELD", "code": resp.status_code, "reason": "Resting orders holding cash", "limit_cents": limit_cents, "contracts": contracts, "ticker": ticker}
-            if "market_not_found" in err_msg.lower():
-                sim_id = f"SIM-QUEUED-{uuid.uuid4().hex[:6].upper()}"
-                return {
-                    "status": "SIM_QUEUED",
-                    "ticker": ticker,
-                    "side": kalshi_side.upper(),
-                    "contracts": contracts,
-                    "limit_cents": limit_cents,
-                    "cost_usd": cost_usd,
-                    "style": exec_style,
-                    "order_id": sim_id,
-                    "note": f"Paper tracked ({pricing_note} — market not open on exchange)",
-                }
-            return {"status": "API_REJECTED", "code": resp.status_code, "reason": err_msg, "limit_cents": limit_cents, "contracts": contracts, "ticker": ticker}
-        except Exception as e:
-            try:
-                from bot import notify_telegram
-                notify_telegram(f"⚠️ AUTO-SNIPER ORDER REJECTED BY KALSHI [HTTP 500]: {e} | Payload: {json.dumps(payload)}")
-            except Exception:
-                pass
-            return {"status": "ERROR", "reason": str(e), "limit_cents": limit_cents, "contracts": contracts, "ticker": ticker}
+                    resp = requests.post(
+                        b_url.rstrip("/") + order_path,
+                        json=payload,
+                        headers=self.sign_headers("POST", order_path),
+                        timeout=8,
+                    )
+                    if resp.status_code in (200, 201):
+                        order_data = resp.json().get("order") or resp.json().get("event_order") or {}
+                        real_oid = order_data.get("order_id") or client_oid
+                        try:
+                            from bot import notify_telegram
+                            notify_telegram(f"✅ AUTO-SNIPER ORDER PLACED: {ticker} | {contracts}x {kalshi_side.upper()} @ {limit_cents}¢ | Order ID: {real_oid}")
+                        except Exception:
+                            pass
+                        return {
+                            "status": "PLACED",
+                            "order_id": real_oid,
+                            "ticker": ticker,
+                            "side": kalshi_side.upper(),
+                            "contracts": contracts,
+                            "limit_cents": limit_cents,
+                            "cost_usd": cost_usd,
+                            "style": exec_style,
+                            "note": pricing_note,
+                        }
+                    last_code = resp.status_code
+                    err_msg = resp.text[:180]
+                    last_resp_text = err_msg
+
+                    # If 410, skip deprecated endpoint immediately
+                    if resp.status_code == 410:
+                        continue
+
+                    if "insufficient_balance" in err_msg.lower():
+                        return {"status": "BALANCE_HELD", "code": resp.status_code, "reason": "Resting orders holding cash", "limit_cents": limit_cents, "contracts": contracts, "ticker": ticker}
+                    if "market_not_found" in err_msg.lower():
+                        sim_id = f"SIM-QUEUED-{uuid.uuid4().hex[:6].upper()}"
+                        return {
+                            "status": "SIM_QUEUED",
+                            "ticker": ticker,
+                            "side": kalshi_side.upper(),
+                            "contracts": contracts,
+                            "limit_cents": limit_cents,
+                            "cost_usd": cost_usd,
+                            "style": exec_style,
+                            "order_id": sim_id,
+                            "note": f"Paper tracked ({pricing_note} — market not open on exchange)",
+                        }
+                except Exception as endpoint_err:
+                    last_resp_text = str(endpoint_err)
+
+        try:
+            from bot import notify_telegram
+            notify_telegram(f"⚠️ AUTO-SNIPER ORDER REJECTED BY KALSHI [HTTP {last_code}]: {last_resp_text} | Payload: {json.dumps(payload)}")
+        except Exception:
+            pass
+        return {"status": "API_REJECTED", "code": last_code, "reason": last_resp_text, "limit_cents": limit_cents, "contracts": contracts, "ticker": ticker}
 
     # -----------------------------------------------------------------
     # 5. SMART COMBO BASKET EXECUTOR (Places Correlated Copula Legs Together)

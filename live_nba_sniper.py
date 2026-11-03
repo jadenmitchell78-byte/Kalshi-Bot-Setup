@@ -1447,6 +1447,19 @@ def execute_live_kalshi_fills(
     except Exception:
         pass
 
+    try:
+        from bot import LIVE_MODE
+    except Exception:
+        LIVE_MODE = False
+
+    if not LIVE_MODE:
+        return {
+            "status": "SIMULATION_MODE",
+            "reason": "Live orders disabled (Engine running in SIM mode)",
+            "live_cash": live_cash,
+            "orders": [],
+        }
+
     deployable_cap = round(live_cash * max_bankroll_pct, 2)
     all_cands = candidates_result.get("all_candidates") or candidates_result.get("top_singles") or []
     if not all_cands:
@@ -1647,12 +1660,22 @@ def run_live_nba_sniper_cycle(force_order: bool = False, chat_id: Optional[str] 
     orders = exec_res.get("orders", [])
     markets_n = scored.get("markets_scanned", len(singles))
 
+    try:
+        from bot import LIVE_MODE, SNIPER_ARMED, bankroll_allocation_pct
+    except Exception:
+        LIVE_MODE = False
+        SNIPER_ARMED = False
+        bankroll_allocation_pct = 0.10
+
+    mode_label = "🟢 <b>LIVE (REAL-MONEY)</b>" if LIVE_MODE else "🎮 <b>SIMULATION (Paper)</b>"
+    sniper_label = "🟢 <b>ARMED</b>" if SNIPER_ARMED else "🔴 <b>DISARMED</b>"
+    cap_pct = int(bankroll_allocation_pct * 100)
     lines = [
         "⚡ <b>AURASCAN // 10,000-ITERATION MONTE CARLO [ALL-SLATE]</b>",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        "• 🎛 <b>Engine Mode:</b> 🟢 <b>LIVE (LIVE REAL-MONEY)</b>",
-        f"• 🎯 <b>Sniper:</b> 🟢 <b>ARMED</b> | 💵 <b>Live Cash:</b> <code>${live_cash:.2f}</code>",
-        f"• 🛡️ <b>Slate Exposure:</b> $0.00 / ${live_cash:.2f} Slate Cap (100%)",
+        f"• 🎛 <b>Engine Mode:</b> {mode_label}",
+        f"• 🎯 <b>Sniper:</b> {sniper_label} | 💵 <b>Balance:</b> <code>${live_cash:.2f}</code>",
+        f"• 🛡️ <b>Slate Exposure:</b> $0.00 / ${live_cash * bankroll_allocation_pct:.2f} Slate Cap ({cap_pct}%)",
         f"• 🔬 <b>Simulations Run:</b> 10,000 iter/prop across {markets_n} mapped market props",
     ]
 

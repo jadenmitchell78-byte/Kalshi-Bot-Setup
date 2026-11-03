@@ -120,9 +120,9 @@ def derive_espn_season(dt: Optional[datetime.datetime] = None, sport: str = "NBA
 
 
 STAT_STEMS: Dict[str, List[str]] = {
-    "pts": ["point", "pts", "points"],
-    "point": ["point", "pts", "points"],
-    "points": ["point", "pts", "points"],
+    "pts": ["points", "pts"],
+    "point": ["points", "pts"],
+    "points": ["points", "pts"],
     "reb": ["rebound", "reb", "rebounds"],
     "rebs": ["rebound", "reb", "rebounds"],
     "rebound": ["rebound", "reb", "rebounds"],
@@ -505,6 +505,21 @@ def search_kalshi_markets(
         # Check stat stems match if requested
         if requested_stems:
             if not any(stem in blob for stem in requested_stems):
+                continue
+
+        # Enforce strict canonical stat type matching when stat_query is provided
+        if stat_query:
+            sq_norm = str(stat_query).upper().strip()
+            if sq_norm in ("3PT", "3PTS", "THREE", "THREES"):
+                sq_norm = "3PM"
+            elif sq_norm in ("PTS", "POINT", "POINTS"):
+                sq_norm = "PTS"
+            elif sq_norm in ("REB", "REBOUND", "REBOUNDS"):
+                sq_norm = "REB"
+            elif sq_norm in ("AST", "ASSIST", "ASSISTS"):
+                sq_norm = "AST"
+            m_stat = str(m.get("stat") or "").upper().strip()
+            if m_stat and sq_norm and m_stat != sq_norm:
                 continue
 
         matched.append(m)

@@ -16,12 +16,18 @@ import os
 import random
 import random
 import re
+import sys
 import time
 import traceback
 import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+
+_ROOT_DIR = "/data/data/com.termux/files/home"
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
+import sim_prop_bridge as _root_spb
 
 from clean_casual_core import (
     format_pick_headline,

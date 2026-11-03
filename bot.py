@@ -147,14 +147,8 @@ from sim_prop_bridge import (
 # ==========================================
 # CORE CREDENTIALS & ENDPOINTS
 # ==========================================
-KALSHI_KEY_ID = os.getenv(
-    "KALSHI_KEY_ID",
-    os.getenv("KALSHI_API_KEY", "8b3f09cf-3da9-4107-b8ff-ee08d6daab3d"),
-)
-PRIVATE_KEY_PATH = os.getenv(
-    "KALSHI_KEY_PATH",
-    os.getenv("KALSHI_PRIVATE_KEY_PATH", str(BASE_DIR / "kalshi_private.pem")),
-)
+KALSHI_KEY_ID = os.getenv("KALSHI_KEY_ID", os.getenv("KALSHI_API_KEY", "")).strip()
+PRIVATE_KEY_PATH = os.getenv("KALSHI_KEY_PATH", os.getenv("KALSHI_PRIVATE_KEY_PATH", "")).strip()
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv(
     "TELEGRAM_BOT_TOKEN", "8886914565:AAEAcvdNq4AMsoRGRhBjy4q6MzkrrPxt1aY"
@@ -167,12 +161,14 @@ WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
 # ==========================================
 # EXECUTION, OBI & SCALPER PARAMETERS
 # ==========================================
-LIVE_MODE = os.getenv("DEFAULT_MODE", "SIM").upper() == "LIVE"
-SNIPER_ARMED = os.getenv("DEFAULT_AUTO", "true").lower() in ("1", "true", "yes", "on")
+LIVE_MODE = False  # Strictly forced to SIM mode at startup regardless of saved state
+SNIPER_ARMED = False  # Disarmed at startup for safety; toggle via HUD or /sniper
 SLATE_CAP_DOLLARS = 32.22        # Dynamic Slate Cap (scaled by bankroll_allocation_pct)
 SCAN_INTERVAL = 2.0              # Background position scalper & exit sweep interval
 COOLDOWN_SECONDS = 45            # Per-ticker entry lock (written ONLY on actual fill)
-bankroll_allocation_pct = 1.00    # Dynamic Bankroll Allocation (1.00 = 100% full balance)
+AUTO_SEND_PROPS_ENABLED = True     # Auto-send new sim props across all sports categories
+AUTO_SEND_PROPS_INTERVAL = 45.0   # Exactly every 45 seconds
+bankroll_allocation_pct = 0.10    # Capped at 10% on startup for safety (was 100%)
 slider_panel_active = False       # Whether Telegram inline slider panel is open
 scan_panel_active = False         # Whether Telegram inline manual scan sport panel is open
 user_building_combo = {           # Manual Combo Builder Override state
@@ -694,6 +690,11 @@ def sign_ed25519_msg(msg: bytes) -> bytes:
     return r_bytes + s.to_bytes(32, "little")
 
 def get_auth_headers(method: str, path: str) -> dict:
+    if not KALSHI_KEY_ID:
+        return {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
     timestamp = str(int(time.time() * 1000))
     clean_path = path.split("?")[0]
     msg = f"{timestamp}{method.upper()}{clean_path}".encode("utf-8")
@@ -802,20 +803,18 @@ def init_db():
             )"""
         )
         pconn.execute(
-            "INSERT OR IGNORE INTO bot_state (id, mode, auto_enabled, sim_cash, scans, slate_cap, bankroll_allocation_pct) VALUES (1, ?, ?, 32.22, 0, 32.22, 1.00)",
-            ("LIVE" if LIVE_MODE else "SIM", 1 if SNIPER_ARMED else 0),
+            "INSERT OR IGNORE INTO bot_state (id, mode, auto_enabled, sim_cash, scans, slate_cap, bankroll_allocation_pct) VALUES (1, 'SIM', 0, 32.22, 0, 3.22, 0.10)",
         )
         existing_cols = {r[1] for r in pconn.execute("PRAGMA table_info(bot_state)").fetchall()}
         if "bankroll_allocation_pct" not in existing_cols:
-            pconn.execute("ALTER TABLE bot_state ADD COLUMN bankroll_allocation_pct REAL NOT NULL DEFAULT 1.00")
+            pconn.execute("ALTER TABLE bot_state ADD COLUMN bankroll_allocation_pct REAL NOT NULL DEFAULT 0.10")
         row = pconn.execute("SELECT mode, auto_enabled, bankroll_allocation_pct FROM bot_state WHERE id = 1").fetchone()
         if row:
-            env_mode = os.getenv("DEFAULT_MODE")
-            env_auto = os.getenv("DEFAULT_AUTO")
-            LIVE_MODE = (env_mode.upper() == "LIVE") if env_mode else (str(row[0]).upper() == "LIVE")
-            SNIPER_ARMED = (env_auto.lower() in ("1", "true", "yes", "on")) if env_auto else bool(row[1])
-            if len(row) > 2 and row[2] is not None:
-                bankroll_allocation_pct = max(0.05, min(1.00, float(row[2])))
+            # Strictly FORCE SIM, DISARMED SNIPER, and 10% SLATE CAP at startup
+            LIVE_MODE = False
+            SNIPER_ARMED = False
+            bankroll_allocation_pct = 0.10
+            pconn.execute("UPDATE bot_state SET mode = 'SIM', auto_enabled = 0, bankroll_allocation_pct = 0.10 WHERE id = 1")
         pconn.commit()
         pconn.close()
     except Exception:
@@ -1040,7 +1039,7 @@ def build_menu_hud_payload(show_slider: Optional[bool] = None, show_scan_panel: 
     Build the exact `📡 AURASCAN // TELEMETRY V2` HUD text and Inline Keyboard JSON
     reading live runtime state, dynamic bankroll slider cap, API status, and sport options.
     """
-    global slider_panel_active, scan_panel_active
+    global slider_panel_active, scan_panel_active, live_kalshi_balance, sim_realized_pnl
     if show_slider is not None:
         slider_panel_active = show_slider
         if slider_panel_active:
@@ -1503,6 +1502,17 @@ def test_kalshi_api_connection() -> dict:
     Returns: {"ok": bool, "balance": float, "status": str, "code": int, "base_url": str, "key_id": str}
     """
     global live_kalshi_balance, last_kalshi_api_result, BASE_URL
+    if not KALSHI_KEY_ID:
+        res = {
+            "ok": False,
+            "balance": 0.0,
+            "status": "Simulation Mode (API keys deactivated for safe paper trading)",
+            "code": 0,
+            "base_url": BASE_URL,
+            "key_id": "None (Deactivated)",
+        }
+        last_kalshi_api_result = res
+        return res
     endpoints = [
         "https://api.elections.kalshi.com",
         "https://external-api.kalshi.com",
@@ -1936,46 +1946,79 @@ def execute_order(ticker: str, action: str, side: str, price_cents: int, count: 
         "time_in_force": "good_till_canceled",
     }
 
-    order_path = "/trade-api/v2/portfolio/orders"
-    endpoints_to_try = [BASE_URL, "https://api.elections.kalshi.com"]
+    order_paths = ["/trade-api/v2/portfolio/events/orders", "/trade-api/v2/portfolio/orders"]
+    endpoints_to_try = [BASE_URL, "https://external-api.kalshi.com", "https://api.elections.kalshi.com"]
     seen = set()
     unique_endpoints = [e for e in endpoints_to_try if not (e in seen or seen.add(e))]
 
+    last_err_text = ""
     for base in unique_endpoints:
-        try:
-            r = session.post(
-                f"{base.rstrip('/')}{order_path}",
-                headers=get_auth_headers("POST", order_path),
-                data=json.dumps(order_payload),
-                timeout=5,
-            )
-            if r.status_code in (200, 201):
-                resp_data = r.json() if r.text else {}
-                order_obj = resp_data.get("order") or resp_data.get("event_order") or {}
-                real_order_id = order_obj.get("order_id") or client_oid
-                print(f"  --> [LIVE-{norm_action.upper()}] {ticker} | {norm_side.upper()} x{count} @ {price_cents}c (${v2_price_str}) | OrderID: {real_order_id}")
-                try:
-                    notify_telegram(f"✅ AUTO-SNIPER ORDER PLACED: {ticker} | {count}x {norm_side.upper()} @ {price_cents}¢ (${v2_price_str}) | Order ID: {real_order_id}")
-                except Exception:
-                    pass
-                return OrderResult({"ok": True, "order_id": real_order_id, "mode": "LIVE", "price_cents": price_cents, "count": count, "ticker": ticker})
-            err_text = r.text[:200]
+        for order_path in order_paths:
             try:
-                notify_telegram(f"⚠️ AUTO-SNIPER ORDER REJECTED BY KALSHI [HTTP {r.status_code}]: {err_text} | Payload: {json.dumps(order_payload)}")
-            except Exception:
-                pass
-            if "insufficient_balance" in err_text:
-                print(f"  --> [BALANCE-ALERT] {ticker}: Insufficient available cash for {order_payload.get('count')} contracts @ {price_cents}c.")
-            elif r.status_code != 410 and "deprecated" not in err_text:
-                print(f"  --> [ORDER-ATTEMPT] {ticker} ({r.status_code} on {base}{path}): {err_text}")
-            if r.status_code in (400, 422):
-                continue
-        except Exception as exc:
-            try:
-                notify_telegram(f"⚠️ AUTO-SNIPER ORDER REJECTED BY KALSHI [HTTP 500]: {exc} | Payload: {json.dumps(order_payload)}")
-            except Exception:
-                pass
-            print(f"  --> [ORDER-ERR] {ticker} on {base}{path}: {exc}")
+                r = session.post(
+                    f"{base.rstrip('/')}{order_path}",
+                    headers=get_auth_headers("POST", order_path),
+                    data=json.dumps(order_payload),
+                    timeout=5,
+                )
+                if r.status_code in (200, 201):
+                    resp_data = r.json() if r.text else {}
+                    order_obj = resp_data.get("order") or resp_data.get("event_order") or {}
+                    real_order_id = order_obj.get("order_id") or client_oid
+                    print(f"  --> [LIVE-{norm_action.upper()}] {ticker} | {norm_side.upper()} x{count} @ {price_cents}c (${v2_price_str}) | OrderID: {real_order_id}")
+                    try:
+                        notify_telegram(f"✅ AUTO-SNIPER ORDER PLACED: {ticker} | {count}x {norm_side.upper()} @ {price_cents}¢ (${v2_price_str}) | Order ID: {real_order_id}")
+                    except Exception:
+                        pass
+                    return OrderResult({"ok": True, "order_id": real_order_id, "mode": "LIVE", "price_cents": price_cents, "count": count, "ticker": ticker})
+
+                err_text = r.text[:200]
+                last_err_text = err_text
+
+                # If 410, this path is deprecated; move to the next path
+                if r.status_code == 410:
+                    continue
+
+                if "insufficient_balance" in err_text:
+                    print(f"  --> [BALANCE-ALERT] {ticker}: Insufficient available cash for {order_payload.get('count')} contracts @ {price_cents}c.")
+                    return OrderResult({"ok": False, "order_id": "", "mode": "INSUFFICIENT_BALANCE", "price_cents": price_cents, "count": count, "ticker": ticker})
+
+                # If single-book model rejected with 400/422, retry with fixed-point dollars payload
+                if r.status_code in (400, 422):
+                    dollars_str = f"{clean_price / 100.0:.2f}"
+                    v2_alt_payload = {
+                        "ticker": ticker,
+                        "action": norm_action,
+                        "type": "limit",
+                        "side": "yes" if is_yes else "no",
+                        "count": max(1, int(count)),
+                        "client_order_id": client_oid,
+                        ("yes_price_fixed" if is_yes else "no_price_fixed"): dollars_str,
+                    }
+                    r_alt = session.post(
+                        f"{base.rstrip('/')}{order_path}",
+                        headers=get_auth_headers("POST", order_path),
+                        data=json.dumps(v2_alt_payload),
+                        timeout=5,
+                    )
+                    if r_alt.status_code in (200, 201):
+                        resp_data_alt = r_alt.json() if r_alt.text else {}
+                        order_obj_alt = resp_data_alt.get("order") or resp_data_alt.get("event_order") or {}
+                        real_order_id_alt = order_obj_alt.get("order_id") or client_oid
+                        print(f"  --> [LIVE-{norm_action.upper()}] {ticker} | {norm_side.upper()} x{count} @ {price_cents}c (${dollars_str}) | OrderID: {real_order_id_alt}")
+                        try:
+                            notify_telegram(f"✅ AUTO-SNIPER ORDER PLACED: {ticker} | {count}x {norm_side.upper()} @ {price_cents}¢ (${dollars_str}) | Order ID: {real_order_id_alt}")
+                        except Exception:
+                            pass
+                        return OrderResult({"ok": True, "order_id": real_order_id_alt, "mode": "LIVE", "price_cents": price_cents, "count": count, "ticker": ticker})
+            except Exception as exc:
+                last_err_text = str(exc)
+
+    try:
+        notify_telegram(f"⚠️ AUTO-SNIPER ORDER REJECTED BY KALSHI: {last_err_text} | Payload: {json.dumps(order_payload)}")
+    except Exception:
+        pass
+    print(f"  --> [ORDER-ERR] {ticker}: {last_err_text}")
 
     # Fallback to simulation execution if live balance is $0 or market closed
     if live_kalshi_balance <= 0.0:
@@ -2126,7 +2169,7 @@ def run_monte_carlo_and_combo_pipeline(
     3. Correlated Combo Builder using Joint Gaussian Copula (evaluate_parlay / build_optimal_parlays)
     4. Live Kalshi Limit Order Execution & RFQ Sniper (scaled by Dynamic Bankroll Slider Cap)
     """
-    global last_scan_ts, last_markets_checked, last_scan_diag, total_trades_count, live_kalshi_balance
+    global last_scan_ts, last_markets_checked, last_scan_diag, sim_realized_pnl, total_trades_count, live_kalshi_balance
 
     if markets is None:
         markets = fetch_all_open_markets(sport_filter)
@@ -3909,7 +3952,7 @@ async def telegram_notifier_and_command_loop():
     - /status, /positions, /open, /pnl, /scan
     - All inline keyboard callback_query triggers
     """
-    global startup_notified, LIVE_MODE, SNIPER_ARMED, last_scan_diag
+    global startup_notified, LIVE_MODE, SNIPER_ARMED, last_scan_diag, sim_realized_pnl, bankroll_allocation_pct, slider_panel_active, scan_panel_active, KALSHI_KEY_ID
     last_update_id = 0
     bot_username = "your_bot"
     try:
@@ -4049,20 +4092,21 @@ async def telegram_notifier_and_command_loop():
                             await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
 
                         elif any(k in cb_data for k in ("toggle_mode", "mode", "swap_mode")):
-                            new_live = not LIVE_MODE
-                            set_engine_mode(new_live)
-                            mode_name = "LIVE REAL-MONEY" if LIVE_MODE else "SIMULATION"
-                            last_scan_diag = f"🎛 Switched mode to {mode_name}"
                             if LIVE_MODE:
-                                chk = await asyncio.to_thread(test_kalshi_api_connection)
-                                if chk["ok"]:
-                                    toast_text = f"🟢 LIVE Mode active! Bal: ${chk['balance']:.2f}"
-                                    last_scan_diag = f"🟢 LIVE Mode active — Kalshi Bal: ${chk['balance']:.2f}"
-                                else:
-                                    toast_text = f"⚠️ LIVE (API: {chk['status'][:25]})"
-                                    last_scan_diag = f"⚠️ LIVE Mode active but API warning: {chk['status']}"
-                            else:
+                                set_engine_mode(False)
                                 toast_text = "🎮 Switched to SIM Mode"
+                                last_scan_diag = "🎮 Engine in SIMULATION mode"
+                            else:
+                                toast_text = "🛑 Requires /mode live CONFIRM REAL MONEY"
+                                confirm_msg = (
+                                    "🛑 <b>CONFIRMATION REQUIRED FOR LIVE MODE</b>\n"
+                                    "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    "Switching to LIVE real-money execution is locked against accidental clicks.\n\n"
+                                    "👉 To activate LIVE mode, copy and send in chat:\n"
+                                    "<code>/mode live CONFIRM REAL MONEY</code>\n\n"
+                                    "<i>Engine remains safely in SIMULATION mode.</i>"
+                                )
+                                await asyncio.to_thread(notify_telegram, confirm_msg, None, cb_chat_id, "HTML")
                             sync_state_to_sqlite()
                             hud_text, hud_kb = build_menu_hud_payload()
                             await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
@@ -4255,6 +4299,29 @@ async def telegram_notifier_and_command_loop():
                             sync_state_to_sqlite()
                             hud_text, hud_kb = build_menu_hud_payload()
                             await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, hud_text, hud_kb)
+
+                        elif cb_data.startswith("combo_log_"):
+                            cid_val = cb_data.split("combo_log_")[1]
+                            try:
+                                import combo_compiler
+                                ok, res_msg = combo_compiler.log_combo_as_placed(cid_val, open_positions)
+                                toast_text = "✅ Combo Logged as Placed!" if ok else "⚠️ Not found"
+                                sync_state_to_sqlite()
+                                _, hud_kb = build_menu_hud_payload()
+                                await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, res_msg, hud_kb)
+                            except Exception as log_err:
+                                toast_text = f"❌ Error logging: {log_err}"
+
+                        elif cb_data.startswith("combo_skip_"):
+                            cid_val = cb_data.split("combo_skip_")[1]
+                            try:
+                                import combo_compiler
+                                ok, res_msg = combo_compiler.skip_combo(cid_val)
+                                toast_text = "⏭️ Combo Skipped"
+                                _, hud_kb = build_menu_hud_payload()
+                                await asyncio.to_thread(edit_or_send_telegram, cb_chat_id, cb_msg_id, res_msg, hud_kb)
+                            except Exception as skip_err:
+                                toast_text = f"❌ Error skipping: {skip_err}"
 
                         elif "menu_scan_options" in cb_data:
                             scan_panel_active = not scan_panel_active
@@ -4490,6 +4557,25 @@ async def telegram_notifier_and_command_loop():
                     )
 
                     if is_player_query:
+                        # Check if query is a team name for NBA (e.g. /nba 76ers, /nba lakers)
+                        if cmd_word == "nba":
+                            team_query = " ".join(cmd_tokens[1:])
+                            try:
+                                from team_card import resolve_team, generate_team_card_response
+                                if resolve_team(team_query):
+                                    card_html, t_kb = await asyncio.to_thread(
+                                        generate_team_card_response,
+                                        team_query,
+                                        live_kalshi_balance,
+                                    )
+                                    if target_cid:
+                                        await asyncio.to_thread(notify_telegram, card_html, t_kb, target_cid, "HTML")
+                                    else:
+                                        await asyncio.to_thread(notify_telegram, card_html, t_kb, None, "HTML")
+                                    continue
+                            except Exception as tm_card_err:
+                                print(f"[NBA-TEAM-CARD-ERR] {tm_card_err}")
+
                         parsed = parse_user_query(clean_text)
                         sim_sport = parsed.get("sport") or (cmd_word.upper() if cmd_word in ("nba", "nfl", "mlb", "nhl", "wnba") else "NBA")
                         sim_player = parsed.get("player_key") or " ".join(cmd_tokens[1:])
@@ -4584,16 +4670,27 @@ async def telegram_notifier_and_command_loop():
                         else:
                             target_team = arg_val.upper() if (arg_val and len(arg_val) <= 4 and arg_val.isalpha()) else (arg_val if arg_val else None)
                             try:
-                                from sim_prop_bridge import scan_and_build_combo
-                                card_html, orders = await asyncio.to_thread(
-                                    scan_and_build_combo,
-                                    target_team=target_team,
-                                    legs_count=3,
+                                import combo_compiler
+                                rep_txt, rep_kb, _ = await asyncio.to_thread(
+                                    combo_compiler.build_risk_approved_combo,
+                                    target_team,
+                                    3,
+                                    live_kalshi_balance,
+                                    open_positions,
+                                    sim_realized_pnl,
                                 )
-                                rep_txt = card_html
+                                if not rep_txt:
+                                    from sim_prop_bridge import scan_and_build_combo
+                                    card_html, _ = await asyncio.to_thread(
+                                        scan_and_build_combo,
+                                        target_team=target_team,
+                                        legs_count=3,
+                                    )
+                                    rep_txt = card_html
+                                    _, rep_kb = build_menu_hud_payload()
                             except Exception as c_err:
                                 rep_txt = f"⚠️ <b>Combo Compiler Error:</b> <code>{html.escape(str(c_err))}</code>"
-                            _, rep_kb = build_menu_hud_payload()
+                                _, rep_kb = build_menu_hud_payload()
                             parse_m = "HTML"
                         if target_cid:
                             await asyncio.to_thread(notify_telegram, rep_txt, rep_kb, target_cid, parse_m)
@@ -4849,27 +4946,51 @@ async def telegram_notifier_and_command_loop():
                             await asyncio.to_thread(notify_telegram, rep, hud_kb)
 
                     elif low.startswith("/mode"):
-                        parts = low.split()
-                        if len(parts) > 1 and parts[1] in ("live", "real", "on"):
-                            set_engine_mode(True)
-                        elif len(parts) > 1 and parts[1] in ("sim", "paper", "off"):
-                            set_engine_mode(False)
-                        else:
-                            set_engine_mode(not LIVE_MODE)
-                        mode_name = "LIVE REAL-MONEY" if LIVE_MODE else "SIMULATION"
-                        last_scan_diag = f"🎛 Switched engine mode to {mode_name}"
-                        if LIVE_MODE:
-                            chk = await asyncio.to_thread(test_kalshi_api_connection)
-                            if chk["ok"]:
-                                last_scan_diag = f"🟢 LIVE Mode active — Kalshi Bal: ${chk['balance']:.2f}"
+                        raw_parts = clean_text.split()
+                        cmd_arg = raw_parts[1].lower() if len(raw_parts) > 1 else ""
+                        full_cmd_upper = clean_text.upper()
+
+                        if cmd_arg in ("live", "real", "on"):
+                            # Require strict confirmation phrase: CONFIRM REAL MONEY or CONFIRM LIVE
+                            if "CONFIRM REAL MONEY" in full_cmd_upper or "CONFIRM LIVE" in full_cmd_upper:
+                                set_engine_mode(True)
+                                chk = await asyncio.to_thread(test_kalshi_api_connection)
+                                bal_str = f"${chk['balance']:.2f}" if chk["ok"] else "API Disconnected"
+                                rep = (
+                                    "🟢 <b>LIVE REAL-MONEY MODE ACTIVATED!</b>\n"
+                                    "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"• 💵 <b>Kalshi Liquid Balance:</b> <code>{bal_str}</code>\n"
+                                    "• ⚠️ <b>Risk Notice:</b> Real orders and capital deployment are now armed.\n"
+                                    "• Send <code>/mode sim</code> at any time to return to safe paper simulation."
+                                )
+                                last_scan_diag = f"🟢 LIVE Mode active — Kalshi Bal: {bal_str}"
                             else:
-                                last_scan_diag = f"⚠️ LIVE Mode active but API warning: {chk['status']}"
-                        sync_state_to_sqlite()
-                        hud_text, hud_kb = build_menu_hud_payload()
-                        if target_cid:
-                            await asyncio.to_thread(notify_telegram, hud_text, hud_kb, target_cid)
+                                rep = (
+                                    "🛑 <b>CONFIRMATION REQUIRED FOR LIVE REAL-MONEY MODE</b>\n"
+                                    "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    "To prevent accidental real-capital deployment, switching to LIVE requires an explicit confirmation phrase.\n\n"
+                                    "👉 To activate LIVE mode, copy and send:\n"
+                                    "<code>/mode live CONFIRM REAL MONEY</code>\n\n"
+                                    "<i>Engine remains safely in SIMULATION (paper trading) mode.</i>"
+                                )
+                                last_scan_diag = "🛑 Blocked unconfirmed switch to LIVE mode"
+                        elif cmd_arg in ("sim", "paper", "off"):
+                            set_engine_mode(False)
+                            rep = "🎮 <b>Switched to SIMULATION (Paper Trading) Mode.</b>\n<i>No real money will be risked.</i>"
+                            last_scan_diag = "🎮 Engine in SIMULATION mode"
                         else:
-                            await asyncio.to_thread(notify_telegram, hud_text, hud_kb)
+                            curr_str = "🟢 LIVE REAL-MONEY" if LIVE_MODE else "🎮 SIMULATION (Paper)"
+                            rep = (
+                                f"🎛 <b>Engine Execution Mode:</b> <code>{curr_str}</code>\n\n"
+                                "• Switch to SIM: <code>/mode sim</code>\n"
+                                "• Switch to LIVE: <code>/mode live CONFIRM REAL MONEY</code>"
+                            )
+                        sync_state_to_sqlite()
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb, target_cid, "HTML")
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb, None, "HTML")
 
                     elif low.startswith(("/setkey", "/keyid")):
                         parts = text.split(maxsplit=1)
@@ -5087,9 +5208,9 @@ async def telegram_notifier_and_command_loop():
                         p_txt = (
                             f"🌐 *AURASCAN PORT & SWEAT HUD STATUS*\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"• 🔌 *Web Port:* `{ACTIVE_WEB_PORT}` (TCP HTTP)\n"
+                            f"• 🔌 *Web Port:* `{ACTIVE_WEB_PORT}` (Localhost loopback only)\n"
                             f"• 📱 *Local HUD:* `http://127.0.0.1:{ACTIVE_WEB_PORT}`\n"
-                            f"• 📡 *Network / LAN:* `http://0.0.0.0:{ACTIVE_WEB_PORT}`\n"
+                            f"• 🔒 *Network / LAN:* `Disabled (Bound strictly to 127.0.0.1)`\n"
                             f"• 🚀 *Vercel Deployment:* https://peezt-tv.vercel.app\n"
                             f"• ⚡ *Kalshi V2 WebSocket:* `wss://api.elections.kalshi.com` (Active)\n"
                             f"• 🟢 *Server Status:* Active & Serving live 10k MC + Copula slips"
@@ -5211,6 +5332,39 @@ async def telegram_notifier_and_command_loop():
                         else:
                             await asyncio.to_thread(notify_telegram, rep, hud_kb)
 
+                    elif low.startswith(("/autosend", "/autoprops", "/ticker")):
+                        global AUTO_SEND_PROPS_ENABLED, AUTO_SEND_PROPS_INTERVAL
+                        parts = low.split()
+                        sub_arg = parts[1] if len(parts) > 1 else ""
+                        if sub_arg in ("off", "stop", "pause", "0"):
+                            AUTO_SEND_PROPS_ENABLED = False
+                            rep = "⏸️ *Auto-Send Sim Props Paused.*"
+                        elif sub_arg in ("on", "start", "resume", "1"):
+                            AUTO_SEND_PROPS_ENABLED = True
+                            rep = f"▶️ *Auto-Send Sim Props Active!* Dispatching props across all sports every {int(AUTO_SEND_PROPS_INTERVAL)}s."
+                        elif sub_arg.isdigit():
+                            AUTO_SEND_PROPS_INTERVAL = max(15.0, float(sub_arg))
+                            AUTO_SEND_PROPS_ENABLED = True
+                            rep = f"⏱️ *Auto-Send Interval set to {int(AUTO_SEND_PROPS_INTERVAL)} seconds.*"
+                        else:
+                            st = "🟢 Active" if AUTO_SEND_PROPS_ENABLED else "🔴 Paused"
+                            rep = (
+                                f"📡 *AUTO-SEND SIM PROPS STATUS*\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"• Status: {st}\n"
+                                f"• Interval: `{int(AUTO_SEND_PROPS_INTERVAL)} seconds`\n"
+                                f"• Sports Rotation: `NBA ➡️ NFL ➡️ TENNIS ➡️ ALL-SLATE`\n\n"
+                                f"💡 *Commands:*\n"
+                                f"• `/autosend on` — Enable 45s auto ticker\n"
+                                f"• `/autosend off` — Pause auto ticker\n"
+                                f"• `/autosend 45` — Set timer interval"
+                            )
+                        _, hud_kb = build_menu_hud_payload()
+                        if target_cid:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb, target_cid)
+                        else:
+                            await asyncio.to_thread(notify_telegram, rep, hud_kb)
+
                     elif low.startswith("/"):
                         unknown_cmd = clean_text.split()[0]
                         rep_txt = (
@@ -5250,11 +5404,14 @@ async def telegram_notifier_and_command_loop():
 
 
 async def kalshi_ws_listener():
-    """Streams real-time ticker, orderbook_delta & fill channels over Kalshi V2 WebSocket."""
+    """Streams real-time ticker and orderbook_delta channels over Kalshi V2 WebSocket."""
+    ws_channels = ["ticker", "orderbook_delta"]
+    if LIVE_MODE and KALSHI_KEY_ID:
+        ws_channels.append("fill")
     sub_msg = json.dumps({
         "id": 1,
         "cmd": "subscribe",
-        "params": {"channels": ["ticker", "orderbook_delta", "fill"]}
+        "params": {"channels": ws_channels}
     })
     while True:
         try:
@@ -5411,13 +5568,22 @@ async def auto_pilot_loop():
     6. Automatically fires live limit orders sizing stakes dynamically via Fractional Kelly scaled to available balance.
     7. Pushes instant Telegram execution alerts & live auto-scans for props to chat.
     """
-    global last_scan_ts, last_markets_checked, last_scan_diag
+    global last_scan_ts, last_markets_checked, last_scan_diag, sim_realized_pnl
     cycle_num = 0
     last_broadcast_ts = 0.0
     last_combo_drop_ts = 0.0
     last_broadcast_sig = ""
     await asyncio.sleep(4)  # Initial boot grace
     print("[AUTO-PILOT] Full-auto background engine loop active (60s loop).")
+
+    # Initialize GameNotifier (rotation audit gated, staggered 3 minutes apart)
+    try:
+        from game_card_bridge import get_game_notifier
+        game_notifier = get_game_notifier()
+        print("[AUTO-PILOT] 🏀 GameNotifier instantiated successfully.")
+    except Exception as gn_init_err:
+        print(f"[AUTO-PILOT] GameNotifier init warning: {gn_init_err}")
+        game_notifier = None
 
     _notified_order_ids: Set[str] = set()
     while True:
@@ -5458,7 +5624,11 @@ async def auto_pilot_loop():
                 await asyncio.sleep(60)
                 continue
 
-            print(f"[AUTO-PILOT] Cycle #{cycle_num}: Auto-scanning props & running 10k MC + Copula (Deployable: ${avail_to_deploy:.2f} / ${slate_cap:.2f} Cap)...")
+            SPORTS_ROTATION = ["NBA", "NFL", "TENNIS", "ALL"]
+            curr_sport_cat = SPORTS_ROTATION[cycle_num % len(SPORTS_ROTATION)]
+            sp_arg = None if curr_sport_cat == "ALL" else curr_sport_cat
+
+            print(f"[AUTO-PILOT] Cycle #{cycle_num} [{curr_sport_cat}]: Auto-scanning props & running 10k MC + Copula (Deployable: ${avail_to_deploy:.2f} / ${slate_cap:.2f} Cap)...")
 
             target_cid = TELEGRAM_CHAT_ID or discover_telegram_chat_id()
             can_fire = bool(SNIPER_ARMED and (avail_to_deploy >= 0.50))
@@ -5477,11 +5647,11 @@ async def auto_pilot_loop():
                 except Exception as nba_err:
                     print(f"[AUTO-PILOT-NBA-ERR] {nba_err}")
 
-            # 2. Run end-to-end MC + Copula + Execution pipeline
+            # 2. Run end-to-end MC + Copula + Execution pipeline across rotating sports categories
             rep_txt, rep_kb = await asyncio.to_thread(
                 run_monte_carlo_and_combo_pipeline,
                 None,
-                None,
+                sp_arg,
                 can_fire,
                 target_cid,
             )
@@ -5501,40 +5671,60 @@ async def auto_pilot_loop():
 
             now = time.time()
             is_initial = (cycle_num == 1 and SNIPER_ARMED)
-            sig_changed = (bool(current_sig) and current_sig != last_broadcast_sig and (now - last_broadcast_ts >= 600))
+            sig_changed = (bool(current_sig) and current_sig != last_broadcast_sig)
 
-            should_broadcast = is_new_live_order
+            # Every 45s: Auto-send new sim props across sports categories to Telegram
+            should_broadcast = is_new_live_order or (
+                AUTO_SEND_PROPS_ENABLED
+                and bool(target_cid)
+                and bool(rep_txt)
+                and (sig_changed or (now - last_broadcast_ts >= (AUTO_SEND_PROPS_INTERVAL - 5.0)))
+            )
 
             if should_broadcast:
-                print(f"[AUTO-PILOT] Dispatching auto-scan to Telegram (Cycle #{cycle_num}, NewOrder={is_new_live_order}, Initial={is_initial}, SigChanged={sig_changed}).")
+                print(f"[AUTO-PILOT] 📡 Auto-sending new sim props for {curr_sport_cat} to Telegram (Cycle #{cycle_num}, every {int(AUTO_SEND_PROPS_INTERVAL)}s).")
                 notify_telegram(rep_txt, reply_markup=rep_kb, chat_id=target_cid, parse_mode="HTML")
                 last_broadcast_ts = now
                 last_broadcast_sig = current_sig
 
-            # 3. Autonomous Periodic +EV Combo Drop (every 30-45 mins)
-            if (now - last_combo_drop_ts >= 1800) and target_cid:
+            # 3. Autonomous Alert-Only Risk-Manager Approved Combo Drop (with 300s throttling)
+            if (now - last_combo_drop_ts >= 300) and target_cid:
                 try:
-                    from sim_prop_bridge import push_telegram_combo_alert
-                    await asyncio.to_thread(
-                        push_telegram_combo_alert,
-                        TELEGRAM_BOT_TOKEN,
-                        target_cid,
+                    import combo_compiler
+                    c_txt, c_kb, c_data = await asyncio.to_thread(
+                        combo_compiler.build_risk_approved_combo,
                         None,
                         3,
+                        live_bal,
+                        open_positions,
+                        sim_realized_pnl,
                     )
-                    last_combo_drop_ts = now
-                    print(f"[AUTO-PILOT] 🎯 Pushed periodic 3-leg +EV parlay combo alert to Telegram!")
+                    c_hash = c_data.get("combo_hash", "") if c_data else ""
+                    if c_txt and c_data and combo_compiler.can_dispatch_combo_alert(c_hash):
+                        notify_telegram(c_txt, reply_markup=c_kb, chat_id=target_cid, parse_mode="HTML")
+                        combo_compiler.mark_combo_alert_dispatched(c_hash)
+                        last_combo_drop_ts = now
+                        print(f"[AUTO-PILOT] 🎯 Pushed Risk-Approved Alert-Only Combo to Telegram (Hash: {c_hash[:8]})!")
                 except Exception as combo_drop_err:
                     print(f"[AUTO-PILOT-COMBO-DROP-ERR] {combo_drop_err}")
+
+            # 4. Staggered Game Notifier (one Telegram card per game, >= 3 min apart, rotation audit gated)
+            if game_notifier and target_cid:
+                try:
+                    gn_res = await asyncio.to_thread(game_notifier.tick)
+                    if gn_res:
+                        print(f"[AUTO-PILOT] 🏀 Dispatched GameNotifier card for {gn_res.get('title')} (fresh={gn_res.get('fresh')})")
+                except Exception as gn_tick_err:
+                    print(f"[AUTO-PILOT-GAME-NOTIFIER-ERR] {gn_tick_err}")
 
         except Exception as err:
             print(f"[AUTO-PILOT-EXC] Cycle error: {err}")
 
-        await asyncio.sleep(60)
+        await asyncio.sleep(AUTO_SEND_PROPS_INTERVAL if AUTO_SEND_PROPS_ENABLED else 60)
 
 
 async def rest_scanner_loop():
-    global starting_bankroll, circuit_breaker_tripped, last_scan_ts, last_markets_checked, last_scan_diag
+    global starting_bankroll, circuit_breaker_tripped, last_scan_ts, last_markets_checked, last_scan_diag, sim_realized_pnl
     sweep_count = 0
 
     while True:
@@ -5676,11 +5866,12 @@ async def main():
 
     curr_slate_cap = get_dynamic_slate_cap()
     mode_banner = "LIVE REAL-MONEY" if LIVE_MODE else "SIMULATION"
+    bal_display = f"${live_kalshi_balance:.2f}" if (KALSHI_KEY_ID and LIVE_MODE) else f"n/a (SIM: ${live_kalshi_balance:.2f})"
     print("======================================================================")
-    print(f" AURASCAN // KALSHI V2 HYBRID ENGINE [{mode_banner}] (Ed25519 Native)")
-    print(f" Kalshi Bal: ${live_kalshi_balance:.2f} | Sniper: {'ARMED' if SNIPER_ARMED else 'DISARMED'} | Slate Cap: ${curr_slate_cap:.2f} ({int(bankroll_allocation_pct*100)}%)")
-    print(f" Web HUD: http://127.0.0.1:{ACTIVE_WEB_PORT} (0.0.0.0:{ACTIVE_WEB_PORT}) | Vercel: https://peezt-tv.vercel.app")
-    print(" Commands: /menu | /mode [live|sim] | /api | /bal | /cap [10-100] | /ports | /build | /resume | /atd | /atd_odds | /btc | /audit")
+    print(f" AURASCAN // KALSHI V2 HYBRID ENGINE [{mode_banner}]")
+    print(f" Kalshi Bal: {bal_display} | Sniper: {'ARMED' if SNIPER_ARMED else 'DISARMED'} | Slate Cap: ${curr_slate_cap:.2f} ({int(bankroll_allocation_pct*100)}%)")
+    print(f" Web HUD: http://127.0.0.1:{ACTIVE_WEB_PORT} (Localhost loopback only) | Vercel: https://peezt-tv.vercel.app")
+    print(" Commands: /menu | /mode [sim|live CONFIRM REAL MONEY] | /api | /bal | /cap [10-100] | /ports | /build | /resume | /atd | /atd_odds | /btc | /audit")
     print("======================================================================")
     try:
         await asyncio.gather(

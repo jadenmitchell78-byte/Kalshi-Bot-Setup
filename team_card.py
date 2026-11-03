@@ -149,10 +149,14 @@ def format_team_card(team, game, sim, market=None, items=(), top_n=5, w_model=0.
     items: [(Candidate, Decision)] from risk_manager.evaluate().
     projections: optional list of formatted strings with key players' projection ladders when no open Kalshi markets exist.
     """
-    home, away = game["home"], game["away"]
-    game_id_txt = f" · Game ID: <code>{escape(str(game['game_id']))}</code>" if game.get("game_id") else ""
-    date_txt = f" ({escape(str(game['game_date']))})" if game.get("game_date") else ""
-    tip_str = escape(game.get('tip_text', ''))
+    home, away = str(game.get("home") or "HOME"), str(game.get("away") or "AWAY")
+    gid_val = str(game.get("game_id") or "")
+    game_id_txt = f" · Game ID: <code>{escape(gid_val)}</code>" if gid_val and gid_val.lower() != "none" else ""
+    dt_val = str(game.get("game_date") or "")
+    date_txt = f" ({escape(dt_val)})" if dt_val and dt_val.lower() != "none" else ""
+    tip_str = escape(str(game.get("tip_text") or "Scheduled"))
+    if tip_str.lower() == "none":
+        tip_str = "Scheduled"
     L = [f"🏀 <b>{escape(away)} @ {escape(home)}</b> · {tip_str}{date_txt}{game_id_txt}",
          "<b>Moneyline sim</b> (model unvalidated)",
          f"• Model: {escape(home)} {sim['p_home']:.0%} / {escape(away)} {1 - sim['p_home']:.0%} "
@@ -176,12 +180,18 @@ def format_team_card(team, game, sim, market=None, items=(), top_n=5, w_model=0.
         for c, d in approved[:top_n]:
             side = "O" if c.side == "YES" else "U"
             tag = " PRELIM" if "PRELIMINARY" in d.flags else ""
-            L.append(f"• {escape(c.player)} {escape(c.stat)} {side}{c.line:g}: sim "
-                     f"{(c.p_yes if c.side == 'YES' else 1 - c.p_yes):.0%} vs {d.entry:.0%} · edge {d.edge:+.1%} · "
-                     f"${d.stake:.2f} {'PAPER' if d.action == 'APPROVE_PAPER' else 'LIVE'}{tag}")
+            p_val = c.p_yes if c.side == "YES" else (1 - c.p_yes)
+            entry_pct = f"{d.entry:.0%}" if d.entry is not None else "50%"
+            edge_pct = f"{d.edge:+.1%}" if d.edge is not None else "+0.0%"
+            stake_val = f"${d.stake:.2f}" if d.stake is not None else "$1.00"
+            p_name = escape(str(c.player or "Player"))
+            s_name = escape(str(c.stat or "PTS"))
+            L.append(f"• {p_name} {s_name} {side}{c.line:g}: sim "
+                     f"{p_val:.0%} vs {entry_pct} · edge {edge_pct} · "
+                     f"{stake_val} {'PAPER' if d.action == 'APPROVE_PAPER' else 'LIVE'}{tag}")
         if vetoed:
             top = Counter(d.reasons[0][0] for d in vetoed if d.reasons).most_common(3)
-            L.append("Passed because: " + ", ".join(f"{k.lower().replace('_', ' ')} ×{v}" for k, v in top))
+            L.append("Passed because: " + ", ".join(f"{str(k).lower().replace('_', ' ')} ×{v}" for k, v in top))
     else:
         L.append("<b>Props</b>: No open Kalshi markets for this game yet.")
         if projections:
@@ -858,9 +868,9 @@ def generate_team_card_response(team_query: str, bankroll: float = 100.0) -> Tup
 
     items: List[Tuple[rm.Candidate, Any]] = []
     projections: List[str] = []
+    groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
     if open_props:
-        groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
         seen_prop_cuts: Set[Tuple[str, str, float]] = set()
 
         for m in open_props:
@@ -1000,7 +1010,56 @@ def generate_team_card_response(team_query: str, bankroll: float = 100.0) -> Tup
             if len(projections) >= 4:
                 break
 
+    # Rotation Audit check for both teams
+    audit_notes = []
+    try:
+        from game_card_bridge import build_team_rotation
+        import rotation_audit
+        away_players, _ = build_team_rotation(away, game_id=gid)
+        home_players, _ = build_team_rotation(home, game_id=gid)
+        away_audit = rotation_audit.audit_team(away_players, team=away)
+        home_audit = rotation_audit.audit_team(home_players, team=home)
+        audit_sec = (
+            f"📋 <b>Rotation Audit</b>:\n"
+            f"• <b>[{away}]</b>: {rotation_audit.format_flags(away_audit)}\n"
+            f"• <b>[{home}]</b>: {rotation_audit.format_flags(home_audit)}"
+        )
+        audit_notes.append(audit_sec)
+
+        # Suppress approvals if audit_team fails
+        if items:
+            cleaned_items = []
+            for c, d in items:
+                cand_team = None
+                for (pn, _), g in groups.items():
+                    if pn == c.player:
+                        cand_team = g["team"]
+                        break
+                is_suppressed = False
+                if not away_audit.get("ok") and cand_team == away:
+                    is_suppressed = True
+                elif not home_audit.get("ok") and cand_team == home:
+                    is_suppressed = True
+                if is_suppressed and d.action in ("APPROVE_LIVE", "APPROVE_PAPER"):
+                    cleaned_items.append((c, rm.Decision(
+                        candidate=c, action="VETO", stake=0.0, price=d.entry or 0.50,
+                        entry=d.entry, edge=d.edge, tier=d.tier,
+                        reasons=[("ROTATION_AUDIT_FAILED", "Suppressed by team rotation audit failure")],
+                        flags=d.flags,
+                    )))
+                else:
+                    cleaned_items.append((c, d))
+            items = cleaned_items
+    except Exception as rot_err:
+        pass
+
     card_html = format_team_card(team, game_dict, sim, market=mkt, items=items, top_n=5, projections=projections)
+    if audit_notes:
+        lines = card_html.splitlines()
+        if len(lines) >= 1:
+            card_html = lines[0] + "\n" + audit_notes[0] + "\n" + "\n".join(lines[1:])
+        else:
+            card_html = audit_notes[0] + "\n" + card_html
     keyboard = {"inline_keyboard": [
         [{"text": "📺 WATCH STREAM", "url": "https://streamed.su/watch/basketball"},
          {"text": "🔙 MENU HUD", "callback_data": "menu_refresh_hud"}]

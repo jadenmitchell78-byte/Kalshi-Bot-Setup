@@ -314,17 +314,24 @@ def create_web_app(
             return web.json_response({"ok": False, "msg": "Select at least 2 legs."})
 
         rt = get_runtime_state()
+        # Security Guardrail: Disallow live real-money order execution from unauthenticated Web UI
+        if rt.get("mode") == "LIVE":
+            return web.json_response({
+                "ok": False,
+                "msg": "Live real-money order execution is disabled from Web HUD for safety. Use verified Telegram risk management.",
+            })
+
         slip = evaluate_parlay(
             selected, bankroll=rt["sim_cash"], iterations=MC_ITERATIONS
         )
         await execute_fn(slip)
-        card = format_slip_card(slip, mode_label=rt["mode"])
+        card = format_slip_card(slip, mode_label="SIM")
 
         if send_tg and telegram_dispatch_fn:
             await telegram_dispatch_fn(card)
-            msg = f"📲 Logged {slip.slip_id} & dispatched to Telegram!"
+            msg = f"📲 Logged {slip.slip_id} (SIM) & dispatched to Telegram!"
         else:
-            msg = f"⚡ Executed {slip.slip_id} (${slip.kelly_stake:.2f} -> ${slip.potential_payout:.2f})!"
+            msg = f"⚡ Executed {slip.slip_id} in SIM (${slip.kelly_stake:.2f} -> ${slip.potential_payout:.2f})!"
 
         return web.json_response({"ok": True, "msg": msg, "slip": serialize_slip(slip)})
 
@@ -359,9 +366,11 @@ def create_web_app(
                 }
             )
         elif act == "mode":
-            rt = get_runtime_state()
-            new_mode = set_mode("LIVE" if rt["mode"] == "SIM" else "SIM")
-            return web.json_response({"ok": True, "msg": f"Switched mode to {new_mode}"})
+            # Gated: Disallow switching to LIVE from unauthenticated Web UI
+            return web.json_response({
+                "ok": False,
+                "msg": "Mode switching to LIVE is disabled in Web HUD for safety. Use Telegram with confirmation phrase: /mode live CONFIRM REAL MONEY",
+            })
         elif act == "simsettle":
             cnt = await run_settlement_cycle(simulate_outcomes=True)
             return web.json_response({"ok": True, "msg": f"Simulated settlement for {cnt} slip(s)!"})
@@ -459,10 +468,10 @@ async def start_background_web_server(
     last_exc = None
     for p in candidate_ports:
         try:
-            site = web.TCPSite(runner, "0.0.0.0", p, reuse_address=True, reuse_port=True)
+            site = web.TCPSite(runner, "127.0.0.1", p, reuse_address=True, reuse_port=True)
             await site.start()
             ACTIVE_WEB_PORT = p
-            print(f"[WEB-HUD] ✅ Sweat HUD live on port {p} -> http://127.0.0.1:{p} (0.0.0.0:{p})")
+            print(f"[WEB-HUD] ✅ Sweat HUD live on loopback -> http://127.0.0.1:{p} (LAN 0.0.0.0 disabled)")
             logger.info("Mobile Web UI live at http://127.0.0.1:%d", p)
             return runner
         except (OSError, Exception) as exc:

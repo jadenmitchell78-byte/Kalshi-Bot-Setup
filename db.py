@@ -83,8 +83,8 @@ def init_db() -> None:
         )
         if DEFAULT_AUTO:
             conn.execute("UPDATE bot_state SET auto_enabled = 1 WHERE id = 1;")
-        _ensure_column(conn, "bot_state", "slate_cap", "REAL NOT NULL DEFAULT 5.00")
-        _ensure_column(conn, "bot_state", "bankroll_allocation_pct", "REAL NOT NULL DEFAULT 1.00")
+        _ensure_column(conn, "bot_state", "slate_cap", "REAL NOT NULL DEFAULT 3.22")
+        _ensure_column(conn, "bot_state", "bankroll_allocation_pct", "REAL NOT NULL DEFAULT 0.10")
         _ensure_column(conn, "bot_state", "last_scan_ts", "REAL NOT NULL DEFAULT 0.0")
         _ensure_column(conn, "bot_state", "last_markets_checked", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "bot_state", "last_scan_diag", "TEXT NOT NULL DEFAULT 'Armed — awaiting scan cycle'")

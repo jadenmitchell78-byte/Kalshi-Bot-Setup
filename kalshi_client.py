@@ -244,35 +244,102 @@ async def place_kalshi_order(
 
     is_yes = side.upper() in ("YES", "OVER", "O")
     client_oid = str(uuid.uuid4())
-    url = f"{KALSHI_BASE_URL}/portfolio/orders"
+    clean_price = max(1, min(99, int(price_cents)))
+    norm_action = action.lower()
+
+    # Kalshi V2 Single-Book Order Model (matching bot.py & smart_placer.py)
+    if norm_action == "buy":
+        v2_side = "bid" if is_yes else "ask"
+        v2_price_cents = clean_price if is_yes else (100 - clean_price)
+    else:
+        v2_side = "ask" if is_yes else "bid"
+        v2_price_cents = clean_price if is_yes else (100 - clean_price)
+
+    v2_price_str = f"{v2_price_cents / 100.0:.4f}"
     payload = {
         "ticker": ticker,
-        "action": action.lower(),
-        "type": "limit",
-        "side": "yes" if is_yes else "no",
-        "count": max(1, int(count)),
-        ("yes_price" if is_yes else "no_price"): int(price_cents if is_yes else (100 - price_cents)),
         "client_order_id": client_oid,
+        "side": v2_side,
+        "count": str(max(1, int(count))),
+        "price": v2_price_str,
+        "time_in_force": "good_till_canceled",
     }
 
-    headers = build_kalshi_auth_headers("POST", url)
+    # Kalshi V2 Routes: Primary active endpoint is /portfolio/events/orders
+    base_prefix = KALSHI_BASE_URL.rstrip("/")
+    if not base_prefix.endswith("/trade-api/v2"):
+        if "/trade-api/v2" not in base_prefix:
+            base_prefix += "/trade-api/v2"
+
+    candidate_endpoints = [
+        f"{base_prefix}/portfolio/events/orders",
+        "https://external-api.kalshi.com/trade-api/v2/portfolio/events/orders",
+        "https://api.elections.kalshi.com/trade-api/v2/portfolio/events/orders",
+        f"{base_prefix}/portfolio/orders",
+    ]
+    seen_urls = set()
+    unique_endpoints = [u for u in candidate_endpoints if not (u in seen_urls or seen_urls.add(u))]
+
+    last_err_msg = ""
+    last_status = 500
+
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url,
-                headers=headers,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=8),
-            ) as resp:
-                data = await resp.json() if resp.content_type == "application/json" else {}
-                if resp.status in (200, 201):
-                    order_obj = data.get("order", {}) or data.get("event_order", {})
-                    oid = order_obj.get("order_id") or client_oid
-                    logger.info("[LIVE-ORDER-FILL] %s %dx %s @ %dc | OID: %s", ticker, count, side.upper(), price_cents, oid)
-                    return {"ok": True, "order_id": oid, "data": data}
-                err_msg = str(data.get("error", {}).get("message") or data or await resp.text())
-                logger.warning("[LIVE-ORDER-REJECT] %s: HTTP %d - %s", ticker, resp.status, err_msg)
-                return {"ok": False, "msg": err_msg, "code": resp.status}
+            for url in unique_endpoints:
+                headers = build_kalshi_auth_headers("POST", url)
+                try:
+                    async with session.post(
+                        url,
+                        headers=headers,
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=8),
+                    ) as resp:
+                        data = await resp.json() if resp.content_type == "application/json" else {}
+                        if resp.status in (200, 201):
+                            order_obj = data.get("order", {}) or data.get("event_order", {})
+                            oid = order_obj.get("order_id") or client_oid
+                            logger.info("[LIVE-ORDER-FILL] %s %dx %s @ %dc | OID: %s", ticker, count, side.upper(), price_cents, oid)
+                            return {"ok": True, "order_id": oid, "data": data}
+
+                        last_status = resp.status
+                        last_err_msg = str(data.get("error", {}).get("message") or data or await resp.text())
+
+                        # If 410, this path is deprecated; move immediately to the next candidate
+                        if resp.status == 410:
+                            continue
+
+                        # If format parameter rejected, try V2 fixed-point payload
+                        if resp.status in (400, 422):
+                            dollars_str = f"{clean_price / 100.0:.2f}"
+                            v2_alt_payload = {
+                                "ticker": ticker,
+                                "action": norm_action,
+                                "type": "limit",
+                                "side": "yes" if is_yes else "no",
+                                "count": max(1, int(count)),
+                                "client_order_id": client_oid,
+                                ("yes_price_fixed" if is_yes else "no_price_fixed"): dollars_str,
+                            }
+                            async with session.post(
+                                url,
+                                headers=build_kalshi_auth_headers("POST", url),
+                                json=v2_alt_payload,
+                                timeout=aiohttp.ClientTimeout(total=8),
+                            ) as resp_alt:
+                                data_alt = await resp_alt.json() if resp_alt.content_type == "application/json" else {}
+                                if resp_alt.status in (200, 201):
+                                    order_obj = data_alt.get("order", {}) or data_alt.get("event_order", {})
+                                    oid = order_obj.get("order_id") or client_oid
+                                    logger.info("[LIVE-ORDER-FILL] %s %dx %s @ %dc (fixed-point) | OID: %s", ticker, count, side.upper(), price_cents, oid)
+                                    return {"ok": True, "order_id": oid, "data": data_alt}
+                except Exception as endpoint_exc:
+                    last_err_msg = str(endpoint_exc)
+
+            logger.warning("[LIVE-ORDER-REJECT] %s: HTTP %d - %s", ticker, last_status, last_err_msg)
+            return {"ok": False, "msg": last_err_msg, "code": last_status}
+    except Exception as exc:
+        logger.error("[LIVE-ORDER-EXC] %s: %s", ticker, exc)
+        return {"ok": False, "msg": str(exc)}
     except Exception as exc:
         logger.error("[LIVE-ORDER-EXC] %s: %s", ticker, exc)
         return {"ok": False, "msg": str(exc)}

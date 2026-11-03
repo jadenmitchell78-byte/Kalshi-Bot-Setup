@@ -63,8 +63,12 @@ class RiskConfig:
     unconfirmed_size_mult: float = 0.50# Half-size stake if unconfirmed > 1h out
     fee_rate: float = 0.07             # Kalshi fee shape: 0.07 * P * (1 - P)
 
-    # Validated Stats
-    validated_stats: Tuple[str, ...] = ("PTS", "3PM", "3PT", "AST", "REB")
+    # Validated Stats across NBA, NFL, and Tennis
+    validated_stats: Tuple[str, ...] = (
+        "PTS", "3PM", "3PT", "AST", "REB",
+        "PASS_YDS", "RUSH_YDS", "REC_YDS", "TD",
+        "MATCH", "GAMES", "SETS"
+    )
     paper_only_stats: Tuple[str, ...] = ("PRA",)
 
     # Live Mode Gate (Default strictly False / Paper-only)
