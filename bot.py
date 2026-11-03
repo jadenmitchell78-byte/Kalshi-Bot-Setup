@@ -255,7 +255,7 @@ DAILY_SPORTS_SERIES = [
     "KXTENNIS", "KXATP", "KXWTA", "KXMLB"
 ]
 
-DAILY_DATE_CODE_REGEX = re.compile(r"26(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}", re.I)
+DAILY_DATE_CODE_REGEX = re.compile(r"(?:24|25|26|27)(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}", re.I)
 
 
 def normalize_kalshi_market(m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -5414,6 +5414,9 @@ async def kalshi_ws_listener():
         "params": {"channels": ws_channels}
     })
     while True:
+        if not KALSHI_KEY_ID:
+            await asyncio.sleep(60)
+            continue
         try:
             ws_headers = get_auth_headers("GET", "/trade-api/ws/v2")
             if HAS_WEBSOCKETS:
@@ -5625,7 +5628,7 @@ async def auto_pilot_loop():
                 continue
 
             SPORTS_ROTATION = ["NBA", "NFL", "TENNIS", "ALL"]
-            curr_sport_cat = SPORTS_ROTATION[cycle_num % len(SPORTS_ROTATION)]
+            curr_sport_cat = SPORTS_ROTATION[(cycle_num - 1) % len(SPORTS_ROTATION)]
             sp_arg = None if curr_sport_cat == "ALL" else curr_sport_cat
 
             print(f"[AUTO-PILOT] Cycle #{cycle_num} [{curr_sport_cat}]: Auto-scanning props & running 10k MC + Copula (Deployable: ${avail_to_deploy:.2f} / ${slate_cap:.2f} Cap)...")

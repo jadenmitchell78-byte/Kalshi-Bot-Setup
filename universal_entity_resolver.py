@@ -74,23 +74,21 @@ def get_consonant_skeleton(text: str) -> str:
 # ---------------------------------------------------------------------
 def get_active_date_codes() -> Set[str]:
     """
-    Generates a 3-day set of Kalshi date codes: [yesterday, today, tomorrow].
+    Generates a sliding set of active Kalshi date codes: [yesterday, today, tomorrow, +2d, +3d].
     Uses US Pacific/Mountain offset (UTC - 7 hours) so an 8:00 PM game (03:00 UTC)
     never rolls over and drops tonight's slate!
-    Example: {'26OCT26', '26OCT27', '26OCT28'}
     """
     utc_now = datetime.datetime.now(datetime.timezone.utc)
-    # Shift back 7 hours for US Pacific / Mountain game night alignment
     us_game_night = utc_now - datetime.timedelta(hours=7)
 
     codes = set()
-    for day_offset in (-1, 0, 1):
+    for day_offset in (-1, 0, 1, 2, 3):
         dt = us_game_night + datetime.timedelta(days=day_offset)
-        # Format: 26OCT27 (2-digit year, 3-char upper month, 2-digit day)
         code = dt.strftime("%y%b%d").upper()
         codes.add(code)
+        for alt_yr in ("24", "25", "26", "27"):
+            codes.add(f"{alt_yr}{code[2:]}")
 
-    # Also add pure UTC today just in case
     codes.add(utc_now.strftime("%y%b%d").upper())
     return codes
 

@@ -57,61 +57,67 @@ def get_live_sport_schedule(sport: str = "NBA") -> Dict[str, Any]:
     today_dt = dt_cls.now()
     today_str = today_dt.strftime("%b %d, %Y")
 
-    try:
-        r = requests.get(url, timeout=5)
-        if r.status_code == 200:
-            events = r.json().get("events", [])
-            for ev in events:
-                status_obj = ev.get("status", {})
-                status_type = status_obj.get("type", {})
-                state = status_type.get("state", "pre").lower()  # 'pre', 'in', 'post'
-                detail = str(status_type.get("shortDetail") or status_type.get("detail") or "").upper()
-                type_name = str(status_type.get("name", "")).upper()
-                is_completed = bool(status_type.get("completed", False))
+    dates_to_check = [
+        today_dt.strftime("%Y%m%d"),
+        (today_dt + datetime.timedelta(days=1)).strftime("%Y%m%d"),
+    ]
 
-                # STRICT GAME-STATE GATE: drop finished/final/postponed games
-                if is_completed or state == "post" or "FINAL" in detail or "FINAL" in type_name:
-                    continue
-                if "POSTPONED" in detail or "CANCELED" in detail:
-                    continue
-                if state not in ("pre", "in"):
-                    continue
+    for d_str in dates_to_check:
+        try:
+            r = requests.get(f"{url}?dates={d_str}", timeout=5)
+            if r.status_code == 200:
+                events = r.json().get("events", [])
+                for ev in events:
+                    status_obj = ev.get("status", {})
+                    status_type = status_obj.get("type", {})
+                    state = status_type.get("state", "pre").lower()  # 'pre', 'in', 'post'
+                    detail = str(status_type.get("shortDetail") or status_type.get("detail") or "").upper()
+                    type_name = str(status_type.get("name", "")).upper()
+                    is_completed = bool(status_type.get("completed", False))
 
-                ev_date_raw = ev.get("date", "")
-                game_time_str = _format_espn_game_time(ev_date_raw, detail, state)
+                    # STRICT GAME-STATE GATE: drop finished/final/postponed games
+                    if is_completed or state == "post" or "FINAL" in detail or "FINAL" in type_name:
+                        continue
+                    if "POSTPONED" in detail or "CANCELED" in detail:
+                        continue
+                    if state not in ("pre", "in"):
+                        continue
 
-                comps = ev.get("competitions", [{}])[0]
-                competitors = comps.get("competitors", [])
-                home_abbr, away_abbr = "HOME", "AWAY"
-                game_teams: List[str] = []
+                    ev_date_raw = ev.get("date", "")
+                    game_time_str = _format_espn_game_time(ev_date_raw, detail, state)
 
-                for comp in competitors:
-                    t = comp.get("team", {})
-                    abbr = str(t.get("abbreviation") or t.get("shortDisplayName") or "").upper()
-                    if comp.get("homeAway") == "home":
-                        home_abbr = abbr
-                    else:
-                        away_abbr = abbr
-                    for k in ("abbreviation", "displayName", "name", "shortDisplayName"):
-                        val = t.get(k)
-                        if val:
-                            active_teams.add(str(val).upper())
-                            game_teams.append(str(val).upper())
+                    comps = ev.get("competitions", [{}])[0]
+                    competitors = comps.get("competitors", [])
+                    home_abbr, away_abbr = "HOME", "AWAY"
+                    game_teams: List[str] = []
 
-                matchup_label = f"{away_abbr} @ {home_abbr}"
-                game_info = {
-                    "matchup": matchup_label,
-                    "game_date": game_time_str,
-                    "state": state,
-                    "home": home_abbr,
-                    "away": away_abbr,
-                    "raw_date": ev_date_raw,
-                }
+                    for comp in competitors:
+                        t = comp.get("team", {})
+                        abbr = str(t.get("abbreviation") or t.get("shortDisplayName") or "").upper()
+                        if comp.get("homeAway") == "home":
+                            home_abbr = abbr
+                        else:
+                            away_abbr = abbr
+                        for k in ("abbreviation", "displayName", "name", "shortDisplayName"):
+                            val = t.get(k)
+                            if val:
+                                active_teams.add(str(val).upper())
+                                game_teams.append(str(val).upper())
 
-                for gt in game_teams:
-                    team_games[gt] = game_info
-    except Exception:
-        logging.exception("get_live_sport_schedule failed")
+                    matchup_label = f"{away_abbr} @ {home_abbr}"
+                    game_info = {
+                        "matchup": matchup_label,
+                        "game_date": game_time_str,
+                        "state": state,
+                        "home": home_abbr,
+                        "away": away_abbr,
+                        "raw_date": ev_date_raw,
+                    }
+
+                    for gt in game_teams:
+                        team_games[gt] = game_info
+        except Exception:
+            logging.exception("get_live_sport_schedule date sweep failed")
 
     result = {
         "active_teams": active_teams,
@@ -199,12 +205,13 @@ def is_real_live_game_contract(market: dict, active_teams: Optional[Set[str]] = 
     ticker = str(market.get("ticker", "")).upper()
     title = str(market.get("title", "")).upper()
     subtitle = str(market.get("subtitle", "")).upper()
-    blob = f"{ticker} {title} {subtitle}"
+    ev_tkr = str(market.get("event_ticker", "")).upper()
+    blob = f"{ticker} {title} {subtitle} {ev_tkr}"
 
     # Rule 1: Hard reject non-daily markets and career stats
     if any(bad in ticker for bad in ("CAREER", "SEASON", "RECORD", "AWARD", "LEADER", "HOF", "CHAMP")):
         return False
-    if not re.search(r"26(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}", ticker):
+    if not re.search(r"(?:24|25|26|27)(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}", f"{ticker} {ev_tkr}"):
         return False
 
     # Rule 2: Hard reject strike <= 0

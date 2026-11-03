@@ -860,7 +860,7 @@ NOVELTY_BANNED_WORDS = (
 
 
 def normalize_kalshi_market(m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
+    r"""
     Initial market ingestion filter:
     1. Check ticker: if it contains CAREER, SEASON, RECORD, AWARD, LEADER, HOF, CHAMP,
        or does NOT contain a valid daily game date stamp matching 26(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2},

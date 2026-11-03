@@ -60,7 +60,7 @@ from sim_core import (
 )
 
 
-DAILY_DATE_CODE_REGEX = re.compile(r"26(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}", re.I)
+DAILY_DATE_CODE_REGEX = re.compile(r"(?:24|25|26|27)(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}", re.I)
 LAST_SIM_RESULT: Dict[str, Any] = {}
 BANNED_FUTURES_WORDS = ("CAREER", "SEASON", "RECORD", "AWARD", "LEADER", "HOF", "CHAMP")
 

@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import requests
 
 DAILY_DATE_CODE_REGEX = re.compile(
-    r"26(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}", re.I
+    r"(?:24|25|26|27)(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}", re.I
 )
 
 ALLOWED_SPORTS_PREFIXES = (

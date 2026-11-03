@@ -291,25 +291,47 @@ def format_espn_tip_time(iso_date_str: str, detail_str: str = "") -> Tuple[str, 
 
 def fetch_espn_today_scoreboard(raw_json: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, Any]]:
     """
-    Fetches today's live ESPN NBA scoreboard and maps each game strictly by exact numeric
-    ESPN team ID (e.g. 12 for LAC, 13 for LAL, 9 for GSW, 28 for TOR) or canonical abbreviation.
+    Fetches today's and upcoming live ESPN NBA scoreboard across active dates and maps each game
+    strictly by exact numeric ESPN team ID (e.g. 12 for LAC, 13 for LAL, 9 for GSW, 28 for TOR)
+    or canonical abbreviation.
     If `raw_json` is provided (e.g. in unit tests), parses it directly without network requests.
     Returns: team_abbr -> game_info
     """
+    events_list = []
     if raw_json is not None:
-        data = raw_json
+        events_list = raw_json.get("events", [])
     else:
-        url = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
+        now_dt = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=5)
+        dates_to_check = [
+            now_dt.strftime("%Y%m%d"),
+            (now_dt + datetime.timedelta(days=1)).strftime("%Y%m%d"),
+            (now_dt + datetime.timedelta(days=2)).strftime("%Y%m%d"),
+        ]
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=6) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except Exception:
-            return {}
+        seen_gids = set()
+        for d_str in dates_to_check:
+            url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates={d_str}"
+            try:
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    ev_data = json.loads(resp.read().decode("utf-8"))
+                    for ev in ev_data.get("events", []):
+                        gid = str(ev.get("id") or "")
+                        if gid and gid not in seen_gids:
+                            seen_gids.add(gid)
+                            events_list.append(ev)
+            except Exception:
+                pass
+        if not events_list:
+            try:
+                req = urllib.request.Request("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard", headers=headers)
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    events_list = json.loads(resp.read().decode("utf-8")).get("events", [])
+            except Exception:
+                pass
 
     team_map: Dict[str, Dict[str, Any]] = {}
-    for ev in data.get("events", []):
+    for ev in events_list:
         gid = str(ev.get("id") or "")
         comps = ev.get("competitions") or [{}]
         c = comps[0] if comps else {}
@@ -343,8 +365,14 @@ def fetch_espn_today_scoreboard(raw_json: Optional[Dict[str, Any]] = None) -> Di
             "detail": detail,
         }
 
-        team_map[home_abbr] = game_info
-        team_map[away_abbr] = game_info
+        for tm in (home_abbr, away_abbr):
+            existing = team_map.get(tm)
+            if not existing:
+                team_map[tm] = game_info
+            elif existing.get("state") in ("post", "final") and state in ("pre", "in"):
+                team_map[tm] = game_info
+            elif state == "in" and existing.get("state") == "pre":
+                team_map[tm] = game_info
 
     return team_map
 
@@ -443,24 +471,28 @@ def parse_completed_event(e: Dict[str, Any], abbr_map: Dict[str, str]) -> Option
     }
 
 
-def print_and_verify_game_counts(results: List[Tuple[str, str, str, int, int]]) -> None:
+def print_and_verify_game_counts(results: List[Tuple[str, str, str, int, int]], verbose: bool = False) -> None:
     """Prints completed regular-season game counts per team and aborts loudly if any team returns zero or total < 1,000."""
     team_counts: Counter = Counter()
     for _, home, away, _, _ in results:
         team_counts[home] += 1
         team_counts[away] += 1
 
-    print("\n" + "=" * 65)
-    print("  COMPLETED NBA REGULAR-SEASON GAMES PER TEAM")
-    print("=" * 65)
     zero_teams = []
     for tm in sorted(NBA_TEAMS.keys()):
         cnt = team_counts[tm]
-        print(f"  {tm:4s}: {cnt:4d} games")
         if cnt == 0:
             zero_teams.append(tm)
-    print(f"  Total Unique Completed Games: {len(results)}")
-    print("=" * 65 + "\n", flush=True)
+
+    if verbose:
+        print("\n" + "=" * 65)
+        print("  COMPLETED NBA REGULAR-SEASON GAMES PER TEAM")
+        print("=" * 65)
+        for tm in sorted(NBA_TEAMS.keys()):
+            cnt = team_counts[tm]
+            print(f"  {tm:4s}: {cnt:4d} games")
+        print(f"  Total Unique Completed Games: {len(results)}")
+        print("=" * 65 + "\n", flush=True)
 
     if zero_teams:
         raise RuntimeError(
@@ -490,7 +522,7 @@ def build_nba_results_table(seasons=(2025, 2026, 2027), verbose=False) -> List[T
                     if all(team_counts.get(tm, 0) > 0 for tm in NBA_TEAMS):
                         if verbose:
                             print(f"Loaded {len(cached)} games from cache ({RESULTS_CACHE_FILE}).")
-                        print_and_verify_game_counts(cached)
+                        print_and_verify_game_counts(cached, verbose=verbose)
                         return [tuple(r) for r in cached]
                     elif verbose:
                         print("Cached file contains missing teams. Re-fetching fresh games from ESPN...")
@@ -539,7 +571,7 @@ def build_nba_results_table(seasons=(2025, 2026, 2027), verbose=False) -> List[T
     results = sorted(list(all_games_map.values()), key=lambda r: r[0])
 
     # Print completed game counts per team and perform loud abort if zero games or < 1,000 games
-    print_and_verify_game_counts(results)
+    print_and_verify_game_counts(results, verbose=verbose)
 
     # Only write cache if results contain at least 1,000 games
     if len(results) >= 1000:
